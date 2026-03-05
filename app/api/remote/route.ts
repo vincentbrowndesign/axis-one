@@ -1,6 +1,5 @@
-// app/api/remote/route.ts
-import { NextResponse } from "next/server";
-import Pusher from "pusher";
+import { NextResponse } from "next/server"
+import Pusher from "pusher"
 
 const pusher = new Pusher({
 appId: process.env.PUSHER_APP_ID!,
@@ -8,32 +7,35 @@ key: process.env.PUSHER_KEY!,
 secret: process.env.PUSHER_SECRET!,
 cluster: process.env.PUSHER_CLUSTER!,
 useTLS: true,
-});
+})
 
 export async function POST(req: Request) {
 try {
-const body = await req.json();
-const sid = String(body?.sid || "");
-const type = String(body?.type || "");
-const payload = body?.payload ?? {};
+const body = await req.json()
 
-if (!sid) return NextResponse.json({ ok: false, error: "Missing sid" }, { status: 400 });
-if (!type) return NextResponse.json({ ok: false, error: "Missing type" }, { status: 400 });
+const sid = body.sid
+const type = body.type
 
-// Public channel name derived from session id
-const channel = `axis-${sid}`;
+if (!sid || !type) {
+return NextResponse.json(
+{ error: "Missing sid or type" },
+{ status: 400 }
+)
+}
+
+const channel = `axis-${sid}`
 
 await pusher.trigger(channel, "control", {
 type,
-payload,
-sentAt: Date.now(),
-});
+time: Date.now(),
+})
 
-return NextResponse.json({ ok: true });
-} catch (err: any) {
+return NextResponse.json({ ok: true })
+} catch (err) {
+console.error(err)
 return NextResponse.json(
-{ ok: false, error: err?.message || "Unknown error" },
+{ error: "Server error" },
 { status: 500 }
-);
+)
 }
 }
