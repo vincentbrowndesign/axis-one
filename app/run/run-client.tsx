@@ -1,336 +1,353 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import AxisLineCanvas from "@/components/AxisLineCanvas";
-import { makePusherClient } from "@/lib/pusher-client";
-
-type RunState = "idle" | "ready" | "capturing";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type Sample = {
-t: number;
+t: number; // ms timestamp
 ax: number;
 ay: number;
 az: number;
-amag: number; // accel+gravity magnitude
+mag: number; // sqrt(ax^2+ay^2+az^2)
 };
-
-function id(prefix = "sess_") {
-return prefix + Math.random().toString(36).slice(2, 14);
-}
 
 function clamp(n: number, lo: number, hi: number) {
 return Math.max(lo, Math.min(hi, n));
 }
 
-// Simple high-pass-ish: y[n] = a*(y[n-1] + x[n] - x[n-1])
-function hpFilter(series: number[], a = 0.92) {
-const out: number[] = [];
-let y = 0;
-let prev = series[0] ?? 0;
-for (let i = 0; i < series.length; i++) {
-const x = series[i] ?? 0;
-y = a * (y + x - prev);
-out.push(y);
-prev = x;
-}
-return out;
+function nowMs() {
+return typeof performance !== "undefined" && performance.now
+? performance.now()
+: Date.now();
 }
 
+const btnStyle: React.CSSProperties = {
+padding: "10px 12px",
+borderRadius: 10,
+border: "1px solid rgba(255,255,255,0.16)",
+background: "rgba(255,255,255,0.06)",
+color: "white",
+cursor: "pointer",
+};
+
+function StatCard({ label, value }: { label: string; value: string }) {
+return (
+<div
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 12,
+padding: 12,
+background: "rgba(255,255,255,0.03)",
+}}
+>
+<div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
+<div style={{ fontSize: 20, marginTop: 6 }}>{value}</div>
+</div>
+);
+}
+
+/**
+* Axis Run (Pusher-safe)
+* - NEVER crashes if env vars are missing
+* - Uses DeviceMotion to generate a live axis line
+*/
 export default function RunClient() {
-const [runState, setRunState] = useState<RunState>("idle");
-const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
-const [sessionId, setSessionId] = useState<string>(() => id());
-const [samples, setSamples] = useState<Sample[]>([]);
-const [tags, setTags] = useState<number>(0);
-const [lastCmd, setLastCmd] = useState<string>("");
+// SAFE env reads — never throw
+const PUSHER_KEY = process.env.NEXT_PUBLIC_PUSHER_KEY ?? "";
+const PUSHER_CLUSTER = process.env.NEXT_PUBLIC_PUSHER_CLUSTER ?? "us2";
+const PUSHER_ENABLED = PUSHER_KEY.length > 0 && PUSHER_CLUSTER.length > 0;
 
-const capturingRef = useRef(false);
+const [permissionState, setPermissionState] = useState<
+"unknown" | "granted" | "denied" | "not-needed"
+>("unknown");
+
+const [isRunning, setIsRunning] = useState(false);
+const [status, setStatus] = useState<string>(() =>
+PUSHER_ENABLED ? "Ready" : "Ready (Realtime disabled)"
+);
+
+const [samples, setSamples] = useState<Sample[]>([]);
+const bufRef = useRef<Sample[]>([]);
 const rafRef = useRef<number | null>(null);
 
-// iOS motion
-const lastAccelRef = useRef<{ x: number; y: number; z: number } | null>(null);
-const lastAccelGRef = useRef<{ x: number; y: number; z: number } | null>(null);
+const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
-const channelName = useMemo(() => `private-axis-${sessionId}`, [sessionId]);
-
-// Subscribe to remote commands
-useEffect(() => {
-const p = makePusherClient();
-const ch = p.subscribe(channelName);
-
-const handler = (payload: any) => {
-const action = String(payload?.action || "");
-setLastCmd(action);
-
-if (action === "START") doStart();
-if (action === "STOP") doStop();
-if (action === "TAG") doTag();
-if (action === "DECISION") doDecision();
-};
-
-ch.bind("remote-command", handler);
-
-return () => {
+async function requestMotionPermission() {
 try {
-ch.unbind("remote-command", handler);
-p.unsubscribe(channelName);
-p.disconnect();
-} catch {}
-};
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [channelName]);
+const anyWindow = window as any;
+const DeviceMotionEventAny = anyWindow.DeviceMotionEvent;
 
-// DeviceMotion listener (does nothing until capturingRef true)
+if (
+DeviceMotionEventAny &&
+typeof DeviceMotionEventAny.requestPermission === "function"
+) {
+const res = await DeviceMotionEventAny.requestPermission();
+if (res === "granted") {
+setPermissionState("granted");
+setStatus("Motion permission granted");
+} else {
+setPermissionState("denied");
+setStatus("Motion permission denied");
+}
+} else {
+setPermissionState("not-needed");
+setStatus("Motion permission not required");
+}
+} catch (e: any) {
+setPermissionState("denied");
+setStatus(`Motion permission error: ${String(e?.message ?? e)}`);
+}
+}
+
+function start() {
+bufRef.current = [];
+setSamples([]);
+setIsRunning(true);
+setStatus(PUSHER_ENABLED ? "Running" : "Running (Realtime disabled)");
+}
+
+function stop() {
+setIsRunning(false);
+setStatus("Stopped");
+}
+
+function reset() {
+bufRef.current = [];
+setSamples([]);
+setStatus("Reset");
+}
+
+// DeviceMotion listener
 useEffect(() => {
-const onMotion = (e: DeviceMotionEvent) => {
-// prefer accel+gravity (includes gravity) for your “structure under load” baseline
-const ag = e.accelerationIncludingGravity;
-const a = e.acceleration;
+if (!isRunning) return;
 
-if (a && (a.x !== null || a.y !== null || a.z !== null)) {
-lastAccelRef.current = {
-x: Number(a.x ?? 0),
-y: Number(a.y ?? 0),
-z: Number(a.z ?? 0),
-};
-}
-if (ag && (ag.x !== null || ag.y !== null || ag.z !== null)) {
-lastAccelGRef.current = {
-x: Number(ag.x ?? 0),
-y: Number(ag.y ?? 0),
-z: Number(ag.z ?? 0),
-};
-}
-};
+const onMotion = (ev: DeviceMotionEvent) => {
+const a = ev.accelerationIncludingGravity || ev.acceleration;
+const ax = a?.x ?? 0;
+const ay = a?.y ?? 0;
+const az = a?.z ?? 0;
+const mag = Math.sqrt(ax * ax + ay * ay + az * az);
 
-window.addEventListener("devicemotion", onMotion);
-return () => window.removeEventListener("devicemotion", onMotion);
-}, []);
-
-// capture loop
-const pump = () => {
-if (!capturingRef.current) return;
-
-const ag = lastAccelGRef.current;
-const a = lastAccelRef.current;
-
-// if no sensor data, keep looping but don't push garbage
-if (ag) {
-const amag = Math.sqrt(ag.x * ag.x + ag.y * ag.y + ag.z * ag.z);
-const now = performance.now();
-
-setSamples((prev) => {
-const next: Sample[] = [
-...prev,
-{
-t: now,
-ax: a?.x ?? 0,
-ay: a?.y ?? 0,
-az: a?.z ?? 0,
-amag,
-},
-];
-
-// keep last ~10 seconds at ~60hz = ~600 samples (lightweight)
-const max = 700;
-if (next.length > max) return next.slice(next.length - max);
-return next;
+bufRef.current.push({
+t: nowMs(),
+ax,
+ay,
+az,
+mag,
 });
 
-setRunState("capturing");
+if (bufRef.current.length > 600) {
+bufRef.current.splice(0, bufRef.current.length - 600);
 }
-
-rafRef.current = requestAnimationFrame(pump);
 };
 
-const enableSensors = async () => {
-try {
-// iOS requires permission request
-const anyDM = DeviceMotionEvent as any;
-if (typeof anyDM?.requestPermission === "function") {
-const res = await anyDM.requestPermission();
-if (res !== "granted") {
-setPermission("denied");
+window.addEventListener("devicemotion", onMotion, { passive: true });
+
+return () => {
+window.removeEventListener("devicemotion", onMotion as any);
+};
+}, [isRunning]);
+
+// Snapshot buffer to state 10x/sec
+useEffect(() => {
+if (!isRunning) return;
+
+const id = window.setInterval(() => {
+setSamples([...bufRef.current]);
+}, 100);
+
+return () => window.clearInterval(id);
+}, [isRunning]);
+
+// Draw axis line
+useEffect(() => {
+const canvas = canvasRef.current;
+if (!canvas) return;
+
+const ctx = canvas.getContext("2d");
+if (!ctx) return;
+
+const draw = () => {
+const w = canvas.width;
+const h = canvas.height;
+
+// background
+ctx.clearRect(0, 0, w, h);
+ctx.fillStyle = "#0b0b0b";
+ctx.fillRect(0, 0, w, h);
+
+// grid
+ctx.strokeStyle = "rgba(255,255,255,0.08)";
+ctx.lineWidth = 1;
+for (let i = 1; i < 6; i++) {
+const y = (h * i) / 6;
+ctx.beginPath();
+ctx.moveTo(0, y);
+ctx.lineTo(w, y);
+ctx.stroke();
+}
+
+const data = samples;
+if (data.length < 2) {
+ctx.fillStyle = "rgba(255,255,255,0.7)";
+ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto";
+ctx.fillText("No signal yet — start run and move the device.", 14, 24);
+rafRef.current = requestAnimationFrame(draw);
 return;
 }
+
+// magnitude list
+const mags = data.map((s) => s.mag);
+
+// baseline = average of last N samples
+const N = Math.min(60, mags.length);
+const tail = mags.slice(mags.length - N);
+const baseline =
+tail.reduce((acc, v) => acc + v, 0) / Math.max(1, tail.length);
+
+const dev = mags.map((m) => m - baseline);
+
+const maxAbs = Math.max(1, ...dev.map((d) => Math.abs(d)));
+const yMid = h * 0.5;
+
+// midline
+ctx.strokeStyle = "rgba(255,255,255,0.18)";
+ctx.beginPath();
+ctx.moveTo(0, yMid);
+ctx.lineTo(w, yMid);
+ctx.stroke();
+
+// axis line
+ctx.strokeStyle = "rgba(0,255,180,0.9)";
+ctx.lineWidth = 2;
+ctx.beginPath();
+for (let i = 0; i < dev.length; i++) {
+const x = (w * i) / (dev.length - 1);
+const y = yMid - (dev[i] / maxAbs) * (h * 0.35);
+if (i === 0) ctx.moveTo(x, y);
+else ctx.lineTo(x, y);
 }
-setPermission("granted");
-setRunState("ready");
-} catch {
-setPermission("denied");
-}
+ctx.stroke();
+
+// label
+ctx.fillStyle = "rgba(255,255,255,0.75)";
+ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto";
+ctx.fillText(
+`Axis line (deviation) • samples: ${data.length} • baseline: ${baseline.toFixed(
+2
+)}`,
+14,
+h - 14
+);
+
+rafRef.current = requestAnimationFrame(draw);
 };
 
-const doStart = () => {
-if (permission !== "granted") return;
-if (capturingRef.current) return;
+if (rafRef.current) cancelAnimationFrame(rafRef.current);
+rafRef.current = requestAnimationFrame(draw);
 
-capturingRef.current = true;
-setLastCmd("START");
-rafRef.current = requestAnimationFrame(pump);
-};
-
-const doStop = () => {
-capturingRef.current = false;
+return () => {
 if (rafRef.current) cancelAnimationFrame(rafRef.current);
 rafRef.current = null;
-setRunState(permission === "granted" ? "ready" : "idle");
-setLastCmd("STOP");
 };
-
-const doTag = () => {
-setTags((t) => t + 1);
-setLastCmd("TAG");
-};
-
-const doDecision = () => {
-// for now, decision = tag (you can split later)
-setTags((t) => t + 1);
-setLastCmd("DECISION");
-};
-
-const downloadJSON = () => {
-const payload = {
-exported_at: new Date().toISOString(),
-session_id: sessionId,
-samples_count: samples.length,
-tags_count: tags,
-samples,
-};
-const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
-const url = URL.createObjectURL(blob);
-const a = document.createElement("a");
-a.href = url;
-a.download = `axis-one-session-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-a.click();
-URL.revokeObjectURL(url);
-};
-
-// Axis Line series
-const axisLine = useMemo(() => {
-if (!samples.length) return [];
-const mags = samples.map((s) => s.amag);
-const filtered = hpFilter(mags, 0.92);
-// keep it visually stable
-const scaled = filtered.map((v) => clamp(v, -15, 15));
-return scaled;
 }, [samples]);
 
+const metrics = useMemo(() => {
+if (samples.length < 2) {
+return { peak: 0, avg: 0, stability: 100 };
+}
+const mags = samples.map((s) => s.mag);
+const peak = Math.max(...mags);
+const avg = mags.reduce((a, b) => a + b, 0) / mags.length;
+
+const variance =
+mags.reduce((acc, v) => acc + (v - avg) * (v - avg), 0) / mags.length;
+const std = Math.sqrt(variance);
+
+const stability = clamp(100 - std * 8, 0, 100);
+return { peak, avg, stability };
+}, [samples]);
+
+// Never blocks the app if realtime env missing
+useEffect(() => {
+if (!PUSHER_ENABLED) return;
+// noop (realtime can be added later safely)
+}, [PUSHER_ENABLED]);
+
 return (
-<main className="min-h-screen bg-black text-white px-5 py-10">
-<div className="max-w-xl mx-auto space-y-6">
-<header>
-<h1 className="text-5xl font-semibold tracking-tight">Run (Axis One)</h1>
-<p className="text-white/60 mt-2">
-Capture motion, tag decision windows, export the session.
-</p>
-<div className="text-white/40 text-sm mt-3">
-Session: <span className="text-white/70">{sessionId}</span>{" "}
-{lastCmd ? (
-<span className="ml-3 text-white/40">
-last: <span className="text-white/70">{lastCmd}</span>
-</span>
-) : null}
-</div>
-</header>
-
-<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
-<div className="text-white/40 text-sm mb-2">Axis One • Run</div>
-<div className="text-4xl font-semibold">
-{permission === "granted" ? (runState === "capturing" ? "Capturing…" : "Permission granted.") : "Idle"}
+<div
+style={{
+minHeight: "100vh",
+background: "#050505",
+color: "white",
+padding: 16,
+fontFamily:
+"system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+}}
+>
+<div style={{ maxWidth: 980, margin: "0 auto" }}>
+<div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+<h1 style={{ fontSize: 22, margin: 0 }}>Axis Run</h1>
+<div style={{ opacity: 0.7, fontSize: 13 }}>{status}</div>
 </div>
 
-<div className="grid grid-cols-2 gap-4 mt-6">
-<button
-onClick={enableSensors}
-className="rounded-3xl border border-white/10 bg-white/10 px-6 py-7 text-xl font-semibold active:scale-[0.99]"
->
-1) Enable
-<br />
-Sensors
+<div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+<button onClick={requestMotionPermission} style={btnStyle} type="button">
+Motion Permission
 </button>
 
-<button
-onClick={doStart}
-disabled={permission !== "granted"}
-className="rounded-3xl px-6 py-7 text-xl font-semibold bg-white text-black disabled:opacity-40 active:scale-[0.99]"
->
-2) Start
+{!isRunning ? (
+<button onClick={start} style={btnStyle} type="button">
+Start
 </button>
-
-<button
-onClick={doStop}
-disabled={runState !== "capturing"}
-className="rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
->
+) : (
+<button onClick={stop} style={btnStyle} type="button">
 Stop
 </button>
+)}
 
-<button
-onClick={doDecision}
-disabled={runState !== "capturing"}
-className="rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
->
-Decision
-</button>
-
-<button
-onClick={doTag}
-disabled={runState !== "capturing"}
-className="col-span-2 rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
->
-3) Tag
-</button>
-
-<button
-onClick={downloadJSON}
-className="col-span-2 rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold active:scale-[0.99]"
->
-Download JSON
+<button onClick={reset} style={btnStyle} type="button">
+Reset
 </button>
 </div>
-</section>
 
-<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
-<div className="flex items-center justify-between">
-<h2 className="text-3xl font-semibold">Axis Line</h2>
-<div className="text-white/50">live signal</div>
+<div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
+Permission: <b>{permissionState}</b> • Realtime:{" "}
+<b>{PUSHER_ENABLED ? "enabled" : "disabled"}</b>
 </div>
 
-<div className="mt-4 rounded-3xl border border-white/10 bg-black/40 p-3">
-<AxisLineCanvas data={axisLine} height={160} />
+<div style={{ marginTop: 14 }}>
+<canvas
+ref={canvasRef}
+width={920}
+height={360}
+style={{
+width: "100%",
+height: "auto",
+borderRadius: 12,
+border: "1px solid rgba(255,255,255,0.12)",
+background: "#0b0b0b",
+}}
+/>
 </div>
 
-<p className="text-white/45 mt-3">
-(Stable high-pass signal from accel+gravity magnitude. Next step is D/R/J extraction.)
-</p>
-</section>
+<div
+style={{
+marginTop: 14,
+display: "grid",
+gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+gap: 10,
+}}
+>
+<StatCard label="Avg Magnitude" value={metrics.avg.toFixed(2)} />
+<StatCard label="Peak Magnitude" value={metrics.peak.toFixed(2)} />
+<StatCard label="Stability" value={`${metrics.stability.toFixed(0)}%`} />
+</div>
 
-<section className="grid grid-cols-2 gap-4">
-<div className="rounded-3xl border border-white/10 bg-white/5 p-5">
-<div className="text-white/45">Samples</div>
-<div className="text-6xl font-semibold mt-2">{samples.length}</div>
-<div className="text-white/35 mt-1">~60 Hz</div>
-</div>
-<div className="rounded-3xl border border-white/10 bg-white/5 p-5">
-<div className="text-white/45">Tags</div>
-<div className="text-6xl font-semibold mt-2">{tags}</div>
-<div className="text-white/35 mt-1">Decision events</div>
-</div>
-</section>
-
-<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
-<div className="text-white/50 text-sm mb-2">Pairing</div>
-<div className="text-white/80">
-Open Controller on another device:
-<div className="mt-2 font-mono text-white/70 break-all">
-{typeof window !== "undefined"
-? `${window.location.origin}/control?sid=${encodeURIComponent(sessionId)}`
-: ""}
+<div style={{ marginTop: 14, opacity: 0.65, fontSize: 12 }}>
+Tip: On iPhone, tap <b>Motion Permission</b> once, then <b>Start</b>.
+Keep the phone on-body (pocket, waist, chest) to see cleaner curves.
 </div>
 </div>
-</section>
 </div>
-</main>
 );
 }
