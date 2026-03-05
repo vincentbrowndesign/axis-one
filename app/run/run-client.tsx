@@ -1,283 +1,272 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import Link from "next/link";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-type Accel = { x: number | null; y: number | null; z: number | null };
-type Gyro = { alpha: number | null; beta: number | null; gamma: number | null };
+type Vec3 = { x: number; y: number; z: number };
 
-type Sample = {
+type AxisOneSample = {
 t: number; // epoch ms
-dt: number; // ms since start
-accel: Accel; // m/s^2 (or device-provided)
-accelIncludingGravity: Accel;
-gyro: Gyro; // deg/s-ish (browser dependent)
-rotationRate: Gyro; // from DeviceMotionEvent rotationRate (if available)
+accel?: Vec3; // m/s^2-ish (linear accel)
+accelIncludingGravity: Vec3; // m/s^2-ish (includes gravity)
+rotationRate: { alpha: number; beta: number; gamma: number }; // deg/s-ish on iOS
+orientation?: { alpha: number; beta: number; gamma: number }; // degrees
 };
 
-type Tag = {
+type AxisTag = {
 t: number; // epoch ms
 dt: number; // ms since start
-label: string;
+label: "Decision";
 };
 
-function clampNum(v: any) {
-if (typeof v !== "number") return null;
-if (Number.isNaN(v)) return null;
-if (!Number.isFinite(v)) return null;
-return v;
+type ExportPayload = {
+exported_at: string;
+environment: string;
+started_at_epoch_ms: number;
+ended_at_epoch_ms: number;
+samples_count: number;
+tags_count: number;
+samples: AxisOneSample[];
+tags: AxisTag[];
+};
+
+function clamp(n: number, lo: number, hi: number) {
+return Math.max(lo, Math.min(hi, n));
 }
 
-function downloadJson(filename: string, data: unknown) {
-const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-const url = URL.createObjectURL(blob);
-const a = document.createElement("a");
-a.href = url;
-a.download = filename;
-a.click();
-URL.revokeObjectURL(url);
+function round3(n: number) {
+return Math.round(n * 1000) / 1000;
+}
+
+function safeNum(x: any) {
+const n = Number(x);
+return Number.isFinite(n) ? n : 0;
+}
+
+function toVec3(x: any, y: any, z: any): Vec3 {
+return { x: round3(safeNum(x)), y: round3(safeNum(y)), z: round3(safeNum(z)) };
+}
+
+function nowIsoForFilename(iso: string) {
+return iso.replace(/[:.]/g, "-");
+}
+
+async function requestIOSMotionPermission(): Promise<"granted" | "denied" | "unknown"> {
+// iOS Safari requires a user gesture and explicit permission
+try {
+const DME: any = (window as any).DeviceMotionEvent;
+if (DME && typeof DME.requestPermission === "function") {
+const res = await DME.requestPermission();
+return res === "granted" ? "granted" : "denied";
+}
+return "unknown"; // not iOS permission model
+} catch {
+return "denied";
+}
 }
 
 export default function RunClient() {
-const [supported, setSupported] = useState<boolean>(true);
-const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
-
+const [permission, setPermission] = useState<"idle" | "granted" | "denied" | "unknown">("idle");
 const [isCapturing, setIsCapturing] = useState(false);
-const [startEpoch, setStartEpoch] = useState<number | null>(null);
 
-const [accel, setAccel] = useState<Accel>({ x: null, y: null, z: null });
-const [accelG, setAccelG] = useState<Accel>({ x: null, y: null, z: null });
-const [gyro, setGyro] = useState<Gyro>({ alpha: null, beta: null, gamma: null });
-const [rotationRate, setRotationRate] = useState<Gyro>({ alpha: null, beta: null, gamma: null });
+const [samplesCount, setSamplesCount] = useState(0);
+const [tagsCount, setTagsCount] = useState(0);
 
-const samplesRef = useRef<Sample[]>([]);
-const tagsRef = useRef<Tag[]>([]);
-const lastTRef = useRef<number | null>(null);
+const [lastAccel, setLastAccel] = useState<Vec3 | null>(null);
+const [lastAccelG, setLastAccelG] = useState<Vec3 | null>(null);
+const [lastGyro, setLastGyro] = useState<{ alpha: number; beta: number; gamma: number } | null>(null);
+const [lastOri, setLastOri] = useState<{ alpha: number; beta: number; gamma: number } | null>(null);
 
-const [sampleCount, setSampleCount] = useState(0);
-const [tagCount, setTagCount] = useState(0);
+const samplesRef = useRef<AxisOneSample[]>([]);
+const tagsRef = useRef<AxisTag[]>([]);
+const startedAtRef = useRef<number | null>(null);
 
-const [status, setStatus] = useState<string>("Idle");
-const [label, setLabel] = useState<string>("Decision");
+const lastTickMsRef = useRef<number>(0);
+const rafRef = useRef<number | null>(null);
 
-const approxHz = useMemo(() => {
-// crude estimate: compute based on last 200 deltas if possible
-const s = samplesRef.current;
-if (s.length < 5) return null;
-const recent = s.slice(-200);
-const dts = [];
-for (let i = 1; i < recent.length; i++) dts.push(recent[i].t - recent[i - 1].t);
-const avg = dts.reduce((a, b) => a + b, 0) / dts.length;
-if (!avg || avg <= 0) return null;
-return Math.round((1000 / avg) * 10) / 10;
-}, [sampleCount]);
+const hzEstimate = useMemo(() => {
+// rough estimate based on count + duration; you can ignore
+const start = startedAtRef.current;
+if (!start || samplesCount < 2) return null;
+const durSec = (Date.now() - start) / 1000;
+if (durSec <= 0) return null;
+return samplesCount / durSec;
+}, [samplesCount]);
 
-useEffect(() => {
-// Detect support
-const hasDeviceMotion = typeof window !== "undefined" && "DeviceMotionEvent" in window;
-const hasDeviceOrientation = typeof window !== "undefined" && "DeviceOrientationEvent" in window;
-if (!hasDeviceMotion && !hasDeviceOrientation) {
-setSupported(false);
-setStatus("Not supported on this device/browser.");
-}
-}, []);
-
-async function requestPermission() {
-try {
-// iOS Safari requires explicit permission request.
-// Chrome/Android usually doesn't.
-const DME: any = (window as any).DeviceMotionEvent;
-const DOE: any = (window as any).DeviceOrientationEvent;
-
-// If either has requestPermission, call it (iOS).
-if (DME?.requestPermission) {
-const res = await DME.requestPermission();
-if (res === "granted") {
-setPermission("granted");
-setStatus("Permission granted.");
-return;
-} else {
-setPermission("denied");
-setStatus("Permission denied.");
-return;
-}
-}
-if (DOE?.requestPermission) {
-const res = await DOE.requestPermission();
-if (res === "granted") {
-setPermission("granted");
-setStatus("Permission granted.");
-return;
-} else {
-setPermission("denied");
-setStatus("Permission denied.");
-return;
-}
-}
-
-// Non-iOS: assume allowed (but may still be blocked by settings)
-setPermission("granted");
-setStatus("Permission not required (or already granted).");
-} catch (e: any) {
-setPermission("denied");
-setStatus(`Permission error: ${e?.message ?? "unknown"}`);
-}
-}
-
-function onMotion(e: DeviceMotionEvent) {
-const t = Date.now();
-const start = startEpoch ?? t;
-const dt = t - start;
-
-const a = e.acceleration || null;
-const ag = e.accelerationIncludingGravity || null;
-const rr = (e as any).rotationRate || null;
-
-const nextAccel: Accel = {
-x: clampNum(a?.x),
-y: clampNum(a?.y),
-z: clampNum(a?.z),
-};
-
-const nextAccelG: Accel = {
-x: clampNum(ag?.x),
-y: clampNum(ag?.y),
-z: clampNum(ag?.z),
-};
-
-const nextRotationRate: Gyro = {
-alpha: clampNum(rr?.alpha),
-beta: clampNum(rr?.beta),
-gamma: clampNum(rr?.gamma),
-};
-
-setAccel(nextAccel);
-setAccelG(nextAccelG);
-setRotationRate(nextRotationRate);
-
-// If you want a single "gyro" signal, rotationRate is closest we get from motion events
-setGyro(nextRotationRate);
-
-const sample: Sample = {
-t,
-dt,
-accel: nextAccel,
-accelIncludingGravity: nextAccelG,
-gyro: nextRotationRate,
-rotationRate: nextRotationRate,
-};
-
-samplesRef.current.push(sample);
-
-// keep memory sane
-if (samplesRef.current.length > 20000) {
-samplesRef.current.splice(0, 5000);
-}
-
-setSampleCount(samplesRef.current.length);
-lastTRef.current = t;
-}
-
-function onOrientation(e: DeviceOrientationEvent) {
-// Optional: some browsers supply gyro-ish data here (orientation angles)
-// We'll store to state for display only
-setGyro({
-alpha: clampNum(e.alpha),
-beta: clampNum(e.beta),
-gamma: clampNum(e.gamma),
-});
-}
-
-function startCapture() {
-if (!supported) return;
-
-const now = Date.now();
-setStartEpoch(now);
-lastTRef.current = null;
+const resetSession = useCallback(() => {
 samplesRef.current = [];
 tagsRef.current = [];
-setSampleCount(0);
-setTagCount(0);
+startedAtRef.current = null;
+lastTickMsRef.current = 0;
+setSamplesCount(0);
+setTagsCount(0);
+}, []);
 
-window.addEventListener("devicemotion", onMotion, { passive: true });
-window.addEventListener("deviceorientation", onOrientation, { passive: true });
+const enableSensors = useCallback(async () => {
+const res = await requestIOSMotionPermission();
+if (res === "granted") setPermission("granted");
+else if (res === "denied") setPermission("denied");
+else setPermission("unknown");
+}, []);
 
-setIsCapturing(true);
-setStatus("Capturing… move the device.");
-}
-
-function stopCapture() {
-window.removeEventListener("devicemotion", onMotion as any);
-window.removeEventListener("deviceorientation", onOrientation as any);
-
-setIsCapturing(false);
-setStatus("Stopped.");
-}
-
-function tagDecision(customLabel?: string) {
+const onDecision = useCallback(() => {
+if (!startedAtRef.current) return;
 const t = Date.now();
-const start = startEpoch ?? t;
-const dt = t - start;
+const dt = t - startedAtRef.current;
+tagsRef.current.push({ t, dt, label: "Decision" });
+setTagsCount(tagsRef.current.length);
+}, []);
 
-const tag: Tag = {
-t,
-dt,
-label: (customLabel ?? label).trim() || "Decision",
-};
+const stopCapture = useCallback(() => {
+setIsCapturing(false);
+}, []);
 
-tagsRef.current.push(tag);
-setTagCount(tagsRef.current.length);
-}
+const startCapture = useCallback(() => {
+// must have permission on iOS or "unknown" on other platforms is fine
+if (permission === "denied") return;
 
-function exportSession() {
-const startedAt = startEpoch ?? Date.now();
+resetSession();
+startedAtRef.current = Date.now();
+setIsCapturing(true);
+}, [permission, resetSession]);
+
+const downloadJSON = useCallback(() => {
+const startedAt = startedAtRef.current ?? Date.now();
 const endedAt = Date.now();
 
-const payload = {
+const payload: ExportPayload = {
 exported_at: new Date().toISOString(),
-environment: "axis-one",
+environment: "basketball",
 started_at_epoch_ms: startedAt,
 ended_at_epoch_ms: endedAt,
 samples_count: samplesRef.current.length,
 tags_count: tagsRef.current.length,
 samples: samplesRef.current,
-tags: tagsRef.current,
+tags: tagsRef.current, // ✅ THIS IS THE FIX
 };
 
-const stamp = new Date().toISOString().replaceAll(":", "-");
-downloadJson(`axis-one-session-${stamp}.json`, payload);
+const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+const url = URL.createObjectURL(blob);
+const a = document.createElement("a");
+a.href = url;
+a.download = `axis-one-session-${nowIsoForFilename(payload.exported_at)}.json`;
+a.click();
+URL.revokeObjectURL(url);
+}, []);
+
+// DeviceMotion handler (main capture)
+useEffect(() => {
+function onMotion(e: DeviceMotionEvent) {
+if (!isCapturing) return;
+
+const t = Date.now();
+
+// throttle slightly if Safari fires too fast; target ~60Hz
+const last = lastTickMsRef.current;
+if (last && t - last < 10) return; // ~100Hz cap
+lastTickMsRef.current = t;
+
+const a = e.acceleration; // may be null on some devices
+const ag = e.accelerationIncludingGravity;
+const rr = e.rotationRate;
+
+if (!ag || !rr) return;
+
+const accel = a ? toVec3(a.x, a.y, a.z) : undefined;
+const accelIncludingGravity = toVec3(ag.x, ag.y, ag.z);
+
+// iOS rotationRate can be alpha/beta/gamma in deg/s
+const rotationRate = {
+alpha: round3(safeNum((rr as any).alpha)),
+beta: round3(safeNum((rr as any).beta)),
+gamma: round3(safeNum((rr as any).gamma)),
+};
+
+const sample: AxisOneSample = {
+t,
+accel,
+accelIncludingGravity,
+rotationRate,
+orientation: lastOri ?? undefined,
+};
+
+samplesRef.current.push(sample);
+setSamplesCount(samplesRef.current.length);
+
+// update UI readouts
+if (accel) setLastAccel(accel);
+setLastAccelG(accelIncludingGravity);
+setLastGyro(rotationRate);
 }
 
+window.addEventListener("devicemotion", onMotion as any, { passive: true });
+return () => window.removeEventListener("devicemotion", onMotion as any);
+}, [isCapturing, lastOri]);
+
+// DeviceOrientation handler (optional, useful for future)
+useEffect(() => {
+function onOri(e: DeviceOrientationEvent) {
+const alpha = safeNum(e.alpha);
+const beta = safeNum(e.beta);
+const gamma = safeNum(e.gamma);
+
+// keep small noise down; store even if not capturing so it’s ready
+setLastOri({
+alpha: round3(alpha),
+beta: round3(beta),
+gamma: round3(gamma),
+});
+}
+
+window.addEventListener("deviceorientation", onOri as any, { passive: true });
+return () => window.removeEventListener("deviceorientation", onOri as any);
+}, []);
+
+// auto-stop safety if tab is hidden
+useEffect(() => {
+function onVis() {
+if (document.hidden) setIsCapturing(false);
+}
+document.addEventListener("visibilitychange", onVis);
+return () => document.removeEventListener("visibilitychange", onVis);
+}, []);
+
+const statusText = useMemo(() => {
+if (permission === "granted") return "Permission granted.";
+if (permission === "denied") return "Permission denied.";
+if (permission === "unknown") return "Permission not required on this device/browser.";
+return "Idle";
+}, [permission]);
+
+const capturingText = isCapturing ? "Capturing... move the device." : statusText;
+
 return (
-<div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<div className="flex items-center justify-between gap-4">
-<div>
-<div className="text-sm text-white/60">Axis One • Run</div>
-<div className="mt-1 text-lg font-semibold">{status}</div>
-</div>
-<Link href="/" className="text-sm text-white/60 hover:text-white">
-Home
-</Link>
-</div>
+<div className="min-h-screen bg-black text-white">
+<div className="mx-auto max-w-xl p-5">
+<h1 className="text-4xl font-semibold">Run (Axis One)</h1>
+<p className="mt-2 text-white/60">Capture motion, tag decision windows, export the session.</p>
 
-{!supported && (
-<div className="mt-6 rounded-xl border border-white/10 bg-black/40 p-4 text-sm text-white/70">
-This browser/device doesn’t expose motion sensors. Try Safari on iPhone or Chrome on Android.
-</div>
-)}
+<div className="mt-5 rounded-3xl border border-white/10 bg-white/5 p-5">
+<div className="text-sm text-white/50">Axis One • Run</div>
+<div className="mt-2 text-2xl font-semibold">{capturingText}</div>
 
-<div className="mt-6 flex flex-wrap gap-3">
+<div className="mt-5 grid grid-cols-2 gap-3">
 <button
-onClick={requestPermission}
-className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15"
+onClick={enableSensors}
+className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-semibold hover:bg-white/5"
 >
 1) Enable Sensors
 </button>
 
 <button
 onClick={startCapture}
-disabled={permission !== "granted" || isCapturing || !supported}
-className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black disabled:opacity-40"
+disabled={permission === "denied" || isCapturing}
+className={[
+"rounded-2xl px-4 py-3 text-sm font-semibold",
+isCapturing
+? "bg-white/10 text-white/50"
+: "bg-white text-black hover:bg-white/90",
+permission === "denied" ? "opacity-40" : "",
+].join(" ")}
 >
 2) Start
 </button>
@@ -285,99 +274,96 @@ className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black disabl
 <button
 onClick={stopCapture}
 disabled={!isCapturing}
-className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15 disabled:opacity-40"
+className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-semibold text-white/80 hover:bg-white/5 disabled:opacity-40"
 >
 Stop
 </button>
 
-<div className="flex items-center gap-2">
-<input
-value={label}
-onChange={(e) => setLabel(e.target.value)}
-placeholder="Tag label"
-className="h-9 w-40 rounded-xl border border-white/15 bg-black/40 px-3 text-sm text-white outline-none placeholder:text-white/30"
-/>
 <button
-onClick={() => tagDecision()}
+onClick={onDecision}
 disabled={!isCapturing}
-className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15 disabled:opacity-40"
+className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-semibold hover:bg-white/5 disabled:opacity-40"
 >
-3) Tag
+Decision
 </button>
-</div>
 
 <button
-onClick={exportSession}
-disabled={sampleCount === 0}
-className="rounded-xl border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold hover:bg-white/15 disabled:opacity-40"
+onClick={downloadJSON}
+disabled={samplesCount < 10}
+className="col-span-2 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm font-semibold hover:bg-white/5 disabled:opacity-40"
 >
 Download JSON
 </button>
 </div>
 
-<div className="mt-6 grid gap-4 md:grid-cols-3">
-<StatCard title="Samples" value={`${sampleCount}`} sub={approxHz ? `~${approxHz} Hz` : "—"} />
-<StatCard title="Tags" value={`${tagCount}`} sub="Decision events" />
-<StatCard title="Permission" value={permission} sub="Sensor access" />
+<div className="mt-5 grid gap-3">
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-xs text-white/50">Samples</div>
+<div className="mt-1 text-3xl font-semibold">{samplesCount}</div>
+<div className="mt-1 text-xs text-white/50">{hzEstimate ? `~${Math.round(hzEstimate)} Hz` : "—"}</div>
 </div>
 
-<div className="mt-6 grid gap-4 md:grid-cols-2">
-<Readout title="Acceleration (m/s²-ish)">
-<Line k="x" v={accel.x} />
-<Line k="y" v={accel.y} />
-<Line k="z" v={accel.z} />
-</Readout>
-
-<Readout title="Accel + Gravity">
-<Line k="x" v={accelG.x} />
-<Line k="y" v={accelG.y} />
-<Line k="z" v={accelG.z} />
-</Readout>
-
-<Readout title="Rotation Rate (gyro-ish)">
-<Line k="alpha" v={rotationRate.alpha} />
-<Line k="beta" v={rotationRate.beta} />
-<Line k="gamma" v={rotationRate.gamma} />
-</Readout>
-
-<Readout title="Orientation (angles)">
-<Line k="alpha" v={gyro.alpha} />
-<Line k="beta" v={gyro.beta} />
-<Line k="gamma" v={gyro.gamma} />
-</Readout>
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-xs text-white/50">Tags</div>
+<div className="mt-1 text-3xl font-semibold">{tagsCount}</div>
+<div className="mt-1 text-xs text-white/50">Decision events</div>
 </div>
 
-<div className="mt-6 text-xs text-white/50">
-Tip: iPhone Safari requires tapping <b>Enable Sensors</b> first. If values stay null, check iOS Settings → Safari → Motion & Orientation Access.
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-xs text-white/50">Permission</div>
+<div className="mt-1 text-3xl font-semibold">
+{permission === "idle" ? "idle" : permission}
 </div>
+<div className="mt-1 text-xs text-white/50">Sensor access</div>
 </div>
-);
-}
 
-function StatCard({ title, value, sub }: { title: string; value: string; sub: string }) {
-return (
-<div className="rounded-2xl border border-white/10 bg-black/30 p-5">
-<div className="text-xs font-semibold text-white/60">{title}</div>
-<div className="mt-2 text-2xl font-semibold">{value}</div>
-<div className="mt-1 text-xs text-white/50">{sub}</div>
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-lg font-semibold">Acceleration (m/s²-ish)</div>
+<div className="mt-3 grid grid-cols-2 gap-3 text-sm text-white/80">
+<div>x</div><div className="text-right">{lastAccel?.x ?? "—"}</div>
+<div>y</div><div className="text-right">{lastAccel?.y ?? "—"}</div>
+<div>z</div><div className="text-right">{lastAccel?.z ?? "—"}</div>
 </div>
-);
-}
-
-function Readout({ title, children }: { title: string; children: React.ReactNode }) {
-return (
-<div className="rounded-2xl border border-white/10 bg-black/30 p-5">
-<div className="text-sm font-semibold">{title}</div>
-<div className="mt-3 space-y-2">{children}</div>
 </div>
-);
-}
 
-function Line({ k, v }: { k: string; v: number | null }) {
-return (
-<div className="flex items-center justify-between text-sm">
-<div className="text-white/60">{k}</div>
-<div className="tabular-nums">{v === null ? "—" : v.toFixed(3)}</div>
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-lg font-semibold">Accel + Gravity</div>
+<div className="mt-3 grid grid-cols-2 gap-3 text-sm text-white/80">
+<div>x</div><div className="text-right">{lastAccelG?.x ?? "—"}</div>
+<div>y</div><div className="text-right">{lastAccelG?.y ?? "—"}</div>
+<div>z</div><div className="text-right">{lastAccelG?.z ?? "—"}</div>
+</div>
+</div>
+
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-lg font-semibold">Rotation Rate (gyro-ish)</div>
+<div className="mt-3 grid grid-cols-2 gap-3 text-sm text-white/80">
+<div>alpha</div><div className="text-right">{lastGyro?.alpha ?? "—"}</div>
+<div>beta</div><div className="text-right">{lastGyro?.beta ?? "—"}</div>
+<div>gamma</div><div className="text-right">{lastGyro?.gamma ?? "—"}</div>
+</div>
+</div>
+
+<div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+<div className="text-lg font-semibold">Orientation (angles)</div>
+<div className="mt-3 grid grid-cols-2 gap-3 text-sm text-white/80">
+<div>alpha</div><div className="text-right">{lastOri?.alpha ?? "—"}</div>
+<div>beta</div><div className="text-right">{lastOri?.beta ?? "—"}</div>
+<div>gamma</div><div className="text-right">{lastOri?.gamma ?? "—"}</div>
+</div>
+
+<div className="mt-4 text-xs text-white/45">
+Tip: iPhone Safari requires tapping <b>Enable Sensors</b> first. If values stay null, check iOS
+Settings → Safari → Motion & Orientation Access.
+</div>
+</div>
+</div>
+</div>
+
+<div className="mt-5 text-xs text-white/45">
+Export includes <b>samples</b> and <b>tags</b>. History uses <b>tags[].t</b> to slice decision windows.
+</div>
+</div>
 </div>
 );
 }
