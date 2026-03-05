@@ -3,7 +3,7 @@ import ControlClient from "./control-client"
 
 export default function Page() {
 return (
-<Suspense fallback={<div>Loading Control…</div>}>
+<Suspense fallback={<div style={{ padding: 24 }}>Loading Control…</div>}>
 <ControlClient />
 </Suspense>
 )
