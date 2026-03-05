@@ -1,273 +1,389 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import AxisLiveChart from "@/components/AxisLiveChart";
+import AxisLiveChart from "../../components/AxisLiveChart"; // adjust if your path differs
+
+type Vec3 = { x: number; y: number; z: number };
+type Ang3 = { alpha: number; beta: number; gamma: number };
 
 type AxisSample = {
-t: number;
-accel: { x: number; y: number; z: number };
-accelIncludingGravity: { x: number; y: number; z: number };
-rotationRate: { alpha: number; beta: number; gamma: number };
-orientation: { alpha: number; beta: number; gamma: number };
+t: number; // epoch ms
+accel: Vec3 | null;
+accelIncludingGravity: Vec3 | null;
+rotationRate: Ang3 | null; // we store alpha/beta/gamma
+orientation: Ang3 | null;
 };
 
-type AxisTag = { id: number; t: number; label: string };
-
-type AxisSessionExport = {
-exported_at: string;
-environment: string;
-started_at_epoch_ms?: number;
-ended_at_epoch_ms?: number;
-samples_count: number;
-tags_count: number;
-samples: AxisSample[];
-tags?: AxisTag[];
+type AxisTag = {
+t: number; // epoch ms
+dt: number; // ms since session start
+label: string;
 };
 
-function n(v: unknown): number {
-const x = typeof v === "number" && Number.isFinite(v) ? v : 0;
-return Math.round(x * 1000) / 1000;
+type PermissionState = "unknown" | "granted" | "denied";
+
+function clamp(n: number, a: number, b: number) {
+return Math.max(a, Math.min(b, n));
 }
 
-function downloadJson(filename: string, obj: unknown) {
-const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+function isFiniteNumber(n: any): n is number {
+return typeof n === "number" && Number.isFinite(n);
+}
+
+function mag(v: Vec3) {
+return Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+/**
+* One-pole high-pass filter.
+* y[n] = α * ( y[n-1] + x[n] - x[n-1] )
+* α = RC / (RC + dt), RC = 1 / (2π fc)
+*/
+class HighPass {
+private fc: number;
+private yPrev = 0;
+private xPrev = 0;
+private hasPrev = false;
+
+constructor(fcHz: number) {
+this.fc = fcHz;
+}
+
+reset() {
+this.yPrev = 0;
+this.xPrev = 0;
+this.hasPrev = false;
+}
+
+step(x: number, dtSec: number) {
+if (!this.hasPrev) {
+this.hasPrev = true;
+this.xPrev = x;
+this.yPrev = 0;
+return 0;
+}
+const RC = 1 / (2 * Math.PI * this.fc);
+const alpha = RC / (RC + dtSec);
+const y = alpha * (this.yPrev + x - this.xPrev);
+this.xPrev = x;
+this.yPrev = y;
+return y;
+}
+}
+
+export default function RunClient() {
+const [permission, setPermission] = useState<PermissionState>("unknown");
+const [status, setStatus] = useState<"Idle" | "Capturing">("Idle");
+
+const [samples, setSamples] = useState<AxisSample[]>([]);
+const [tags, setTags] = useState<AxisTag[]>([]);
+
+// live UI sensor readouts
+const [accel, setAccel] = useState<Vec3 | null>(null);
+const [accelG, setAccelG] = useState<Vec3 | null>(null);
+const [rot, setRot] = useState<Ang3 | null>(null);
+const [ori, setOri] = useState<Ang3 | null>(null);
+
+// Axis Line stream (numbers only)
+const [axisLine, setAxisLine] = useState<number[]>([]);
+
+const startEpochMsRef = useRef<number | null>(null);
+const lastMotionTRef = useRef<number | null>(null);
+
+// filter for Axis Line
+const hpRef = useRef<HighPass>(new HighPass(0.8)); // cutoff Hz; tweak 0.6–1.2 to taste
+
+// to prevent setState on every sensor event from exploding
+const pendingSamplesRef = useRef<AxisSample[]>([]);
+const pendingAxisRef = useRef<number[]>([]);
+const flushTimerRef = useRef<number | null>(null);
+
+const maxAxisPoints = 360; // ~6 seconds at 60Hz
+const maxSamplesStored = 60 * 60 * 3; // cap just in case (3 min at 60Hz ≈ 10,800)
+
+const canRequestPermission = useMemo(() => {
+return (
+typeof window !== "undefined" &&
+typeof (window as any).DeviceMotionEvent !== "undefined" &&
+typeof (window as any).DeviceMotionEvent.requestPermission === "function"
+);
+}, []);
+
+const canListenSensors = useMemo(() => {
+return typeof window !== "undefined" && "addEventListener" in window;
+}, []);
+
+function fmt(n: number | null | undefined, digits = 3) {
+if (!isFiniteNumber(n)) return "—";
+return n.toFixed(digits);
+}
+
+function nowMs() {
+return Date.now();
+}
+
+function ensureFlushLoop() {
+if (flushTimerRef.current != null) return;
+// flush ~10 fps so UI feels live but stable
+flushTimerRef.current = window.setInterval(() => {
+const batch = pendingSamplesRef.current;
+const axisBatch = pendingAxisRef.current;
+
+if (batch.length) {
+pendingSamplesRef.current = [];
+setSamples((prev) => {
+const next = prev.concat(batch);
+if (next.length > maxSamplesStored) {
+return next.slice(next.length - maxSamplesStored);
+}
+return next;
+});
+}
+
+if (axisBatch.length) {
+pendingAxisRef.current = [];
+setAxisLine((prev) => {
+const next = prev.concat(axisBatch);
+if (next.length > maxAxisPoints) {
+return next.slice(next.length - maxAxisPoints);
+}
+return next;
+});
+}
+}, 100);
+}
+
+function stopFlushLoop() {
+if (flushTimerRef.current != null) {
+window.clearInterval(flushTimerRef.current);
+flushTimerRef.current = null;
+}
+}
+
+async function enableSensors() {
+try {
+// iOS Safari requires explicit permission request for motion
+if (canRequestPermission) {
+const res = await (window as any).DeviceMotionEvent.requestPermission();
+if (res !== "granted") {
+setPermission("denied");
+return;
+}
+}
+setPermission("granted");
+} catch {
+// Some browsers don't support the permission API; assume user can proceed
+setPermission("granted");
+}
+}
+
+function startCapture() {
+if (permission !== "granted") return;
+
+setStatus("Capturing");
+hpRef.current.reset();
+startEpochMsRef.current = nowMs();
+lastMotionTRef.current = null;
+
+// clear current run buffers (keep if you want continuous multi-runs)
+setSamples([]);
+setTags([]);
+setAxisLine([]);
+
+pendingSamplesRef.current = [];
+pendingAxisRef.current = [];
+
+ensureFlushLoop();
+}
+
+function stopCapture() {
+setStatus("Idle");
+stopFlushLoop();
+}
+
+function addTag(label: string) {
+const start = startEpochMsRef.current;
+if (!start) return;
+const t = nowMs();
+const dt = Math.max(0, t - start);
+setTags((prev) => prev.concat([{ t, dt, label }]));
+}
+
+function downloadJSON() {
+const start = startEpochMsRef.current ?? nowMs();
+const ended = nowMs();
+
+const payload = {
+exported_at: new Date().toISOString(),
+environment: "basketball",
+started_at_epoch_ms: start,
+ended_at_epoch_ms: ended,
+samples_count: samples.length,
+tags_count: tags.length,
+samples,
+tags,
+};
+
+const blob = new Blob([JSON.stringify(payload, null, 2)], {
+type: "application/json",
+});
 const url = URL.createObjectURL(blob);
 const a = document.createElement("a");
 a.href = url;
-a.download = filename;
+a.download = `axis-one-session-${new Date()
+.toISOString()
+.replace(/[:.]/g, "-")}.json`;
 document.body.appendChild(a);
 a.click();
 a.remove();
 URL.revokeObjectURL(url);
 }
 
-async function requestMotionPermission(): Promise<{ granted: boolean; message: string }> {
-const DME = DeviceMotionEvent as unknown as { requestPermission?: () => Promise<"granted" | "denied"> };
-
-if (typeof DME?.requestPermission === "function") {
-try {
-const res = await DME.requestPermission();
-if (res === "granted") return { granted: true, message: "Permission granted." };
-return { granted: false, message: "Permission denied." };
-} catch {
-return { granted: false, message: "Permission request failed." };
-}
-}
-return { granted: true, message: "Permission granted." };
-}
-
-export default function RunClient() {
-const environment = "basketball";
-
-const [permission, setPermission] = useState<{ granted: boolean; message: string }>({
-granted: false,
-message: "Idle",
-});
-const [isRunning, setIsRunning] = useState(false);
-
-const [samplesCount, setSamplesCount] = useState(0);
-const [tagsCount, setTagsCount] = useState(0);
-
-const [lastAccel, setLastAccel] = useState({ x: 0, y: 0, z: 0 });
-const [lastAccelG, setLastAccelG] = useState({ x: 0, y: 0, z: 0 });
-const [lastGyro, setLastGyro] = useState({ alpha: 0, beta: 0, gamma: 0 });
-const [lastOri, setLastOri] = useState({ alpha: 0, beta: 0, gamma: 0 });
-
-const startedAtRef = useRef<number | undefined>(undefined);
-const endedAtRef = useRef<number | undefined>(undefined);
-
-const samplesRef = useRef<AxisSample[]>([]);
-const tagsRef = useRef<AxisTag[]>([]);
-const tagIdRef = useRef(1);
-
-// live signal buffer (Axis Line)
-const [axisLine, setAxisLine] = useState<number[]>([]);
-const axisLineRef = useRef<number[]>([]);
-const AXIS_LINE_LEN = 180;
-
-// latest refs to sample at ~60Hz
-const latestAccelRef = useRef(lastAccel);
-const latestAccelGRef = useRef(lastAccelG);
-const latestGyroRef = useRef(lastGyro);
-const latestOriRef = useRef(lastOri);
-
-useEffect(() => void (latestAccelRef.current = lastAccel), [lastAccel]);
-useEffect(() => void (latestAccelGRef.current = lastAccelG), [lastAccelG]);
-useEffect(() => void (latestGyroRef.current = lastGyro), [lastGyro]);
-useEffect(() => void (latestOriRef.current = lastOri), [lastOri]);
-
-const rafRef = useRef<number | null>(null);
-const lastPushMsRef = useRef<number>(0);
-
-// sensor listeners
 useEffect(() => {
-function onMotion(e: DeviceMotionEvent) {
+if (!canListenSensors) return;
+
+const onMotion = (e: DeviceMotionEvent) => {
+if (status !== "Capturing") return;
+
+const t = nowMs();
+
+// accel (m/s^2-ish)
 const a = e.acceleration;
 const ag = e.accelerationIncludingGravity;
-const r = e.rotationRate;
+const rr = e.rotationRate;
 
-if (a) setLastAccel({ x: n(a.x), y: n(a.y), z: n(a.z) });
-if (ag) setLastAccelG({ x: n(ag.x), y: n(ag.y), z: n(ag.z) });
+const accelNext: Vec3 | null =
+a && isFiniteNumber(a.x) && isFiniteNumber(a.y) && isFiniteNumber(a.z)
+? { x: a.x!, y: a.y!, z: a.z! }
+: null;
 
-if (r) {
-setLastGyro({
-alpha: n((r as any).alpha),
-beta: n((r as any).beta),
-gamma: n((r as any).gamma),
+const accelGNext: Vec3 | null =
+ag &&
+isFiniteNumber(ag.x) &&
+isFiniteNumber(ag.y) &&
+isFiniteNumber(ag.z)
+? { x: ag.x!, y: ag.y!, z: ag.z! }
+: null;
+
+// rotationRate fields differ across browsers; normalize to alpha/beta/gamma
+const rotNext: Ang3 | null =
+rr &&
+isFiniteNumber((rr as any).alpha) &&
+isFiniteNumber((rr as any).beta) &&
+isFiniteNumber((rr as any).gamma)
+? {
+alpha: (rr as any).alpha,
+beta: (rr as any).beta,
+gamma: (rr as any).gamma,
+}
+: null;
+
+// update readouts (cheap)
+if (accelNext) setAccel(accelNext);
+if (accelGNext) setAccelG(accelGNext);
+if (rotNext) setRot(rotNext);
+
+// Axis Line calculation (from accelIncludingGravity magnitude)
+if (accelGNext) {
+const x = mag(accelGNext);
+
+const lastT = lastMotionTRef.current;
+const dtSec =
+lastT == null ? 1 / 60 : clamp((t - lastT) / 1000, 1 / 240, 1 / 10);
+
+lastMotionTRef.current = t;
+
+const hp = hpRef.current.step(x, dtSec);
+
+// stabilize: soft clip for display
+// (keeps huge spikes from flattening everything else)
+const display = Math.tanh(hp / 3) * 3;
+
+pendingAxisRef.current.push(display);
+}
+
+const sample: AxisSample = {
+t,
+accel: accelNext,
+accelIncludingGravity: accelGNext,
+rotationRate: rotNext,
+orientation: ori, // latest orientation we have
+};
+
+pendingSamplesRef.current.push(sample);
+};
+
+const onOrientation = (e: DeviceOrientationEvent) => {
+if (status !== "Capturing") return;
+
+const alpha = (e.alpha ?? NaN) as number;
+const beta = (e.beta ?? NaN) as number;
+const gamma = (e.gamma ?? NaN) as number;
+
+if (
+isFiniteNumber(alpha) &&
+isFiniteNumber(beta) &&
+isFiniteNumber(gamma)
+) {
+const next = { alpha, beta, gamma };
+setOri(next);
+}
+};
+
+window.addEventListener("devicemotion", onMotion, { passive: true });
+window.addEventListener("deviceorientation", onOrientation, {
+passive: true,
 });
-}
-}
-
-function onOrientation(e: DeviceOrientationEvent) {
-setLastOri({ alpha: n(e.alpha), beta: n(e.beta), gamma: n(e.gamma) });
-}
-
-window.addEventListener("devicemotion", onMotion as any, { passive: true });
-window.addEventListener("deviceorientation", onOrientation as any, { passive: true });
 
 return () => {
 window.removeEventListener("devicemotion", onMotion as any);
 window.removeEventListener("deviceorientation", onOrientation as any);
 };
-}, []);
+}, [canListenSensors, status, ori]);
 
-// sampling loop (~60Hz)
-useEffect(() => {
-if (!isRunning) {
-if (rafRef.current) cancelAnimationFrame(rafRef.current);
-rafRef.current = null;
-return;
-}
+// UI helpers
+const permissionText =
+permission === "granted"
+? "granted"
+: permission === "denied"
+? "denied"
+: "—";
 
-const tick = (now: number) => {
-if (now - lastPushMsRef.current >= 1000 / 60) {
-lastPushMsRef.current = now;
-
-const t = Date.now();
-const sample: AxisSample = {
-t,
-accel: { ...latestAccelRef.current },
-accelIncludingGravity: { ...latestAccelGRef.current },
-rotationRate: { ...latestGyroRef.current },
-orientation: { ...latestOriRef.current },
-};
-
-samplesRef.current.push(sample);
-setSamplesCount(samplesRef.current.length);
-
-// ---- Axis Line signal (stable version):
-// magnitude of accelIncludingGravity, minus gravity baseline drift by using a tiny high-pass
-const ag = sample.accelIncludingGravity;
-const mag = Math.sqrt(ag.x * ag.x + ag.y * ag.y + ag.z * ag.z);
-
-// quick high-pass: mag - EMA(mag)
-const prev = axisLineRef.current;
-const emaPrev = prev.length ? prev[prev.length - 1] : mag;
-const ema = emaPrev + 0.08 * (mag - emaPrev);
-const hp = mag - ema;
-
-const next = prev.length >= AXIS_LINE_LEN ? prev.slice(1) : prev.slice();
-next.push(n(hp));
-axisLineRef.current = next;
-setAxisLine(next);
-}
-
-rafRef.current = requestAnimationFrame(tick);
-};
-
-rafRef.current = requestAnimationFrame(tick);
-return () => {
-if (rafRef.current) cancelAnimationFrame(rafRef.current);
-rafRef.current = null;
-};
-}, [isRunning]);
-
-const canStart = permission.granted && !isRunning;
-const canStop = isRunning;
-const canTag = isRunning;
-
-async function onEnableSensors() {
-const res = await requestMotionPermission();
-setPermission(res);
-}
-
-function onStart() {
-if (!permission.granted) return;
-
-if (!startedAtRef.current) startedAtRef.current = Date.now();
-endedAtRef.current = undefined;
-
-setIsRunning(true);
-}
-
-function onStop() {
-setIsRunning(false);
-endedAtRef.current = Date.now();
-}
-
-function addTag(label: string) {
-if (!isRunning) return;
-const t = Date.now();
-const tag: AxisTag = { id: tagIdRef.current++, t, label };
-tagsRef.current.push(tag);
-setTagsCount(tagsRef.current.length);
-}
-
-function onDecision() {
-addTag("decision");
-}
-
-function onTag() {
-const label = prompt("Tag label (e.g., stepback, crossover):")?.trim();
-if (!label) return;
-addTag(label);
-}
-
-function onDownload() {
-const exported: AxisSessionExport = {
-exported_at: new Date().toISOString(),
-environment,
-started_at_epoch_ms: startedAtRef.current,
-ended_at_epoch_ms: endedAtRef.current ?? (isRunning ? Date.now() : undefined),
-samples_count: samplesRef.current.length,
-tags_count: tagsRef.current.length,
-samples: samplesRef.current,
-tags: tagsRef.current,
-};
-
-const stamp = exported.exported_at.replace(/[:.]/g, "-");
-downloadJson(`axis-one-session-${stamp}.json`, exported);
-}
-
-const statusText = useMemo(() => {
-if (isRunning) return "Capturing... move the device.";
-if (permission.granted) return "Permission granted.";
-return "Idle";
-}, [isRunning, permission.granted]);
+const isCapturing = status === "Capturing";
 
 return (
 <div className="min-h-screen bg-black text-white">
-{/* Background pop */}
-<div className="pointer-events-none fixed inset-0">
-<div className="absolute -top-40 left-1/2 h-[520px] w-[520px] -translate-x-1/2 rounded-full bg-white/10 blur-3xl" />
-<div className="absolute -bottom-48 left-1/4 h-[520px] w-[520px] rounded-full bg-white/5 blur-3xl" />
-<div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,rgba(255,255,255,0.12),transparent_55%)]" />
-</div>
-
-<div className="relative mx-auto max-w-2xl px-5 py-10">
+<div className="mx-auto w-full max-w-2xl px-5 pb-16 pt-10">
 <h1 className="text-5xl font-semibold tracking-tight">Run (Axis One)</h1>
-<p className="mt-3 text-xl text-white/60">
+<p className="mt-3 text-lg text-white/55">
 Capture motion, tag decision windows, export the session.
 </p>
 
-<div className="mt-8 rounded-[28px] border border-white/10 bg-white/5 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.06),0_20px_80px_rgba(0,0,0,0.55)]">
+<div className="mt-8 rounded-[28px] border border-white/10 bg-white/[0.04] p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.05),0_40px_80px_rgba(0,0,0,0.6)]">
+<div className="flex items-start justify-between gap-4">
+<div>
 <div className="text-sm text-white/50">Axis One • Run</div>
-<div className="mt-2 text-4xl font-semibold">{statusText}</div>
+<div className="mt-2 text-5xl font-semibold leading-[1.05]">
+{permission === "granted"
+? isCapturing
+? "Capturing..."
+: "Permission granted."
+: "Idle"}
+</div>
+{isCapturing && (
+<div className="mt-2 text-2xl font-semibold text-white/85">
+move the device.
+</div>
+)}
+</div>
+<div className="text-sm text-white/40">Home</div>
+</div>
 
-<div className="mt-6 grid grid-cols-2 gap-4">
+{/* buttons grid */}
+<div className="mt-8 grid grid-cols-2 gap-4">
 <button
-onClick={onEnableSensors}
-className="rounded-2xl border border-white/10 bg-white/5 px-5 py-6 text-lg font-semibold hover:bg-white/10 active:scale-[0.99]"
+onClick={enableSensors}
+className="rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-6 text-center text-xl font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] active:scale-[0.99]"
 >
 1) Enable
 <br />
@@ -275,134 +391,153 @@ Sensors
 </button>
 
 <button
-onClick={onStart}
-disabled={!canStart}
-className="rounded-2xl bg-white px-5 py-6 text-lg font-semibold text-black hover:bg-white/90 disabled:opacity-40 active:scale-[0.99]"
+onClick={startCapture}
+disabled={permission !== "granted" || isCapturing}
+className={`rounded-2xl px-5 py-6 text-center text-xl font-semibold active:scale-[0.99] ${
+permission !== "granted" || isCapturing
+? "bg-white/15 text-white/40"
+: "bg-white text-black"
+}`}
 >
 2) Start
 </button>
 
 <button
-onClick={onStop}
-disabled={!canStop}
-className="rounded-2xl border border-white/10 bg-white/5 px-5 py-5 text-lg font-semibold hover:bg-white/10 disabled:opacity-40 active:scale-[0.99]"
+onClick={stopCapture}
+disabled={!isCapturing}
+className={`rounded-2xl border border-white/10 px-5 py-6 text-center text-xl font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] active:scale-[0.99] ${
+!isCapturing ? "bg-white/[0.03] text-white/30" : "bg-white/[0.06]"
+}`}
 >
 Stop
 </button>
 
 <button
-onClick={onDecision}
-disabled={!canTag}
-className="rounded-2xl border border-white/10 bg-white/5 px-5 py-5 text-lg font-semibold hover:bg-white/10 disabled:opacity-40 active:scale-[0.99]"
+onClick={() => addTag("Decision")}
+disabled={!isCapturing}
+className={`rounded-2xl border border-white/10 px-5 py-6 text-center text-xl font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] active:scale-[0.99] ${
+!isCapturing ? "bg-white/[0.03] text-white/30" : "bg-white/[0.06]"
+}`}
 >
 Decision
 </button>
 </div>
 
 <button
-onClick={onTag}
-disabled={!canTag}
-className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-5 py-5 text-lg font-semibold hover:bg-white/10 disabled:opacity-40 active:scale-[0.99]"
+onClick={() => addTag("Tag")}
+disabled={!isCapturing}
+className={`mt-4 w-full rounded-2xl border border-white/10 px-5 py-6 text-center text-xl font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] active:scale-[0.99] ${
+!isCapturing ? "bg-white/[0.03] text-white/30" : "bg-white/[0.06]"
+}`}
 >
 3) Tag
 </button>
 
 <button
-onClick={onDownload}
-className="mt-4 w-full rounded-2xl border border-white/10 bg-white/5 px-5 py-5 text-lg font-semibold hover:bg-white/10 active:scale-[0.99]"
+onClick={downloadJSON}
+className="mt-4 w-full rounded-2xl border border-white/10 bg-white/[0.06] px-5 py-6 text-center text-2xl font-semibold shadow-[inset_0_0_0_1px_rgba(255,255,255,0.04)] active:scale-[0.99]"
 >
 Download JSON
 </button>
 
-{/* Axis Line Card */}
-<div className="mt-6 rounded-3xl border border-white/10 bg-black/30 p-5">
+{/* Axis Line */}
+<div className="mt-6 rounded-[22px] border border-white/10 bg-black/40 p-5">
 <div className="flex items-center justify-between">
-<div className="text-lg font-semibold">Axis Line</div>
-<div className="text-xs text-white/50">live signal</div>
+<div className="text-2xl font-semibold">Axis Line</div>
+<div className="text-sm text-white/45">live signal</div>
 </div>
-<div className="mt-3">
-<AxisLiveChart data={axisLine} height={150} />
+
+<div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-black/60 p-3">
+<AxisLiveChart data={axisLine} />
 </div>
-<div className="mt-3 text-xs text-white/50">
-(This is a stable high-pass signal from accel+gravity magnitude. Next step is D/R/J extraction.)
+
+<div className="mt-3 text-sm text-white/35">
+(This is a stable high-pass signal from accel+gravity magnitude.
+Next step is D/R/J extraction.)
 </div>
 </div>
 
+{/* counters */}
 <div className="mt-6 grid grid-cols-2 gap-4">
-<div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-<div className="text-sm text-white/50">Samples</div>
-<div className="mt-1 text-5xl font-semibold">{samplesCount}</div>
-<div className="mt-1 text-white/50">~60 Hz</div>
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-sm text-white/45">Samples</div>
+<div className="mt-2 text-6xl font-semibold leading-none">
+{samples.length}
+</div>
+<div className="mt-2 text-white/35">~60 Hz</div>
 </div>
 
-<div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-<div className="text-sm text-white/50">Tags</div>
-<div className="mt-1 text-5xl font-semibold">{tagsCount}</div>
-<div className="mt-1 text-white/50">Decision events</div>
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-sm text-white/45">Tags</div>
+<div className="mt-2 text-6xl font-semibold leading-none">
+{tags.length}
 </div>
-</div>
-
-<div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-5">
-<div className="text-sm text-white/50">Permission</div>
-<div className="mt-1 text-lg font-semibold">{permission.message}</div>
-<div className="mt-2 text-sm text-white/50">
-Tip: iPhone Safari requires tapping <span className="font-semibold text-white/70">Enable Sensors</span>{" "}
-first. If values stay null, check iOS Settings → Safari → Motion & Orientation Access.
-</div>
+<div className="mt-2 text-white/35">Decision events</div>
 </div>
 </div>
 
-{/* Readouts */}
-<div className="mt-6 space-y-4">
-<SensorCard
-title="Acceleration (m/s²-ish)"
-rows={[
-["x", lastAccel.x],
-["y", lastAccel.y],
-["z", lastAccel.z],
-]}
-/>
-<SensorCard
-title="Accel + Gravity"
-rows={[
-["x", lastAccelG.x],
-["y", lastAccelG.y],
-["z", lastAccelG.z],
-]}
-/>
-<SensorCard
-title="Rotation Rate (gyro-ish)"
-rows={[
-["alpha", lastGyro.alpha],
-["beta", lastGyro.beta],
-["gamma", lastGyro.gamma],
-]}
-/>
-<SensorCard
-title="Orientation (angles)"
-rows={[
-["alpha", lastOri.alpha],
-["beta", lastOri.beta],
-["gamma", lastOri.gamma],
-]}
-/>
+{/* permission + sensor readouts */}
+<div className="mt-6 grid gap-4">
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-sm text-white/45">Permission</div>
+<div className="mt-2 text-4xl font-semibold">{permissionText}</div>
+<div className="mt-1 text-white/35">Sensor access</div>
 </div>
-</div>
-</div>
-);
-}
 
-function SensorCard({ title, rows }: { title: string; rows: Array<[string, number]> }) {
-return (
-<div className="mx-auto max-w-2xl rounded-[28px] border border-white/10 bg-white/5 p-6 shadow-[0_0_0_1px_rgba(255,255,255,0.05)]">
-<div className="text-3xl font-semibold">{title}</div>
-<div className="mt-4 space-y-3">
-{rows.map(([k, v]) => (
-<div key={k} className="flex items-center justify-between text-xl">
-<div className="text-white/70">{k}</div>
-<div className="font-semibold tabular-nums">{v ? v : "—"}</div>
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-xl font-semibold">Acceleration (m/s²-ish)</div>
+<div className="mt-4 grid grid-cols-2 gap-y-2 text-lg">
+<div className="text-white/60">x</div>
+<div className="text-right">{fmt(accel?.x)}</div>
+<div className="text-white/60">y</div>
+<div className="text-right">{fmt(accel?.y)}</div>
+<div className="text-white/60">z</div>
+<div className="text-right">{fmt(accel?.z)}</div>
 </div>
-))}
+</div>
+
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-xl font-semibold">Accel + Gravity</div>
+<div className="mt-4 grid grid-cols-2 gap-y-2 text-lg">
+<div className="text-white/60">x</div>
+<div className="text-right">{fmt(accelG?.x)}</div>
+<div className="text-white/60">y</div>
+<div className="text-right">{fmt(accelG?.y)}</div>
+<div className="text-white/60">z</div>
+<div className="text-right">{fmt(accelG?.z)}</div>
+</div>
+</div>
+
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-xl font-semibold">Rotation Rate (gyro-ish)</div>
+<div className="mt-4 grid grid-cols-2 gap-y-2 text-lg">
+<div className="text-white/60">alpha</div>
+<div className="text-right">{fmt(rot?.alpha)}</div>
+<div className="text-white/60">beta</div>
+<div className="text-right">{fmt(rot?.beta)}</div>
+<div className="text-white/60">gamma</div>
+<div className="text-right">{fmt(rot?.gamma)}</div>
+</div>
+</div>
+
+<div className="rounded-[22px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-xl font-semibold">Orientation (angles)</div>
+<div className="mt-4 grid grid-cols-2 gap-y-2 text-lg">
+<div className="text-white/60">alpha</div>
+<div className="text-right">{fmt(ori?.alpha)}</div>
+<div className="text-white/60">beta</div>
+<div className="text-right">{fmt(ori?.beta)}</div>
+<div className="text-white/60">gamma</div>
+<div className="text-right">{fmt(ori?.gamma)}</div>
+</div>
+<div className="mt-4 text-sm text-white/35">
+Tip: iPhone Safari requires tapping <b>Enable Sensors</b> first.
+If values stay null, check iOS Settings → Safari → Motion &
+Orientation Access.
+</div>
+</div>
+</div>
+</div>
 </div>
 </div>
 );
