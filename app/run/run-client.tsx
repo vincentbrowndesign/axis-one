@@ -3,11 +3,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Pusher from "pusher-js";
+import { saveLastRun } from "@/lib/runStore";
 
 type Sample = { t: number; mag: number };
 
 function uid() {
-return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+return (
+Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10)
+);
 }
 
 function btnClass(primary = false) {
@@ -21,7 +24,6 @@ primary ? "ring-1 ring-emerald-500/40 border-emerald-600/40" : "",
 export default function RunClient() {
 const [status, setStatus] = useState<"ready" | "running" | "stopped">("ready");
 const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
-
 const [sid, setSid] = useState<string>("");
 
 const samplesRef = useRef<Sample[]>([]);
@@ -54,15 +56,15 @@ window.history.replaceState({}, "", url.toString());
 const controlUrl = useMemo(() => {
 if (!sid) return "";
 const base = window.location.origin;
-return `${base}/control?sid=${sid}`;
+return `${base}/control?sid=${encodeURIComponent(sid)}`;
 }, [sid]);
 
 // ---- Pusher subscribe: listen for controller commands ----
 useEffect(() => {
 if (!sid) return;
 
-const key = process.env.NEXT_PUBLIC_PUSHER_KEY!;
-const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER!;
+const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
 
 if (!key || !cluster) return;
 
@@ -118,7 +120,7 @@ const az = e.accelerationIncludingGravity?.z ?? 0;
 const mag = Math.sqrt(ax * ax + ay * ay + az * az);
 samplesRef.current.push({ t: Date.now(), mag });
 
-// keep last ~90s at 20Hz-ish (just a guard)
+// keep last ~90s at 20Hz-ish (guard)
 if (samplesRef.current.length > 2500) samplesRef.current.shift();
 }
 
@@ -173,7 +175,6 @@ function stop() {
 if (status !== "running") return;
 setStatus("stopped");
 
-// Save last run for Measure page (local-only v1)
 const data = samplesRef.current;
 const startedAt = data[0]?.t ?? Date.now();
 const endedAt = data[data.length - 1]?.t ?? Date.now();
@@ -188,8 +189,8 @@ tags,
 samples: data,
 };
 
-localStorage.setItem("axis:lastRun", JSON.stringify(lastRun));
-localStorage.setItem("axis:lastRunAt", String(Date.now()));
+// ✅ Save using shared store (Measure reads this format)
+saveLastRun(lastRun as any);
 }
 
 function reset() {
@@ -199,8 +200,12 @@ setStatus("ready");
 setAvg(0);
 setPeak(0);
 setStability(100);
+
+try {
 localStorage.removeItem("axis:lastRun");
 localStorage.removeItem("axis:lastRunAt");
+if (sid) localStorage.removeItem(`axis:lastRun:${sid}`);
+} catch {}
 }
 
 function tagDecision() {
@@ -279,8 +284,8 @@ Permission: <b className="text-neutral-200">{permission}</b> • Realtime:{" "}
 
 <div className="text-xs text-neutral-500 mt-4">
 Tip: On iPhone, tap <b className="text-neutral-300">Motion Permission</b> once, then{" "}
-<b className="text-neutral-300">Start</b>. Use <b className="text-neutral-300">Tag Decision</b>{" "}
-for key moments.
+<b className="text-neutral-300">Start</b>. Use{" "}
+<b className="text-neutral-300">Tag Decision</b> for key moments.
 </div>
 </div>
 </div>
