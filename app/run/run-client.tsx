@@ -1,10 +1,9 @@
+// app/run/run-client.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Pusher from "pusher-js";
-import { saveLastRun, type AxisRunSummary } from "@/lib/runStore";
-
-type Sample = { t: number; mag: number };
+import { saveLastRun, type AxisLastRun, type Sample } from "@/lib/runStore";
 
 function uid() {
 return (
@@ -18,15 +17,16 @@ return [
 "px-4 py-3 rounded-xl border text-sm",
 "bg-neutral-900 border-neutral-700 text-white",
 primary ? "ring-1 ring-emerald-500/40 border-emerald-600/40" : "",
+"disabled:opacity-50 disabled:cursor-not-allowed",
 ].join(" ");
 }
 
 export default function RunClient() {
 const [status, setStatus] = useState<"ready" | "running" | "stopped">("ready");
-const [permission, setPermission] = useState<
-"unknown" | "granted" | "denied"
->("unknown");
-const [sid, setSid] = useState("");
+const [permission, setPermission] = useState<"unknown" | "granted" | "denied">(
+"unknown"
+);
+const [sid, setSid] = useState<string>("");
 
 const samplesRef = useRef<Sample[]>([]);
 const tagsRef = useRef<number[]>([]);
@@ -36,45 +36,52 @@ const [peak, setPeak] = useState(0);
 const [stability, setStability] = useState(100);
 const [tagsCount, setTagsCount] = useState(0);
 
+// waveform
 const canvasRef = useRef<HTMLCanvasElement | null>(null);
 const rafRef = useRef<number | null>(null);
 
+// ---- SID / pairing link ----
 useEffect(() => {
 const url = new URL(window.location.href);
-const param = url.searchParams.get("sid");
+const fromUrl = url.searchParams.get("sid");
 
-if (param) {
-setSid(param);
-localStorage.setItem("axis:sid", param);
+if (fromUrl) {
+setSid(fromUrl);
+localStorage.setItem("axis:sid", fromUrl);
 return;
 }
 
-const stored = localStorage.getItem("axis:sid");
-const id = stored || uid();
+const fromStorage = localStorage.getItem("axis:sid");
+const newSid = fromStorage || uid();
 
-setSid(id);
-localStorage.setItem("axis:sid", id);
+setSid(newSid);
+localStorage.setItem("axis:sid", newSid);
 
-url.searchParams.set("sid", id);
+url.searchParams.set("sid", newSid);
 window.history.replaceState({}, "", url.toString());
 }, []);
 
 const controlUrl = useMemo(() => {
 if (!sid) return "";
-return `${window.location.origin}/control?sid=${sid}`;
+const base = window.location.origin;
+return `${base}/control?sid=${encodeURIComponent(sid)}`;
 }, [sid]);
 
+// ---- Pusher subscribe: listen for controller commands ----
 useEffect(() => {
 if (!sid) return;
 
-const key = process.env.NEXT_PUBLIC_PUSHER_KEY!;
-const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER!;
+const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
+
+if (!key || !cluster) return;
 
 const pusher = new Pusher(key, { cluster });
-const channel = pusher.subscribe(`axis-${sid}`);
+const channelName = `axis-${sid}`;
+const channel = pusher.subscribe(channelName);
 
 channel.bind("control", (msg: any) => {
-const type = msg?.type;
+const type = String(msg?.type || "");
 if (type === "start") start();
 if (type === "stop") stop();
 if (type === "reset") reset();
@@ -82,12 +89,16 @@ if (type === "tag") tagDecision();
 });
 
 return () => {
+try {
 channel.unbind_all();
-pusher.unsubscribe(`axis-${sid}`);
+pusher.unsubscribe(channelName);
 pusher.disconnect();
+} catch {}
 };
+// eslint-disable-next-line react-hooks/exhaustive-deps
 }, [sid]);
 
+// ---- Motion permission ----
 async function requestMotion() {
 try {
 const anyDM = DeviceMotionEvent as any;
@@ -102,6 +113,7 @@ setPermission("denied");
 }
 }
 
+// ---- Sensor loop ----
 useEffect(() => {
 function onMotion(e: DeviceMotionEvent) {
 if (status !== "running") return;
@@ -111,21 +123,16 @@ const ay = e.accelerationIncludingGravity?.y ?? 0;
 const az = e.accelerationIncludingGravity?.z ?? 0;
 
 const mag = Math.sqrt(ax * ax + ay * ay + az * az);
+samplesRef.current.push({ t: Date.now(), mag });
 
-samplesRef.current.push({
-t: Date.now(),
-mag,
-});
-
-if (samplesRef.current.length > 2500) {
-samplesRef.current.shift();
-}
+if (samplesRef.current.length > 2500) samplesRef.current.shift();
 }
 
 window.addEventListener("devicemotion", onMotion);
 return () => window.removeEventListener("devicemotion", onMotion);
 }, [status]);
 
+// ---- UI metrics update loop ----
 useEffect(() => {
 const id = setInterval(() => {
 const data = samplesRef.current;
@@ -140,17 +147,14 @@ return;
 
 let sum = 0;
 let pk = 0;
-
 for (const s of data) {
 sum += s.mag;
 if (s.mag > pk) pk = s.mag;
 }
-
 const a = sum / data.length;
 
 let within = 0;
 const band = a * 0.15;
-
 for (const s of data) {
 if (Math.abs(s.mag - a) <= band) within++;
 }
@@ -164,6 +168,7 @@ setTagsCount(tagsRef.current.length);
 return () => clearInterval(id);
 }, []);
 
+// ---- Waveform draw loop ----
 useEffect(() => {
 function draw() {
 const canvas = canvasRef.current;
@@ -178,115 +183,177 @@ rafRef.current = requestAnimationFrame(draw);
 return;
 }
 
-const w = canvas.clientWidth;
-const h = canvas.clientHeight;
-
+const cssW = canvas.clientWidth;
+const cssH = canvas.clientHeight;
+const dpr = window.devicePixelRatio || 1;
+const w = Math.max(1, Math.floor(cssW * dpr));
+const h = Math.max(1, Math.floor(cssH * dpr));
+if (canvas.width !== w || canvas.height !== h) {
 canvas.width = w;
 canvas.height = h;
+}
 
 ctx.clearRect(0, 0, w, h);
+ctx.fillStyle = "#0b0b0b";
+ctx.fillRect(0, 0, w, h);
+
+ctx.strokeStyle = "rgba(255,255,255,0.06)";
+ctx.lineWidth = 1;
+for (let i = 1; i < 6; i++) {
+const y = (h * i) / 6;
+ctx.beginPath();
+ctx.moveTo(0, y);
+ctx.lineTo(w, y);
+ctx.stroke();
+}
 
 const data = samplesRef.current;
 
 if (data.length < 2) {
+ctx.fillStyle = "rgba(255,255,255,0.7)";
+ctx.font =
+"14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+ctx.fillText("No signal yet — tap Start and move the device.", 14, 24);
+
 rafRef.current = requestAnimationFrame(draw);
 return;
 }
 
-const slice = data.slice(-300);
+const N = Math.min(data.length, 500);
+const slice = data.slice(data.length - N);
 
-let min = Infinity;
-let max = -Infinity;
-
+let minV = Infinity;
+let maxV = -Infinity;
 for (const s of slice) {
-if (s.mag < min) min = s.mag;
-if (s.mag > max) max = s.mag;
+if (s.mag < minV) minV = s.mag;
+if (s.mag > maxV) maxV = s.mag;
 }
+const span = Math.max(0.001, maxV - minV);
+const pad = span * 0.2;
+minV -= pad;
+maxV += pad;
 
-const span = max - min || 1;
-
-ctx.strokeStyle = "#34d399";
+ctx.strokeStyle = "rgba(52, 211, 153, 0.95)";
 ctx.lineWidth = 2;
+
 ctx.beginPath();
-
-slice.forEach((s, i) => {
-const x = (i / (slice.length - 1)) * w;
-const y = h - ((s.mag - min) / span) * h;
-
+for (let i = 0; i < slice.length; i++) {
+const x = (i / (slice.length - 1)) * (w - 1);
+const v = slice[i].mag;
+const y = h - ((v - minV) / (maxV - minV)) * (h - 1);
 if (i === 0) ctx.moveTo(x, y);
 else ctx.lineTo(x, y);
-});
-
+}
 ctx.stroke();
+
+ctx.fillStyle = "rgba(255,255,255,0.55)";
+ctx.font =
+"12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+ctx.fillText(
+`Axis line (magnitude) • samples: ${data.length} • sid: ${sid || "…"}`,
+14,
+h - 14
+);
 
 rafRef.current = requestAnimationFrame(draw);
 }
 
 rafRef.current = requestAnimationFrame(draw);
-
 return () => {
 if (rafRef.current) cancelAnimationFrame(rafRef.current);
+rafRef.current = null;
 };
-}, []);
+}, [sid]);
 
 function start() {
 if (status === "running") return;
-
 samplesRef.current = [];
 tagsRef.current = [];
-
 setTagsCount(0);
 setStatus("running");
 }
 
+function computeJolts(data: Sample[]) {
+// jolts = count of sudden changes in magnitude
+if (data.length < 3) return 0;
+let jolts = 0;
+
+// dynamic threshold: based on avg
+let sum = 0;
+for (const s of data) sum += s.mag;
+const avg = sum / data.length;
+const threshold = Math.max(0.6, avg * 0.12); // tweak later
+
+for (let i = 1; i < data.length; i++) {
+const d = Math.abs(data[i].mag - data[i - 1].mag);
+if (d > threshold) jolts++;
+}
+return jolts;
+}
+
+function labelFrom(stab: number, jolts: number) {
+if (stab >= 90 && jolts <= 6) return "In Control";
+if (stab >= 75) return "Holding";
+return "Searching";
+}
+
 function stop() {
 if (status !== "running") return;
-
 setStatus("stopped");
 
 const data = samplesRef.current;
+const startedAt = data[0]?.t ?? Date.now();
+const endedAt = data[data.length - 1]?.t ?? Date.now();
+const durationMs = Math.max(0, endedAt - startedAt);
 
-const startT = data[0]?.t ?? Date.now();
-const endT = data[data.length - 1]?.t ?? Date.now();
-const duration = endT - startT;
+if (data.length < 2) {
+// still save something consistent
+const run: AxisLastRun = {
+sid,
+startedAt,
+endedAt,
+durationMs,
+samples: data,
+tags: tagsRef.current.slice(),
+avgMagnitude: 0,
+peakMagnitude: 0,
+stability: 100,
+controlTime: 100,
+jolts: 0,
+resultLabel: "Searching",
+};
+saveLastRun(run);
+return;
+}
 
+// summary metrics
 let sum = 0;
 let pk = 0;
-
 for (const s of data) {
 sum += s.mag;
 if (s.mag > pk) pk = s.mag;
 }
-
-const avgMag = data.length ? sum / data.length : 0;
+const a = sum / data.length;
 
 let within = 0;
-const band = avgMag * 0.15;
-
+const band = a * 0.15;
 for (const s of data) {
-if (Math.abs(s.mag - avgMag) <= band) within++;
+if (Math.abs(s.mag - a) <= band) within++;
 }
+const stab = Math.round((within / data.length) * 100);
 
-const stab = data.length ? Math.round((within / data.length) * 100) : 100;
+const jolts = computeJolts(data);
+const controlTime = stab; // v1: mirror stability (replace later)
+const resultLabel = labelFrom(stab, jolts);
 
-let jolts = 0;
-for (let i = 1; i < data.length; i++) {
-const d = Math.abs(data[i].mag - data[i - 1].mag);
-if (d > 2) jolts++;
-}
-
-const controlTime = stab;
-
-const resultLabel =
-stab >= 85 ? "In Control" : stab >= 65 ? "Searching" : "Out of Control";
-
-const summary: AxisRunSummary = {
+const run: AxisLastRun = {
 sid,
-at: Date.now(),
-durationMs: duration,
-samples: data.length,
-tags: tagsRef.current.length,
-avgMagnitude: Number(avgMag.toFixed(2)),
+startedAt,
+endedAt,
+durationMs,
+samples: data,
+tags: tagsRef.current.slice(),
+avgMagnitude: Number(a.toFixed(2)),
 peakMagnitude: Number(pk.toFixed(2)),
 stability: stab,
 controlTime,
@@ -294,96 +361,108 @@ jolts,
 resultLabel,
 };
 
-saveLastRun(summary);
+saveLastRun(run);
 }
 
 function reset() {
 samplesRef.current = [];
 tagsRef.current = [];
-
 setStatus("ready");
 setAvg(0);
 setPeak(0);
 setStability(100);
 setTagsCount(0);
+// Note: Measure can have its own "Clear" button, but reset should not wipe storage automatically
 }
 
 function tagDecision() {
 if (status !== "running") return;
-
 tagsRef.current.push(Date.now());
 setTagsCount(tagsRef.current.length);
 }
 
 async function copyControlLink() {
 if (!controlUrl) return;
+try {
 await navigator.clipboard.writeText(controlUrl);
+} catch {}
 }
 
 return (
 <div className="min-h-screen bg-black text-white">
 <div className="max-w-2xl mx-auto p-6">
-<div className="flex items-center gap-2 mb-4">
+<div className="flex items-center justify-between gap-3 mb-4">
+<div className="flex items-center gap-2">
 <div className="h-2 w-2 rounded-full bg-emerald-400" />
 <div className="text-lg font-semibold">Axis Run</div>
 <div className="text-sm text-neutral-400">{status}</div>
 </div>
-
-<div className="border border-neutral-800 rounded-xl p-4 mb-4">
-<div className="text-xs text-neutral-400 mb-1">
-Controller pairing
 </div>
-<div className="text-sm break-all">{controlUrl}</div>
 
-<button className={btnClass(true)} onClick={copyControlLink}>
+<div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4 mb-4">
+<div className="text-xs text-neutral-400 mb-2">Controller pairing</div>
+<div className="text-sm text-neutral-200 break-all">{controlUrl || "..."}</div>
+<div className="flex gap-2 mt-3">
+<button className={btnClass(true)} onClick={copyControlLink} disabled={!controlUrl}>
 Copy Control Link
 </button>
 </div>
+<div className="text-xs text-neutral-500 mt-2">
+Open that link on the controller phone. It will control this session id.
+</div>
+</div>
 
-<div className="flex gap-2 flex-wrap mb-3">
+<div className="flex flex-wrap gap-2 mb-3">
 <button className={btnClass()} onClick={requestMotion}>
 Motion Permission
 </button>
-
 <button className={btnClass(true)} onClick={start}>
 Start
 </button>
-
 <button className={btnClass()} onClick={stop}>
 Stop
 </button>
-
 <button className={btnClass()} onClick={reset}>
 Reset
 </button>
-
 <button className={btnClass(true)} onClick={tagDecision}>
 Tag Decision
 </button>
 </div>
 
 <div className="text-sm text-neutral-400 mb-4">
-Permission: <b>{permission}</b> • Tags: <b>{tagsCount}</b>
+Permission: <b className="text-neutral-200">{permission}</b> • Realtime:{" "}
+<b className="text-neutral-200">enabled</b> • Tags:{" "}
+<b className="text-neutral-200">{tagsCount}</b>
 </div>
 
-<div className="border border-neutral-800 rounded-xl p-4 mb-4">
-<canvas ref={canvasRef} className="w-full h-[200px]" />
+<div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4 mb-4">
+<div className="text-xs text-neutral-400 mb-2">Axis line</div>
+<div className="rounded-2xl border border-neutral-800 bg-black overflow-hidden">
+<canvas ref={canvasRef} className="w-full h-44 block" />
+</div>
 </div>
 
-<div className="grid grid-cols-3 gap-3">
-<div className="border border-neutral-800 rounded-xl p-4">
-<div className="text-xs text-neutral-400">Avg</div>
-<div className="text-2xl">{avg}</div>
+<div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4">
+<div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+<div className="rounded-2xl border border-neutral-800 bg-black p-4">
+<div className="text-xs text-neutral-400">Avg Magnitude</div>
+<div className="text-3xl font-semibold mt-2">{avg.toFixed(2)}</div>
 </div>
-
-<div className="border border-neutral-800 rounded-xl p-4">
-<div className="text-xs text-neutral-400">Peak</div>
-<div className="text-2xl">{peak}</div>
+<div className="rounded-2xl border border-neutral-800 bg-black p-4">
+<div className="text-xs text-neutral-400">Peak Magnitude</div>
+<div className="text-3xl font-semibold mt-2">{peak.toFixed(2)}</div>
 </div>
-
-<div className="border border-neutral-800 rounded-xl p-4">
+<div className="rounded-2xl border border-neutral-800 bg-black p-4">
 <div className="text-xs text-neutral-400">Stability</div>
-<div className="text-2xl">{stability}%</div>
+<div className="text-3xl font-semibold mt-2">{stability}%</div>
+</div>
+</div>
+
+<div className="text-xs text-neutral-500 mt-4">
+Tip: On iPhone, tap <b className="text-neutral-300">Motion Permission</b> once, then{" "}
+<b className="text-neutral-300">Start</b>. Use <b className="text-neutral-300">Tag Decision</b>{" "}
+for key moments.
 </div>
 </div>
 </div>
