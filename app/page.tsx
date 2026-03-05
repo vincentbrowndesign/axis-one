@@ -1,68 +1,84 @@
-// app/page.tsx
 import Link from "next/link";
 
-const cardStyle: React.CSSProperties = {
-border: "1px solid rgba(255,255,255,0.12)",
-borderRadius: 16,
-padding: 16,
-background: "rgba(255,255,255,0.03)",
-textDecoration: "none",
+const btn: React.CSSProperties = {
+padding: "12px 14px",
+borderRadius: 12,
+border: "1px solid rgba(255,255,255,0.14)",
+background: "rgba(255,255,255,0.05)",
 color: "white",
-display: "block",
+textDecoration: "none",
+display: "inline-flex",
+alignItems: "center",
+justifyContent: "space-between",
+gap: 10,
 };
 
 export default function HomePage() {
 return (
-<main style={{ padding: 16 }}>
-<div style={{ padding: "18px 0 8px" }}>
-<div style={{ opacity: 0.75, fontSize: 13 }}>Axis</div>
-<h1 style={{ margin: "6px 0 0", fontSize: 28 }}>
-Structural Deviation Under Load
-</h1>
-<div style={{ marginTop: 10, opacity: 0.75, maxWidth: 720 }}>
-Run captures signal. Measure converts it into a result you can show.
+<main
+style={{
+minHeight: "100vh",
+background: "#050505",
+color: "white",
+padding: 16,
+fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial",
+}}
+>
+<div style={{ maxWidth: 920, margin: "0 auto" }}>
+<div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+<div
+style={{
+width: 10,
+height: 10,
+borderRadius: 999,
+background: "rgba(0,255,180,0.9)",
+boxShadow: "0 0 14px rgba(0,255,180,0.35)",
+}}
+/>
+<div style={{ fontSize: 18, fontWeight: 800 }}>Axis Measure</div>
 </div>
+
+<div style={{ marginTop: 10, opacity: 0.75, maxWidth: 640 }}>
+Run captures the signal. Measure converts it into a result you can show.
 </div>
 
 <div
 style={{
-display: "grid",
-gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-gap: 12,
 marginTop: 16,
+display: "grid",
+gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+gap: 10,
 }}
 >
-<Link href="/measure" style={cardStyle}>
-<div style={{ fontWeight: 700, fontSize: 18 }}>Measure</div>
-<div style={{ opacity: 0.7, marginTop: 6 }}>
-Turn a window into a result card.
-</div>
+<Link href="/run" style={btn}>
+<span>Run</span>
+<span style={{ opacity: 0.7 }}>Capture →</span>
 </Link>
 
-<Link href="/run" style={cardStyle}>
-<div style={{ fontWeight: 700, fontSize: 18 }}>Run</div>
-<div style={{ opacity: 0.7, marginTop: 6 }}>
-Live axis line + motion signal.
-</div>
+<Link href="/measure" style={{ ...btn, border: "1px solid rgba(0,255,180,0.25)" }}>
+<span>Measure</span>
+<span style={{ opacity: 0.7 }}>Result →</span>
 </Link>
 
-<Link href="/history" style={cardStyle}>
-<div style={{ fontWeight: 700, fontSize: 18 }}>History</div>
-<div style={{ opacity: 0.7, marginTop: 6 }}>
-Past sessions and exports.
-</div>
+<Link href="/history" style={btn}>
+<span>History</span>
+<span style={{ opacity: 0.7 }}>Saved →</span>
 </Link>
 
-<Link href="/control" style={cardStyle}>
-<div style={{ fontWeight: 700, fontSize: 18 }}>Control</div>
-<div style={{ opacity: 0.7, marginTop: 6 }}>
-Controller / pairing / remote.
-</div>
+<Link href="/control" style={btn}>
+<span>Control</span>
+<span style={{ opacity: 0.7 }}>Remote →</span>
+</Link>
+
+<Link href="/states" style={btn}>
+<span>States</span>
+<span style={{ opacity: 0.7 }}>Vocabulary →</span>
 </Link>
 </div>
 
-<div style={{ marginTop: 16, opacity: 0.6, fontSize: 12 }}>
-Tip: You no longer need to type <b>/run</b>. Use the top nav.
+<div style={{ marginTop: 18, opacity: 0.6, fontSize: 12 }}>
+Flow: Run → Tag Decision → Stop → Measure → Share
+</div>
 </div>
 </main>
 );

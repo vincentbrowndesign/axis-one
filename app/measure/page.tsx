@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 
 type Sample = {
-t: number; // ms since run start
+t: number;
 ax: number;
 ay: number;
 az: number;
@@ -51,11 +51,20 @@ background: "rgba(255,255,255,0.02)",
 );
 }
 
+function MiniStat({ label, value }: { label: string; value: string }) {
+return (
+<div style={{ minWidth: 120 }}>
+<div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
+<div style={{ fontSize: 16, marginTop: 4 }}>{value}</div>
+</div>
+);
+}
+
 export default function MeasurePage() {
 const [refreshNonce, setRefreshNonce] = useState(0);
+const [toast, setToast] = useState<string | null>(null);
 
 const run = useMemo(() => {
-// refreshNonce forces re-read if you tap Refresh
 void refreshNonce;
 return safeGetLocalStorage<RunSave>(STORAGE_KEY);
 }, [refreshNonce]);
@@ -77,22 +86,20 @@ const baseline = tail.reduce((a, b) => a + b, 0) / Math.max(1, tail.length);
 
 const dev = mags.map((m) => m - baseline);
 
-// std dev
+// std dev of deviation
 const devAvg = dev.reduce((a, b) => a + b, 0) / dev.length;
-const variance =
-dev.reduce((acc, v) => acc + (v - devAvg) * (v - devAvg), 0) / dev.length;
+const variance = dev.reduce((acc, v) => acc + (v - devAvg) * (v - devAvg), 0) / dev.length;
 const std = Math.sqrt(variance);
 
-// Stability score (same style as Run)
-const stability = clamp(100 - std * 80, 0, 100); // stronger scaling for "Measure"
+// Stability score (stronger scaling for "Measure")
+const stability = clamp(100 - std * 80, 0, 100);
 
-// Control band = 1 * std (within normal variation)
+// Control band = 1 * std
 const band = Math.max(0.15, std * 1.0);
-
 const controlCount = dev.filter((d) => Math.abs(d) <= band).length;
 const controlTime = Math.round((100 * controlCount) / dev.length);
 
-// Jolts = spikes above 2.5 * std (with a simple cooldown)
+// Jolts = spikes above 2.5 * std w/ cooldown
 const joltThresh = Math.max(0.35, std * 2.5);
 let joltCount = 0;
 let cooldown = 0;
@@ -103,36 +110,27 @@ continue;
 }
 if (Math.abs(dev[i]) >= joltThresh) {
 joltCount++;
-cooldown = 8; // prevents counting the same jolt multiple frames
+cooldown = 8;
 }
 }
 
-const verdict =
-stability >= 85 ? "In Control" : stability >= 65 ? "Searching" : "Out of Control";
+const verdict = stability >= 85 ? "In Control" : stability >= 65 ? "Searching" : "Out of Control";
 
-// Per-tag peaks in +-500ms windows (Decision Windows)
+// Decision windows (+/- 500ms)
 const tagWindows = tags.slice(-12).map((tagT) => {
 const windowStart = tagT - 500;
 const windowEnd = tagT + 500;
 const w = samples.filter((s) => s.t >= windowStart && s.t <= windowEnd);
+
 const wPeak = w.length ? Math.max(...w.map((s) => s.mag)) : 0;
 const wAvg = w.length ? w.reduce((a, s) => a + s.mag, 0) / w.length : 0;
 
-// "Decision Coherence" placeholder: higher when window std is low
 const wDev = w.map((s) => s.mag - wAvg);
-const wVar =
-wDev.length > 1
-? wDev.reduce((acc, v) => acc + v * v, 0) / wDev.length
-: 0;
+const wVar = wDev.length > 1 ? wDev.reduce((acc, v) => acc + v * v, 0) / wDev.length : 0;
 const wStd = Math.sqrt(wVar);
 const coherence = clamp(100 - wStd * 120, 0, 100);
 
-return {
-tagT,
-peak: wPeak,
-avg: wAvg,
-coherence,
-};
+return { tagT, peak: wPeak, avg: wAvg, coherence };
 });
 
 return {
@@ -160,7 +158,56 @@ background: "rgba(255,255,255,0.06)",
 color: "white",
 cursor: "pointer",
 textDecoration: "none",
+display: "inline-flex",
+alignItems: "center",
+gap: 8,
 };
+
+const shareText = useMemo(() => {
+if (!computed) return "";
+const seconds = Math.round(computed.durationMs / 1000);
+return [
+`Axis Measure`,
+`Result: ${computed.verdict}`,
+`Stability: ${computed.stability.toFixed(0)}%`,
+`Control Time: ${computed.controlTime}%`,
+`Jolts: ${computed.joltCount}`,
+`Avg: ${computed.avg.toFixed(2)} • Peak: ${computed.peak.toFixed(2)}`,
+`Tags: ${computed.tagCount} • Duration: ${seconds}s`,
+`axismeasure.com`,
+].join("\n");
+}, [computed]);
+
+async function copySummary() {
+try {
+await navigator.clipboard.writeText(shareText);
+setToast("Copied summary");
+setTimeout(() => setToast(null), 1200);
+} catch {
+setToast("Copy failed");
+setTimeout(() => setToast(null), 1200);
+}
+}
+
+async function nativeShare() {
+if (!computed) return;
+const seconds = Math.round(computed.durationMs / 1000);
+
+try {
+const anyNav = navigator as any;
+if (anyNav.share) {
+await anyNav.share({
+title: "Axis Measure",
+text: shareText,
+url: "https://axismeasure.com/measure",
+});
+} else {
+await copySummary();
+}
+} catch {
+// user canceled share, fine
+}
+}
 
 return (
 <main style={{ padding: 16 }}>
@@ -168,10 +215,75 @@ return (
 <div style={{ opacity: 0.75, fontSize: 13 }}>Axis</div>
 <h1 style={{ margin: "6px 0 0", fontSize: 26 }}>Measure</h1>
 <div style={{ marginTop: 10, opacity: 0.75, maxWidth: 720 }}>
-Measure auto-computes from your most recent Run (saved locally).
+Measure auto-computes from your most recent Run (saved locally on this device).
 </div>
 </div>
 
+{/* SHARE CARD */}
+<div
+style={{
+marginTop: 14,
+border: "1px solid rgba(0,255,180,0.18)",
+borderRadius: 16,
+padding: 14,
+background: "rgba(0,255,180,0.03)",
+}}
+>
+<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+<div>
+<div style={{ opacity: 0.75, fontSize: 12 }}>Share</div>
+<div style={{ fontSize: 18, fontWeight: 800, marginTop: 4 }}>
+{computed ? computed.verdict : "No run yet"}
+</div>
+<div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>
+{computed
+? `Stability ${computed.stability.toFixed(0)}% • Control ${computed.controlTime}% • Jolts ${computed.joltCount}`
+: "Go to Run, Start, then Stop. Come back here."}
+</div>
+</div>
+
+<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+<button type="button" onClick={nativeShare} style={{ ...btn, opacity: computed ? 1 : 0.55 }} disabled={!computed}>
+Share
+</button>
+<button type="button" onClick={copySummary} style={{ ...btn, opacity: computed ? 1 : 0.55 }} disabled={!computed}>
+Copy Summary
+</button>
+<Link href="/run" style={btn}>
+Go to Run
+</Link>
+<button type="button" onClick={() => setRefreshNonce((n) => n + 1)} style={btn}>
+Refresh
+</button>
+</div>
+</div>
+
+{computed && (
+<pre
+style={{
+marginTop: 12,
+padding: 12,
+borderRadius: 12,
+border: "1px solid rgba(255,255,255,0.10)",
+background: "rgba(0,0,0,0.35)",
+whiteSpace: "pre-wrap",
+wordBreak: "break-word",
+fontSize: 12,
+opacity: 0.9,
+}}
+>
+{shareText}
+</pre>
+)}
+
+{toast && (
+<div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
+{toast}
+</div>
+)}
+</div>
+
+{/* MAIN RESULT CARD */}
 <div
 style={{
 marginTop: 14,
@@ -181,20 +293,10 @@ padding: 14,
 background: "rgba(255,255,255,0.03)",
 }}
 >
-<div
-style={{
-display: "flex",
-justifyContent: "space-between",
-gap: 12,
-flexWrap: "wrap",
-alignItems: "center",
-}}
->
+<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
 <div>
 <div style={{ opacity: 0.7, fontSize: 12 }}>Result</div>
-<div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>
-{computed?.verdict ?? "No run saved yet"}
-</div>
+<div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{computed?.verdict ?? "No run saved yet"}</div>
 <div style={{ marginTop: 6, opacity: 0.65, fontSize: 12 }}>
 {computed
 ? `Samples: ${computed.sampleCount} • Tags: ${computed.tagCount} • Duration: ${Math.round(
@@ -202,16 +304,6 @@ computed.durationMs / 1000
 )}s`
 : "Go to Run, Start, then Stop. Then come back here."}
 </div>
-</div>
-
-<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-<Link href="/run" style={btn}>
-Go to Run
-</Link>
-
-<button type="button" onClick={() => setRefreshNonce((n) => n + 1)} style={btn}>
-Refresh
-</button>
 </div>
 </div>
 
@@ -252,9 +344,7 @@ flexWrap: "wrap",
 >
 <div>
 <div style={{ opacity: 0.7, fontSize: 12 }}>Tag</div>
-<div style={{ fontSize: 16, fontWeight: 700 }}>
-{Math.round(w.tagT / 100) / 10}s
-</div>
+<div style={{ fontSize: 16, fontWeight: 700 }}>{Math.round(w.tagT / 100) / 10}s</div>
 </div>
 
 <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
@@ -267,21 +357,11 @@ flexWrap: "wrap",
 </div>
 
 <div style={{ marginTop: 10, opacity: 0.65, fontSize: 12 }}>
-Coherence is a first-pass “decision window stability” metric. Next we’ll align this with real
-decision types (drive / stop / change direction).
+Next: we’ll label each tag type (drive / stop / change-direction) so Measure becomes “what happened” not just numbers.
 </div>
 </div>
 )}
 </div>
 </main>
-);
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-return (
-<div style={{ minWidth: 120 }}>
-<div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
-<div style={{ fontSize: 16, marginTop: 4 }}>{value}</div>
-</div>
 );
 }
