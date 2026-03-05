@@ -3,12 +3,22 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type Sample = {
-t: number; // ms timestamp
+t: number; // ms since run start
 ax: number;
 ay: number;
 az: number;
 mag: number; // sqrt(ax^2+ay^2+az^2)
 };
+
+type RunSave = {
+v: 1;
+savedAt: number; // Date.now()
+durationMs: number;
+samples: Sample[];
+tags: number[]; // tag times in ms since run start
+};
+
+const STORAGE_KEY = "axis:lastRun:v1";
 
 function clamp(n: number, lo: number, hi: number) {
 return Math.max(lo, Math.min(hi, n));
@@ -18,6 +28,24 @@ function nowMs() {
 return typeof performance !== "undefined" && performance.now
 ? performance.now()
 : Date.now();
+}
+
+function safeSetLocalStorage(key: string, value: any) {
+try {
+localStorage.setItem(key, JSON.stringify(value));
+} catch {
+// ignore
+}
+}
+
+function safeGetLocalStorage<T>(key: string): T | null {
+try {
+const raw = localStorage.getItem(key);
+if (!raw) return null;
+return JSON.parse(raw) as T;
+} catch {
+return null;
+}
 }
 
 const btnStyle: React.CSSProperties = {
@@ -34,9 +62,9 @@ return (
 <div
 style={{
 border: "1px solid rgba(255,255,255,0.12)",
-borderRadius: 12,
+borderRadius: 14,
 padding: 12,
-background: "rgba(255,255,255,0.03)",
+background: "rgba(255,255,255,0.02)",
 }}
 >
 <div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
@@ -45,11 +73,6 @@ background: "rgba(255,255,255,0.03)",
 );
 }
 
-/**
-* Axis Run (Pusher-safe)
-* - NEVER crashes if env vars are missing
-* - Uses DeviceMotion to generate a live axis line
-*/
 export default function RunClient() {
 // SAFE env reads — never throw
 const PUSHER_KEY = process.env.NEXT_PUBLIC_PUSHER_KEY ?? "";
@@ -69,7 +92,13 @@ const [samples, setSamples] = useState<Sample[]>([]);
 const bufRef = useRef<Sample[]>([]);
 const rafRef = useRef<number | null>(null);
 
+const [tags, setTags] = useState<number[]>([]);
+const tagsRef = useRef<number[]>([]);
+
 const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+const runStartRef = useRef<number | null>(null); // performance start
+const lastAutosaveRef = useRef<number>(0);
 
 async function requestMotionPermission() {
 try {
@@ -98,22 +127,81 @@ setStatus(`Motion permission error: ${String(e?.message ?? e)}`);
 }
 }
 
+function persistRun(force: boolean) {
+const start = runStartRef.current;
+if (start == null) return;
+
+const durationMs = Math.max(0, Math.round(nowMs() - start));
+const payload: RunSave = {
+v: 1,
+savedAt: Date.now(),
+durationMs,
+samples: bufRef.current,
+tags: tagsRef.current,
+};
+
+// autosave at most every 500ms unless forced
+const t = nowMs();
+if (!force && t - lastAutosaveRef.current < 500) return;
+lastAutosaveRef.current = t;
+
+safeSetLocalStorage(STORAGE_KEY, payload);
+}
+
 function start() {
 bufRef.current = [];
 setSamples([]);
+tagsRef.current = [];
+setTags([]);
+runStartRef.current = nowMs();
+lastAutosaveRef.current = 0;
+
 setIsRunning(true);
 setStatus(PUSHER_ENABLED ? "Running" : "Running (Realtime disabled)");
+
+// mark permission state if not iOS gated
+if (permissionState === "unknown") {
+// if device motion permission isn't needed, we can detect later by events,
+// but keep as unknown until user taps permission button.
+}
 }
 
 function stop() {
 setIsRunning(false);
 setStatus("Stopped");
+persistRun(true); // final save
 }
 
 function reset() {
 bufRef.current = [];
 setSamples([]);
+tagsRef.current = [];
+setTags([]);
 setStatus("Reset");
+if (isRunning) {
+runStartRef.current = nowMs();
+persistRun(true);
+} else {
+// wipe storage if you want a clean slate
+safeSetLocalStorage(STORAGE_KEY, {
+v: 1,
+savedAt: Date.now(),
+durationMs: 0,
+samples: [],
+tags: [],
+} satisfies RunSave);
+}
+}
+
+function tagDecision() {
+const start = runStartRef.current;
+if (start == null) return;
+const t = Math.round(nowMs() - start);
+
+tagsRef.current = [...tagsRef.current, t];
+setTags(tagsRef.current);
+setStatus(`Tagged decision • ${tagsRef.current.length}`);
+persistRun(true);
 }
 
 // DeviceMotion listener
@@ -121,23 +209,31 @@ useEffect(() => {
 if (!isRunning) return;
 
 const onMotion = (ev: DeviceMotionEvent) => {
+const start = runStartRef.current;
+if (start == null) return;
+
 const a = ev.accelerationIncludingGravity || ev.acceleration;
 const ax = a?.x ?? 0;
 const ay = a?.y ?? 0;
 const az = a?.z ?? 0;
 const mag = Math.sqrt(ax * ax + ay * ay + az * az);
 
+const t = Math.round(nowMs() - start);
+
 bufRef.current.push({
-t: nowMs(),
+t,
 ax,
 ay,
 az,
 mag,
 });
 
-if (bufRef.current.length > 600) {
-bufRef.current.splice(0, bufRef.current.length - 600);
+if (bufRef.current.length > 900) {
+bufRef.current.splice(0, bufRef.current.length - 900);
 }
+
+// keep lastRun fresh for Measure page
+persistRun(false);
 };
 
 window.addEventListener("devicemotion", onMotion, { passive: true });
@@ -153,6 +249,7 @@ if (!isRunning) return;
 
 const id = window.setInterval(() => {
 setSamples([...bufRef.current]);
+setTags([...tagsRef.current]);
 }, 100);
 
 return () => window.clearInterval(id);
@@ -190,7 +287,7 @@ const data = samples;
 if (data.length < 2) {
 ctx.fillStyle = "rgba(255,255,255,0.7)";
 ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto";
-ctx.fillText("No signal yet — start run and move the device.", 14, 24);
+ctx.fillText("No signal yet — tap Start and move the device.", 14, 24);
 rafRef.current = requestAnimationFrame(draw);
 return;
 }
@@ -228,11 +325,31 @@ else ctx.lineTo(x, y);
 }
 ctx.stroke();
 
+// tag markers (decisions)
+if (tags.length > 0) {
+const firstT = data[0].t;
+const lastT = data[data.length - 1].t;
+const span = Math.max(1, lastT - firstT);
+
+ctx.strokeStyle = "rgba(255,255,255,0.25)";
+ctx.lineWidth = 1;
+
+for (const tagT of tags) {
+// only draw if in view range
+if (tagT < firstT || tagT > lastT) continue;
+const x = ((tagT - firstT) / span) * w;
+ctx.beginPath();
+ctx.moveTo(x, 0);
+ctx.lineTo(x, h);
+ctx.stroke();
+}
+}
+
 // label
 ctx.fillStyle = "rgba(255,255,255,0.75)";
 ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto";
 ctx.fillText(
-`Axis line (deviation) • samples: ${data.length} • baseline: ${baseline.toFixed(
+`Axis line (deviation) • samples: ${data.length} • tags: ${tags.length} • baseline: ${baseline.toFixed(
 2
 )}`,
 14,
@@ -249,7 +366,7 @@ return () => {
 if (rafRef.current) cancelAnimationFrame(rafRef.current);
 rafRef.current = null;
 };
-}, [samples]);
+}, [samples, tags]);
 
 const metrics = useMemo(() => {
 if (samples.length < 2) {
@@ -273,10 +390,11 @@ if (!PUSHER_ENABLED) return;
 // noop (realtime can be added later safely)
 }, [PUSHER_ENABLED]);
 
+// Restore a cleaner presentation flow: Run + Tag + Stop + Measure hint
 return (
 <div
 style={{
-minHeight: "100vh",
+minHeight: "calc(100vh - 60px)",
 background: "#050505",
 color: "white",
 padding: 16,
@@ -308,11 +426,24 @@ Stop
 <button onClick={reset} style={btnStyle} type="button">
 Reset
 </button>
+
+<button
+onClick={tagDecision}
+style={{
+...btnStyle,
+border: "1px solid rgba(0,255,180,0.35)",
+}}
+type="button"
+disabled={!isRunning}
+title={!isRunning ? "Start a run to tag decisions" : "Tag a decision moment"}
+>
+Tag Decision
+</button>
 </div>
 
 <div style={{ marginTop: 10, opacity: 0.75, fontSize: 13 }}>
 Permission: <b>{permissionState}</b> • Realtime:{" "}
-<b>{PUSHER_ENABLED ? "enabled" : "disabled"}</b>
+<b>{PUSHER_ENABLED ? "enabled" : "disabled"}</b> • Tags: <b>{tags.length}</b>
 </div>
 
 <div style={{ marginTop: 14 }}>
@@ -343,9 +474,44 @@ gap: 10,
 <StatCard label="Stability" value={`${metrics.stability.toFixed(0)}%`} />
 </div>
 
+{tags.length > 0 && (
+<div
+style={{
+marginTop: 14,
+border: "1px solid rgba(255,255,255,0.10)",
+borderRadius: 14,
+padding: 12,
+background: "rgba(255,255,255,0.02)",
+}}
+>
+<div style={{ opacity: 0.75, fontSize: 12 }}>Decisions (Tags)</div>
+<div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+{tags.slice(-12).map((t, i) => (
+<div
+key={`${t}-${i}`}
+style={{
+padding: "6px 10px",
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.03)",
+fontSize: 12,
+opacity: 0.9,
+}}
+>
+{Math.round(t / 100) / 10}s
+</div>
+))}
+</div>
+
+<div style={{ marginTop: 10, opacity: 0.65, fontSize: 12 }}>
+After you stop, go to <b>Measure</b> — it will auto-compute from this run.
+</div>
+</div>
+)}
+
 <div style={{ marginTop: 14, opacity: 0.65, fontSize: 12 }}>
-Tip: On iPhone, tap <b>Motion Permission</b> once, then <b>Start</b>.
-Keep the phone on-body (pocket, waist, chest) to see cleaner curves.
+Tip: On iPhone, tap <b>Motion Permission</b> once, then <b>Start</b>. Use{" "}
+<b>Tag Decision</b> during key moments.
 </div>
 </div>
 </div>
