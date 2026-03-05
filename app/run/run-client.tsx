@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type Sample = {
 t: number;
@@ -16,6 +16,8 @@ t: number;
 
 export default function RunClient() {
 const [running, setRunning] = useState(false);
+const [sampleCount, setSampleCount] = useState(0);
+const [tagCount, setTagCount] = useState(0);
 
 const samples = useRef<Sample[]>([]);
 const tags = useRef<Tag[]>([]);
@@ -23,6 +25,9 @@ const tags = useRef<Tag[]>([]);
 function start() {
 samples.current = [];
 tags.current = [];
+
+setSampleCount(0);
+setTagCount(0);
 
 setRunning(true);
 
@@ -40,9 +45,8 @@ exportSession();
 }
 
 function tagDecision() {
-tags.current.push({
-t: Date.now(),
-});
+tags.current.push({ t: Date.now() });
+setTagCount(tags.current.length);
 }
 
 function onMotion(e: DeviceMotionEvent) {
@@ -52,6 +56,8 @@ accel: e.acceleration,
 accelIncludingGravity: e.accelerationIncludingGravity,
 rotationRate: e.rotationRate,
 });
+
+setSampleCount(samples.current.length);
 }
 
 function onOrientation(e: DeviceOrientationEvent) {
@@ -74,10 +80,7 @@ started_at_epoch_ms: samples.current[0]?.t,
 ended_at_epoch_ms: samples.current[samples.current.length - 1]?.t,
 samples_count: samples.current.length,
 tags_count: tags.current.length,
-
 samples: samples.current,
-
-// IMPORTANT
 tags: tags.current,
 };
 
@@ -94,15 +97,15 @@ a.click();
 }
 
 return (
-<div className="p-6 text-white">
-<h1 className="text-2xl mb-6">Axis One Capture</h1>
+<div className="min-h-screen bg-black text-white p-8">
+<h1 className="text-3xl font-semibold mb-6">Axis One Capture</h1>
 
-<div className="flex gap-4">
+<div className="flex gap-4 mb-6">
 
 {!running && (
 <button
-className="bg-green-600 px-4 py-2 rounded"
 onClick={start}
+className="bg-green-600 px-6 py-3 rounded-lg"
 >
 Start
 </button>
@@ -111,15 +114,15 @@ Start
 {running && (
 <>
 <button
-className="bg-yellow-500 px-4 py-2 rounded"
 onClick={tagDecision}
+className="bg-yellow-500 px-6 py-3 rounded-lg"
 >
 Tag Decision
 </button>
 
 <button
-className="bg-red-600 px-4 py-2 rounded"
 onClick={stop}
+className="bg-red-600 px-6 py-3 rounded-lg"
 >
 Stop
 </button>
@@ -128,8 +131,8 @@ Stop
 
 </div>
 
-<div className="mt-6 text-sm opacity-70">
-Samples: {samples.current.length} | Tags: {tags.current.length}
+<div className="text-white/70 text-lg">
+Samples: {sampleCount} | Tags: {tagCount}
 </div>
 </div>
 );
