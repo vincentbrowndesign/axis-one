@@ -3,13 +3,10 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Pusher from "pusher-js";
-import { saveLastRun, type AxisLastRun, type Sample } from "@/lib/runStore";
+import { computeSummary, saveLastRun, type AxisLastRun, type Sample } from "@/lib/runStore";
 
 function uid() {
-return (
-Math.random().toString(36).slice(2, 10) +
-Math.random().toString(36).slice(2, 10)
-);
+return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
 }
 
 function btnClass(primary = false) {
@@ -23,9 +20,7 @@ primary ? "ring-1 ring-emerald-500/40 border-emerald-600/40" : "",
 
 export default function RunClient() {
 const [status, setStatus] = useState<"ready" | "running" | "stopped">("ready");
-const [permission, setPermission] = useState<"unknown" | "granted" | "denied">(
-"unknown"
-);
+const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
 const [sid, setSid] = useState<string>("");
 
 const samplesRef = useRef<Sample[]>([]);
@@ -36,7 +31,10 @@ const [peak, setPeak] = useState(0);
 const [stability, setStability] = useState(100);
 const [tagsCount, setTagsCount] = useState(0);
 
-// waveform
+// Remote-start UX (iOS won’t grant motion permission without a tap)
+const [remoteStartRequested, setRemoteStartRequested] = useState(false);
+
+// waveform canvas
 const canvasRef = useRef<HTMLCanvasElement | null>(null);
 const rafRef = useRef<number | null>(null);
 
@@ -67,25 +65,112 @@ const base = window.location.origin;
 return `${base}/control?sid=${encodeURIComponent(sid)}`;
 }, [sid]);
 
-// ---- Pusher subscribe: listen for controller commands ----
+// ---- Motion permission ----
+async function requestMotion() {
+try {
+const anyDM = DeviceMotionEvent as any;
+if (typeof anyDM?.requestPermission === "function") {
+const res = await anyDM.requestPermission();
+const granted = res === "granted";
+setPermission(granted ? "granted" : "denied");
+return granted;
+} else {
+setPermission("granted");
+return true;
+}
+} catch {
+setPermission("denied");
+return false;
+}
+}
+
+// ---- Start/Stop/Reset/Tag ----
+function startLocal() {
+if (status === "running") return;
+samplesRef.current = [];
+tagsRef.current = [];
+setTagsCount(0);
+setRemoteStartRequested(false);
+setStatus("running");
+}
+
+function stopLocal() {
+if (status !== "running") return;
+setStatus("stopped");
+
+const data = samplesRef.current;
+const startedAt = data[0]?.t ?? Date.now();
+const endedAt = data[data.length - 1]?.t ?? Date.now();
+const durationMs = Math.max(0, endedAt - startedAt);
+
+const run: AxisLastRun = {
+sid,
+startedAt,
+endedAt,
+durationMs,
+tags: tagsRef.current.slice(),
+samples: data.slice(),
+};
+
+// Save full run (Measure computes summary deterministically)
+saveLastRun(run);
+
+// Also update the visible metrics one last time
+const summary = computeSummary(run);
+setAvg(summary.avgMagnitude);
+setPeak(summary.peakMagnitude);
+setStability(summary.stability);
+setTagsCount(summary.tags);
+}
+
+function resetLocal() {
+samplesRef.current = [];
+tagsRef.current = [];
+setStatus("ready");
+setAvg(0);
+setPeak(0);
+setStability(100);
+setTagsCount(0);
+setRemoteStartRequested(false);
+try {
+localStorage.removeItem("axis:lastRun");
+if (sid) localStorage.removeItem(`axis:lastRun:${sid}`);
+} catch {}
+}
+
+function tagDecisionLocal() {
+if (status !== "running") return;
+tagsRef.current.push(Date.now());
+setTagsCount(tagsRef.current.length);
+}
+
+// ---- Pusher subscribe: controller commands ----
 useEffect(() => {
 if (!sid) return;
 
 const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
 const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
-
 if (!key || !cluster) return;
 
 const pusher = new Pusher(key, { cluster });
+
 const channelName = `axis-${sid}`;
 const channel = pusher.subscribe(channelName);
 
-channel.bind("control", (msg: any) => {
+channel.bind("control", async (msg: any) => {
 const type = String(msg?.type || "");
-if (type === "start") start();
-if (type === "stop") stop();
-if (type === "reset") reset();
-if (type === "tag") tagDecision();
+
+if (type === "start") {
+// iOS cannot grant permission without a tap, so request it but also show a prompt.
+setRemoteStartRequested(true);
+const ok = await requestMotion();
+if (ok) startLocal();
+return;
+}
+
+if (type === "stop") stopLocal();
+if (type === "reset") resetLocal();
+if (type === "tag") tagDecisionLocal();
 });
 
 return () => {
@@ -97,21 +182,6 @@ pusher.disconnect();
 };
 // eslint-disable-next-line react-hooks/exhaustive-deps
 }, [sid]);
-
-// ---- Motion permission ----
-async function requestMotion() {
-try {
-const anyDM = DeviceMotionEvent as any;
-if (typeof anyDM?.requestPermission === "function") {
-const res = await anyDM.requestPermission();
-setPermission(res === "granted" ? "granted" : "denied");
-} else {
-setPermission("granted");
-}
-} catch {
-setPermission("denied");
-}
-}
 
 // ---- Sensor loop ----
 useEffect(() => {
@@ -125,6 +195,7 @@ const az = e.accelerationIncludingGravity?.z ?? 0;
 const mag = Math.sqrt(ax * ax + ay * ay + az * az);
 samplesRef.current.push({ t: Date.now(), mag });
 
+// guard memory
 if (samplesRef.current.length > 2500) samplesRef.current.shift();
 }
 
@@ -145,6 +216,7 @@ setTagsCount(tagsRef.current.length);
 return;
 }
 
+// quick compute for live display
 let sum = 0;
 let pk = 0;
 for (const s of data) {
@@ -197,6 +269,7 @@ ctx.clearRect(0, 0, w, h);
 ctx.fillStyle = "#0b0b0b";
 ctx.fillRect(0, 0, w, h);
 
+// grid
 ctx.strokeStyle = "rgba(255,255,255,0.06)";
 ctx.lineWidth = 1;
 for (let i = 1; i < 6; i++) {
@@ -208,13 +281,10 @@ ctx.stroke();
 }
 
 const data = samplesRef.current;
-
 if (data.length < 2) {
 ctx.fillStyle = "rgba(255,255,255,0.7)";
-ctx.font =
-"14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+ctx.font = "14px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
 ctx.fillText("No signal yet — tap Start and move the device.", 14, 24);
-
 rafRef.current = requestAnimationFrame(draw);
 return;
 }
@@ -247,13 +317,8 @@ else ctx.lineTo(x, y);
 ctx.stroke();
 
 ctx.fillStyle = "rgba(255,255,255,0.55)";
-ctx.font =
-"12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
-ctx.fillText(
-`Axis line (magnitude) • samples: ${data.length} • sid: ${sid || "…"}`,
-14,
-h - 14
-);
+ctx.font = "12px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial";
+ctx.fillText(`Axis line • samples: ${data.length} • sid: ${sid || "…"}`, 14, h - 14);
 
 rafRef.current = requestAnimationFrame(draw);
 }
@@ -265,127 +330,14 @@ rafRef.current = null;
 };
 }, [sid]);
 
-function start() {
-if (status === "running") return;
-samplesRef.current = [];
-tagsRef.current = [];
-setTagsCount(0);
-setStatus("running");
-}
-
-function computeJolts(data: Sample[]) {
-// jolts = count of sudden changes in magnitude
-if (data.length < 3) return 0;
-let jolts = 0;
-
-// dynamic threshold: based on avg
-let sum = 0;
-for (const s of data) sum += s.mag;
-const avg = sum / data.length;
-const threshold = Math.max(0.6, avg * 0.12); // tweak later
-
-for (let i = 1; i < data.length; i++) {
-const d = Math.abs(data[i].mag - data[i - 1].mag);
-if (d > threshold) jolts++;
-}
-return jolts;
-}
-
-function labelFrom(stab: number, jolts: number) {
-if (stab >= 90 && jolts <= 6) return "In Control";
-if (stab >= 75) return "Holding";
-return "Searching";
-}
-
-function stop() {
-if (status !== "running") return;
-setStatus("stopped");
-
-const data = samplesRef.current;
-const startedAt = data[0]?.t ?? Date.now();
-const endedAt = data[data.length - 1]?.t ?? Date.now();
-const durationMs = Math.max(0, endedAt - startedAt);
-
-if (data.length < 2) {
-// still save something consistent
-const run: AxisLastRun = {
-sid,
-startedAt,
-endedAt,
-durationMs,
-samples: data,
-tags: tagsRef.current.slice(),
-avgMagnitude: 0,
-peakMagnitude: 0,
-stability: 100,
-controlTime: 100,
-jolts: 0,
-resultLabel: "Searching",
-};
-saveLastRun(run);
-return;
-}
-
-// summary metrics
-let sum = 0;
-let pk = 0;
-for (const s of data) {
-sum += s.mag;
-if (s.mag > pk) pk = s.mag;
-}
-const a = sum / data.length;
-
-let within = 0;
-const band = a * 0.15;
-for (const s of data) {
-if (Math.abs(s.mag - a) <= band) within++;
-}
-const stab = Math.round((within / data.length) * 100);
-
-const jolts = computeJolts(data);
-const controlTime = stab; // v1: mirror stability (replace later)
-const resultLabel = labelFrom(stab, jolts);
-
-const run: AxisLastRun = {
-sid,
-startedAt,
-endedAt,
-durationMs,
-samples: data,
-tags: tagsRef.current.slice(),
-avgMagnitude: Number(a.toFixed(2)),
-peakMagnitude: Number(pk.toFixed(2)),
-stability: stab,
-controlTime,
-jolts,
-resultLabel,
-};
-
-saveLastRun(run);
-}
-
-function reset() {
-samplesRef.current = [];
-tagsRef.current = [];
-setStatus("ready");
-setAvg(0);
-setPeak(0);
-setStability(100);
-setTagsCount(0);
-// Note: Measure can have its own "Clear" button, but reset should not wipe storage automatically
-}
-
-function tagDecision() {
-if (status !== "running") return;
-tagsRef.current.push(Date.now());
-setTagsCount(tagsRef.current.length);
-}
-
 async function copyControlLink() {
 if (!controlUrl) return;
-try {
 await navigator.clipboard.writeText(controlUrl);
-} catch {}
+}
+
+async function onPressStart() {
+const ok = await requestMotion();
+if (ok) startLocal();
 }
 
 return (
@@ -398,6 +350,15 @@ return (
 <div className="text-sm text-neutral-400">{status}</div>
 </div>
 </div>
+
+{remoteStartRequested && permission !== "granted" ? (
+<div className="rounded-2xl border border-amber-700/40 bg-amber-950/30 p-4 mb-4">
+<div className="text-sm font-semibold text-amber-200">Remote start requested</div>
+<div className="text-sm text-neutral-300 mt-1">
+iPhone requires a tap to allow motion. Tap <b>Motion Permission</b>, then <b>Start</b>.
+</div>
+</div>
+) : null}
 
 <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4 mb-4">
 <div className="text-xs text-neutral-400 mb-2">Controller pairing</div>
@@ -416,16 +377,16 @@ Open that link on the controller phone. It will control this session id.
 <button className={btnClass()} onClick={requestMotion}>
 Motion Permission
 </button>
-<button className={btnClass(true)} onClick={start}>
+<button className={btnClass(true)} onClick={onPressStart}>
 Start
 </button>
-<button className={btnClass()} onClick={stop}>
+<button className={btnClass()} onClick={stopLocal}>
 Stop
 </button>
-<button className={btnClass()} onClick={reset}>
+<button className={btnClass()} onClick={resetLocal}>
 Reset
 </button>
-<button className={btnClass(true)} onClick={tagDecision}>
+<button className={btnClass(true)} onClick={tagDecisionLocal} disabled={status !== "running"}>
 Tag Decision
 </button>
 </div>
@@ -437,9 +398,13 @@ Permission: <b className="text-neutral-200">{permission}</b> • Realtime:{" "}
 </div>
 
 <div className="rounded-2xl border border-neutral-800 bg-neutral-950 p-4 mb-4">
-<div className="text-xs text-neutral-400 mb-2">Axis line</div>
+<div className="text-xs text-neutral-400 mb-2">Axis Line</div>
 <div className="rounded-2xl border border-neutral-800 bg-black overflow-hidden">
 <canvas ref={canvasRef} className="w-full h-44 block" />
+</div>
+<div className="text-xs text-neutral-500 mt-3">
+Tip: On iPhone, tap <b className="text-neutral-300">Motion Permission</b> once, then{" "}
+<b className="text-neutral-300">Start</b>. Controller can’t grant motion permission remotely.
 </div>
 </div>
 
@@ -457,12 +422,6 @@ Permission: <b className="text-neutral-200">{permission}</b> • Realtime:{" "}
 <div className="text-xs text-neutral-400">Stability</div>
 <div className="text-3xl font-semibold mt-2">{stability}%</div>
 </div>
-</div>
-
-<div className="text-xs text-neutral-500 mt-4">
-Tip: On iPhone, tap <b className="text-neutral-300">Motion Permission</b> once, then{" "}
-<b className="text-neutral-300">Start</b>. Use <b className="text-neutral-300">Tag Decision</b>{" "}
-for key moments.
 </div>
 </div>
 </div>
