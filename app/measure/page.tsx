@@ -1,367 +1,150 @@
+// app/measure/page.tsx
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 
-type Sample = {
-t: number;
-ax: number;
-ay: number;
-az: number;
-mag: number;
-};
-
-type RunSave = {
-v: 1;
-savedAt: number;
+type Sample = { t: number; mag: number };
+type LastRun = {
+sid: string;
+startedAt: number;
+endedAt: number;
 durationMs: number;
-samples: Sample[];
 tags: number[];
+samples: Sample[];
 };
 
-const STORAGE_KEY = "axis:lastRun:v1";
-
-function clamp(n: number, lo: number, hi: number) {
-return Math.max(lo, Math.min(hi, n));
+function card() {
+return "rounded-2xl border border-neutral-800 bg-neutral-950 p-4";
+}
+function metric() {
+return "rounded-2xl border border-neutral-800 bg-black p-4";
 }
 
-function safeGetLocalStorage<T>(key: string): T | null {
-try {
-const raw = localStorage.getItem(key);
-if (!raw) return null;
-return JSON.parse(raw) as T;
-} catch {
-return null;
-}
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-return (
-<div
-style={{
-border: "1px solid rgba(255,255,255,0.12)",
-borderRadius: 14,
-padding: 12,
-background: "rgba(255,255,255,0.02)",
-}}
->
-<div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
-<div style={{ fontSize: 20, marginTop: 6 }}>{value}</div>
-</div>
-);
-}
-
-function MiniStat({ label, value }: { label: string; value: string }) {
-return (
-<div style={{ minWidth: 120 }}>
-<div style={{ opacity: 0.7, fontSize: 12 }}>{label}</div>
-<div style={{ fontSize: 16, marginTop: 4 }}>{value}</div>
-</div>
-);
+function classify(stability: number, controlTime: number) {
+if (stability >= 90 && controlTime >= 85) return "In Rhythm";
+if (stability >= 75) return "Searching";
+return "Out of Control";
 }
 
 export default function MeasurePage() {
-const [refreshNonce, setRefreshNonce] = useState(0);
-const [toast, setToast] = useState<string | null>(null);
+const [run, setRun] = useState<LastRun | null>(null);
 
-const run = useMemo(() => {
-void refreshNonce;
-return safeGetLocalStorage<RunSave>(STORAGE_KEY);
-}, [refreshNonce]);
+useEffect(() => {
+try {
+const raw = localStorage.getItem("axis:lastRun");
+if (!raw) return;
+setRun(JSON.parse(raw));
+} catch {}
+}, []);
 
 const computed = useMemo(() => {
-if (!run || !run.samples || run.samples.length < 10) return null;
+if (!run || !run.samples?.length) return null;
 
-const samples = run.samples;
-const tags = run.tags ?? [];
-
-const mags = samples.map((s) => s.mag);
-const peak = Math.max(...mags);
+const mags = run.samples.map((s) => s.mag);
 const avg = mags.reduce((a, b) => a + b, 0) / mags.length;
+const peak = mags.reduce((a, b) => Math.max(a, b), 0);
 
-// baseline from last N
-const N = Math.min(60, mags.length);
-const tail = mags.slice(mags.length - N);
-const baseline = tail.reduce((a, b) => a + b, 0) / Math.max(1, tail.length);
+// same stability calc as Run: within +/-15% of avg
+const band = avg * 0.15;
+const within = mags.filter((m) => Math.abs(m - avg) <= band).length;
+const stability = Math.round((within / mags.length) * 100);
 
-const dev = mags.map((m) => m - baseline);
+// “control time” = percent of samples below avg + 10% (simple v1)
+const control = mags.filter((m) => m <= avg * 1.1).length;
+const controlTime = Math.round((control / mags.length) * 100);
 
-// std dev of deviation
-const devAvg = dev.reduce((a, b) => a + b, 0) / dev.length;
-const variance = dev.reduce((acc, v) => acc + (v - devAvg) * (v - devAvg), 0) / dev.length;
-const std = Math.sqrt(variance);
+// “jolts” = count of spikes over avg + 50%
+const jolts = mags.filter((m) => m >= avg * 1.5).length;
 
-// Stability score (stronger scaling for "Measure")
-const stability = clamp(100 - std * 80, 0, 100);
-
-// Control band = 1 * std
-const band = Math.max(0.15, std * 1.0);
-const controlCount = dev.filter((d) => Math.abs(d) <= band).length;
-const controlTime = Math.round((100 * controlCount) / dev.length);
-
-// Jolts = spikes above 2.5 * std w/ cooldown
-const joltThresh = Math.max(0.35, std * 2.5);
-let joltCount = 0;
-let cooldown = 0;
-for (let i = 0; i < dev.length; i++) {
-if (cooldown > 0) {
-cooldown--;
-continue;
-}
-if (Math.abs(dev[i]) >= joltThresh) {
-joltCount++;
-cooldown = 8;
-}
-}
-
-const verdict = stability >= 85 ? "In Control" : stability >= 65 ? "Searching" : "Out of Control";
-
-// Decision windows (+/- 500ms)
-const tagWindows = tags.slice(-12).map((tagT) => {
-const windowStart = tagT - 500;
-const windowEnd = tagT + 500;
-const w = samples.filter((s) => s.t >= windowStart && s.t <= windowEnd);
-
-const wPeak = w.length ? Math.max(...w.map((s) => s.mag)) : 0;
-const wAvg = w.length ? w.reduce((a, s) => a + s.mag, 0) / w.length : 0;
-
-const wDev = w.map((s) => s.mag - wAvg);
-const wVar = wDev.length > 1 ? wDev.reduce((acc, v) => acc + v * v, 0) / wDev.length : 0;
-const wStd = Math.sqrt(wVar);
-const coherence = clamp(100 - wStd * 120, 0, 100);
-
-return { tagT, peak: wPeak, avg: wAvg, coherence };
-});
+const result = classify(stability, controlTime);
 
 return {
-savedAt: run.savedAt,
-durationMs: run.durationMs,
-sampleCount: samples.length,
-tagCount: tags.length,
-avg,
-peak,
-baseline,
-std,
+avg: Number(avg.toFixed(2)),
+peak: Number(peak.toFixed(2)),
 stability,
 controlTime,
-joltCount,
-verdict,
-tagWindows,
+jolts,
+tags: run.tags?.length ?? 0,
+durationSec: Math.round((run.durationMs || 0) / 1000),
+result,
 };
 }, [run]);
 
-const btn: React.CSSProperties = {
-padding: "10px 12px",
-borderRadius: 10,
-border: "1px solid rgba(255,255,255,0.16)",
-background: "rgba(255,255,255,0.06)",
-color: "white",
-cursor: "pointer",
-textDecoration: "none",
-display: "inline-flex",
-alignItems: "center",
-gap: 8,
-};
-
-const shareText = useMemo(() => {
-if (!computed) return "";
-const seconds = Math.round(computed.durationMs / 1000);
-return [
-`Axis Measure`,
-`Result: ${computed.verdict}`,
-`Stability: ${computed.stability.toFixed(0)}%`,
-`Control Time: ${computed.controlTime}%`,
-`Jolts: ${computed.joltCount}`,
-`Avg: ${computed.avg.toFixed(2)} • Peak: ${computed.peak.toFixed(2)}`,
-`Tags: ${computed.tagCount} • Duration: ${seconds}s`,
-`axismeasure.com`,
-].join("\n");
-}, [computed]);
-
-async function copySummary() {
-try {
-await navigator.clipboard.writeText(shareText);
-setToast("Copied summary");
-setTimeout(() => setToast(null), 1200);
-} catch {
-setToast("Copy failed");
-setTimeout(() => setToast(null), 1200);
-}
-}
-
-async function nativeShare() {
-if (!computed) return;
-const seconds = Math.round(computed.durationMs / 1000);
-
-try {
-const anyNav = navigator as any;
-if (anyNav.share) {
-await anyNav.share({
-title: "Axis Measure",
-text: shareText,
-url: "https://axismeasure.com/measure",
-});
-} else {
-await copySummary();
-}
-} catch {
-// user canceled share, fine
-}
-}
-
 return (
-<main style={{ padding: 16 }}>
-<div style={{ padding: "12px 0 8px" }}>
-<div style={{ opacity: 0.75, fontSize: 13 }}>Axis</div>
-<h1 style={{ margin: "6px 0 0", fontSize: 26 }}>Measure</h1>
-<div style={{ marginTop: 10, opacity: 0.75, maxWidth: 720 }}>
+<div className="min-h-screen bg-black text-white">
+<div className="max-w-2xl mx-auto p-6">
+<div className="flex items-center gap-2 mb-5">
+<div className="h-2 w-2 rounded-full bg-emerald-400" />
+<div className="text-lg font-semibold">Axis Measure</div>
+</div>
+
+<div className={card()}>
+<div className="text-3xl font-semibold">Measure</div>
+<div className="text-sm text-neutral-400 mt-2">
 Measure auto-computes from your most recent Run (saved locally on this device).
 </div>
-</div>
 
-{/* SHARE CARD */}
-<div
-style={{
-marginTop: 14,
-border: "1px solid rgba(0,255,180,0.18)",
-borderRadius: 16,
-padding: 14,
-background: "rgba(0,255,180,0.03)",
-}}
->
-<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-<div>
-<div style={{ opacity: 0.75, fontSize: 12 }}>Share</div>
-<div style={{ fontSize: 18, fontWeight: 800, marginTop: 4 }}>
-{computed ? computed.verdict : "No run yet"}
-</div>
-<div style={{ marginTop: 6, opacity: 0.7, fontSize: 12 }}>
-{computed
-? `Stability ${computed.stability.toFixed(0)}% • Control ${computed.controlTime}% • Jolts ${computed.joltCount}`
-: "Go to Run, Start, then Stop. Come back here."}
-</div>
-</div>
-
-<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-<button type="button" onClick={nativeShare} style={{ ...btn, opacity: computed ? 1 : 0.55 }} disabled={!computed}>
-Share
-</button>
-<button type="button" onClick={copySummary} style={{ ...btn, opacity: computed ? 1 : 0.55 }} disabled={!computed}>
-Copy Summary
-</button>
-<Link href="/run" style={btn}>
+<div className="flex gap-2 mt-4">
+<Link href="/run" className="px-4 py-3 rounded-xl border border-neutral-700 bg-neutral-900 text-sm">
 Go to Run
 </Link>
-<button type="button" onClick={() => setRefreshNonce((n) => n + 1)} style={btn}>
-Refresh
-</button>
 </div>
 </div>
 
-{computed && (
-<pre
-style={{
-marginTop: 12,
-padding: 12,
-borderRadius: 12,
-border: "1px solid rgba(255,255,255,0.10)",
-background: "rgba(0,0,0,0.35)",
-whiteSpace: "pre-wrap",
-wordBreak: "break-word",
-fontSize: 12,
-opacity: 0.9,
-}}
->
-{shareText}
-</pre>
-)}
-
-{toast && (
-<div style={{ marginTop: 10, fontSize: 12, opacity: 0.85 }}>
-{toast}
+{!computed ? (
+<div className={`${card()} mt-4`}>
+<div className="text-sm text-neutral-400">Result</div>
+<div className="text-3xl font-semibold mt-2">Searching</div>
+<div className="text-sm text-neutral-500 mt-2">
+No recent Run found on this device. Do a Run, press Stop, then come back.
 </div>
-)}
+</div>
+) : (
+<div className={`${card()} mt-4`}>
+<div className="text-sm text-neutral-400">Result</div>
+<div className="text-3xl font-semibold mt-2">{computed.result}</div>
+
+<div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-4">
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Stability</div>
+<div className="text-3xl font-semibold mt-2">{computed.stability}%</div>
 </div>
 
-{/* MAIN RESULT CARD */}
-<div
-style={{
-marginTop: 14,
-border: "1px solid rgba(255,255,255,0.12)",
-borderRadius: 16,
-padding: 14,
-background: "rgba(255,255,255,0.03)",
-}}
->
-<div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
-<div>
-<div style={{ opacity: 0.7, fontSize: 12 }}>Result</div>
-<div style={{ fontSize: 20, fontWeight: 800, marginTop: 4 }}>{computed?.verdict ?? "No run saved yet"}</div>
-<div style={{ marginTop: 6, opacity: 0.65, fontSize: 12 }}>
-{computed
-? `Samples: ${computed.sampleCount} • Tags: ${computed.tagCount} • Duration: ${Math.round(
-computed.durationMs / 1000
-)}s`
-: "Go to Run, Start, then Stop. Then come back here."}
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Control Time</div>
+<div className="text-3xl font-semibold mt-2">{computed.controlTime}%</div>
+</div>
+
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Avg</div>
+<div className="text-3xl font-semibold mt-2">{computed.avg}</div>
+</div>
+
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Peak</div>
+<div className="text-3xl font-semibold mt-2">{computed.peak}</div>
+</div>
+
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Jolts</div>
+<div className="text-3xl font-semibold mt-2">{computed.jolts}</div>
+</div>
+
+<div className={metric()}>
+<div className="text-xs text-neutral-400">Tags • Duration</div>
+<div className="text-3xl font-semibold mt-2">
+{computed.tags} • {computed.durationSec}s
 </div>
 </div>
 </div>
 
-<div
-style={{
-display: "grid",
-gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
-gap: 10,
-marginTop: 14,
-}}
->
-<Stat label="Stability" value={computed ? `${computed.stability.toFixed(0)}%` : "—"} />
-<Stat label="Control Time" value={computed ? `${computed.controlTime}%` : "—"} />
-<Stat label="Jolt Count" value={computed ? String(computed.joltCount) : "—"} />
-<Stat label="Avg Magnitude" value={computed ? computed.avg.toFixed(2) : "—"} />
-<Stat label="Peak Magnitude" value={computed ? computed.peak.toFixed(2) : "—"} />
-<Stat label="Baseline" value={computed ? computed.baseline.toFixed(2) : "—"} />
-</div>
-
-{computed && computed.tagWindows.length > 0 && (
-<div style={{ marginTop: 14 }}>
-<div style={{ opacity: 0.75, fontSize: 12 }}>Decision Windows (last 12 tags)</div>
-
-<div style={{ display: "grid", gap: 10, marginTop: 10 }}>
-{computed.tagWindows.map((w, idx) => (
-<div
-key={`${w.tagT}-${idx}`}
-style={{
-border: "1px solid rgba(255,255,255,0.10)",
-borderRadius: 14,
-padding: 12,
-background: "rgba(255,255,255,0.02)",
-display: "flex",
-justifyContent: "space-between",
-gap: 12,
-flexWrap: "wrap",
-}}
->
-<div>
-<div style={{ opacity: 0.7, fontSize: 12 }}>Tag</div>
-<div style={{ fontSize: 16, fontWeight: 700 }}>{Math.round(w.tagT / 100) / 10}s</div>
-</div>
-
-<div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-<MiniStat label="Window Peak" value={w.peak ? w.peak.toFixed(2) : "—"} />
-<MiniStat label="Window Avg" value={w.avg ? w.avg.toFixed(2) : "—"} />
-<MiniStat label="Coherence" value={`${w.coherence.toFixed(0)}%`} />
-</div>
-</div>
-))}
-</div>
-
-<div style={{ marginTop: 10, opacity: 0.65, fontSize: 12 }}>
-Next: we’ll label each tag type (drive / stop / change-direction) so Measure becomes “what happened” not just numbers.
+<div className="text-xs text-neutral-500 mt-4">
+Next: we’ll compute windows around tags (drive/stop/change-direction) and save each Measure to History.
 </div>
 </div>
 )}
 </div>
-</main>
+</div>
 );
 }
