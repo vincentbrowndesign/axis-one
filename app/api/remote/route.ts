@@ -33,6 +33,7 @@ time: Date.now(),
 return NextResponse.json({ ok: true })
 } catch (err) {
 console.error(err)
+
 return NextResponse.json(
 { error: "Server error" },
 { status: 500 }
