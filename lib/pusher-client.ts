@@ -1,8 +1,14 @@
-// lib/pusher-client.ts
 import Pusher from "pusher-js";
 
+function required(name: string) {
+const v = process.env[name];
+if (!v) throw new Error(`Missing env var: ${name}`);
+return v;
+}
+
 export function makePusherClient() {
-const key = process.env.NEXT_PUBLIC_PUSHER_KEY!;
-const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER!;
-return new Pusher(key, { cluster });
+return new Pusher(required("NEXT_PUBLIC_PUSHER_KEY"), {
+cluster: required("NEXT_PUBLIC_PUSHER_CLUSTER"),
+forceTLS: true,
+});
 }

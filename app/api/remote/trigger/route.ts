@@ -1,53 +1,37 @@
-// app/api/remote/trigger/route.ts
 import { NextResponse } from "next/server";
-import Pusher from "pusher";
+import { pusherServer } from "@/lib/pusher-server";
 
-export const runtime = "nodejs"; // important (Pusher server SDK needs node)
+export const runtime = "nodejs"; // IMPORTANT for pusher server lib
 
-const pusher = new Pusher({
-appId: process.env.PUSHER_APP_ID || "",
-key: process.env.PUSHER_KEY || "",
-secret: process.env.PUSHER_SECRET || "",
-cluster: process.env.PUSHER_CLUSTER || "",
-useTLS: true,
-});
-
-type Action = "start" | "stop" | "decision" | "tag" | "ping";
+type Action = "START" | "STOP" | "DECISION" | "TAG";
 
 export async function POST(req: Request) {
 try {
 const body = await req.json();
-const sid = String(body?.sid || "").trim();
-const action = String(body?.action || "").trim() as Action;
+const sessionId = String(body?.sessionId || "");
+const action = String(body?.action || "") as Action;
+const meta = body?.meta ?? {};
 
-if (!sid) {
-return NextResponse.json({ ok: false, error: "Missing sid" }, { status: 400 });
+if (!sessionId) {
+return NextResponse.json({ ok: false, error: "Missing sessionId" }, { status: 400 });
 }
-if (!action) {
-return NextResponse.json({ ok: false, error: "Missing action" }, { status: 400 });
-}
-
-// Basic env validation (helps you debug instantly on Vercel)
-const missing = ["PUSHER_APP_ID", "PUSHER_KEY", "PUSHER_SECRET", "PUSHER_CLUSTER"].filter(
-(k) => !process.env[k]
-);
-if (missing.length) {
-return NextResponse.json(
-{ ok: false, error: `Missing env: ${missing.join(", ")}` },
-{ status: 500 }
-);
+if (!["START", "STOP", "DECISION", "TAG"].includes(action)) {
+return NextResponse.json({ ok: false, error: "Invalid action" }, { status: 400 });
 }
 
-const channel = `axis-one-${sid}`;
-await pusher.trigger(channel, "control", {
+const channel = `private-axis-${sessionId}`;
+const event = "remote-command";
+
+await pusherServer.trigger(channel, event, {
 action,
+meta,
 ts: Date.now(),
 });
 
-return NextResponse.json({ ok: true, channel, action });
+return NextResponse.json({ ok: true });
 } catch (e: any) {
 return NextResponse.json(
-{ ok: false, error: e?.message || "Server error" },
+{ ok: false, error: e?.message ?? "Server error" },
 { status: 500 }
 );
 }

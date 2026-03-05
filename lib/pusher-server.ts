@@ -1,10 +1,15 @@
-// lib/pusher-server.ts
 import Pusher from "pusher";
 
+function required(name: string) {
+const v = process.env[name];
+if (!v) throw new Error(`Missing env var: ${name}`);
+return v;
+}
+
 export const pusherServer = new Pusher({
-appId: process.env.PUSHER_APP_ID || "",
-key: process.env.NEXT_PUBLIC_PUSHER_KEY || "",
-secret: process.env.PUSHER_SECRET || "",
-cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER || "",
+appId: required("PUSHER_APP_ID"),
+key: required("PUSHER_KEY"),
+secret: required("PUSHER_SECRET"),
+cluster: required("PUSHER_CLUSTER"),
 useTLS: true,
 });

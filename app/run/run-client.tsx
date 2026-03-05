@@ -1,299 +1,336 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import Pusher from "pusher-js";
-import { QRCodeCanvas } from "qrcode.react";
+import AxisLineCanvas from "@/components/AxisLineCanvas";
+import { makePusherClient } from "@/lib/pusher-client";
 
-type Action = "start" | "stop" | "decision" | "tag" | "ping";
+type RunState = "idle" | "ready" | "capturing";
 
-function createId(prefix = "sess_") {
+type Sample = {
+t: number;
+ax: number;
+ay: number;
+az: number;
+amag: number; // accel+gravity magnitude
+};
+
+function id(prefix = "sess_") {
 return prefix + Math.random().toString(36).slice(2, 14);
 }
 
-export default function RunClient() {
-const [sid, setSid] = useState<string>("");
-const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
-const [capturing, setCapturing] = useState(false);
-const [samples, setSamples] = useState(0);
-const [tags, setTags] = useState(0);
-
-const origin = useMemo(() => (typeof window === "undefined" ? "" : window.location.origin), []);
-const controlUrl = useMemo(() => {
-if (!origin || !sid) return "";
-return `${origin}/control?sid=${encodeURIComponent(sid)}`;
-}, [origin, sid]);
-
-// live line (simple rolling buffer)
-const bufRef = useRef<number[]>([]);
-const [line, setLine] = useState<number[]>([]);
-
-// Read sid from URL / storage
-useEffect(() => {
-const url = new URL(window.location.href);
-const qsSid = url.searchParams.get("sid");
-const stored = window.localStorage.getItem("axis:run:sid");
-const initial = qsSid || stored || createId("sess_");
-setSid(initial);
-window.localStorage.setItem("axis:run:sid", initial);
-
-// keep URL with sid
-url.searchParams.set("sid", initial);
-window.history.replaceState({}, "", url.toString());
-}, []);
-
-// Subscribe to controller events
-useEffect(() => {
-if (!sid) return;
-
-const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
-const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
-
-if (!key || !cluster) {
-console.warn("Missing NEXT_PUBLIC_PUSHER_KEY or NEXT_PUBLIC_PUSHER_CLUSTER");
-return;
+function clamp(n: number, lo: number, hi: number) {
+return Math.max(lo, Math.min(hi, n));
 }
 
-const p = new Pusher(key, { cluster });
+// Simple high-pass-ish: y[n] = a*(y[n-1] + x[n] - x[n-1])
+function hpFilter(series: number[], a = 0.92) {
+const out: number[] = [];
+let y = 0;
+let prev = series[0] ?? 0;
+for (let i = 0; i < series.length; i++) {
+const x = series[i] ?? 0;
+y = a * (y + x - prev);
+out.push(y);
+prev = x;
+}
+return out;
+}
 
-const channelName = `axis-one-${sid}`;
+export default function RunClient() {
+const [runState, setRunState] = useState<RunState>("idle");
+const [permission, setPermission] = useState<"unknown" | "granted" | "denied">("unknown");
+const [sessionId, setSessionId] = useState<string>(() => id());
+const [samples, setSamples] = useState<Sample[]>([]);
+const [tags, setTags] = useState<number>(0);
+const [lastCmd, setLastCmd] = useState<string>("");
+
+const capturingRef = useRef(false);
+const rafRef = useRef<number | null>(null);
+
+// iOS motion
+const lastAccelRef = useRef<{ x: number; y: number; z: number } | null>(null);
+const lastAccelGRef = useRef<{ x: number; y: number; z: number } | null>(null);
+
+const channelName = useMemo(() => `private-axis-${sessionId}`, [sessionId]);
+
+// Subscribe to remote commands
+useEffect(() => {
+const p = makePusherClient();
 const ch = p.subscribe(channelName);
 
-ch.bind("control", (payload: { action?: Action }) => {
-const action = payload?.action;
-if (!action) return;
+const handler = (payload: any) => {
+const action = String(payload?.action || "");
+setLastCmd(action);
 
-if (action === "start") startCapture();
-if (action === "stop") stopCapture();
-if (action === "decision") addDecision();
-if (action === "tag") addTag();
-if (action === "ping") console.log("PING", Date.now());
-});
+if (action === "START") doStart();
+if (action === "STOP") doStop();
+if (action === "TAG") doTag();
+if (action === "DECISION") doDecision();
+};
+
+ch.bind("remote-command", handler);
 
 return () => {
 try {
-ch.unbind_all();
+ch.unbind("remote-command", handler);
 p.unsubscribe(channelName);
 p.disconnect();
 } catch {}
 };
 // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [sid]);
+}, [channelName]);
 
-async function enableSensors() {
+// DeviceMotion listener (does nothing until capturingRef true)
+useEffect(() => {
+const onMotion = (e: DeviceMotionEvent) => {
+// prefer accel+gravity (includes gravity) for your “structure under load” baseline
+const ag = e.accelerationIncludingGravity;
+const a = e.acceleration;
+
+if (a && (a.x !== null || a.y !== null || a.z !== null)) {
+lastAccelRef.current = {
+x: Number(a.x ?? 0),
+y: Number(a.y ?? 0),
+z: Number(a.z ?? 0),
+};
+}
+if (ag && (ag.x !== null || ag.y !== null || ag.z !== null)) {
+lastAccelGRef.current = {
+x: Number(ag.x ?? 0),
+y: Number(ag.y ?? 0),
+z: Number(ag.z ?? 0),
+};
+}
+};
+
+window.addEventListener("devicemotion", onMotion);
+return () => window.removeEventListener("devicemotion", onMotion);
+}, []);
+
+// capture loop
+const pump = () => {
+if (!capturingRef.current) return;
+
+const ag = lastAccelGRef.current;
+const a = lastAccelRef.current;
+
+// if no sensor data, keep looping but don't push garbage
+if (ag) {
+const amag = Math.sqrt(ag.x * ag.x + ag.y * ag.y + ag.z * ag.z);
+const now = performance.now();
+
+setSamples((prev) => {
+const next: Sample[] = [
+...prev,
+{
+t: now,
+ax: a?.x ?? 0,
+ay: a?.y ?? 0,
+az: a?.z ?? 0,
+amag,
+},
+];
+
+// keep last ~10 seconds at ~60hz = ~600 samples (lightweight)
+const max = 700;
+if (next.length > max) return next.slice(next.length - max);
+return next;
+});
+
+setRunState("capturing");
+}
+
+rafRef.current = requestAnimationFrame(pump);
+};
+
+const enableSensors = async () => {
 try {
-// iOS Safari requires user gesture + requestPermission (when available)
-const anyWin = window as any;
-
-if (typeof anyWin.DeviceMotionEvent?.requestPermission === "function") {
-const res = await anyWin.DeviceMotionEvent.requestPermission();
+// iOS requires permission request
+const anyDM = DeviceMotionEvent as any;
+if (typeof anyDM?.requestPermission === "function") {
+const res = await anyDM.requestPermission();
 if (res !== "granted") {
 setPermission("denied");
 return;
 }
 }
-
 setPermission("granted");
+setRunState("ready");
 } catch {
 setPermission("denied");
 }
-}
+};
 
-// basic accel+gravity magnitude feed (DeviceMotion)
-useEffect(() => {
-function onMotion(e: DeviceMotionEvent) {
-if (!capturing) return;
-
-const ax = e.accelerationIncludingGravity?.x ?? 0;
-const ay = e.accelerationIncludingGravity?.y ?? 0;
-const az = e.accelerationIncludingGravity?.z ?? 0;
-
-const mag = Math.sqrt(ax * ax + ay * ay + az * az);
-
-// high-pass-ish: subtract rolling mean (cheap + stable)
-const buf = bufRef.current;
-buf.push(mag);
-if (buf.length > 240) buf.shift(); // ~4 seconds @ 60Hz
-const mean = buf.reduce((a, b) => a + b, 0) / buf.length;
-const hp = mag - mean;
-
-// line buffer for rendering
-const lineBuf = line.slice();
-lineBuf.push(hp);
-if (lineBuf.length > 200) lineBuf.shift();
-setLine(lineBuf);
-
-setSamples((s) => s + 1);
-}
-
-window.addEventListener("devicemotion", onMotion);
-return () => window.removeEventListener("devicemotion", onMotion);
-// eslint-disable-next-line react-hooks/exhaustive-deps
-}, [capturing, line]);
-
-function startCapture() {
+const doStart = () => {
 if (permission !== "granted") return;
-setCapturing(true);
-}
+if (capturingRef.current) return;
 
-function stopCapture() {
-setCapturing(false);
-}
+capturingRef.current = true;
+setLastCmd("START");
+rafRef.current = requestAnimationFrame(pump);
+};
 
-function addDecision() {
+const doStop = () => {
+capturingRef.current = false;
+if (rafRef.current) cancelAnimationFrame(rafRef.current);
+rafRef.current = null;
+setRunState(permission === "granted" ? "ready" : "idle");
+setLastCmd("STOP");
+};
+
+const doTag = () => {
 setTags((t) => t + 1);
-}
+setLastCmd("TAG");
+};
 
-function addTag() {
+const doDecision = () => {
+// for now, decision = tag (you can split later)
 setTags((t) => t + 1);
-}
+setLastCmd("DECISION");
+};
 
-const btnBase =
-"rounded-3xl border border-white/10 bg-white/5 px-6 py-8 text-xl font-semibold tracking-tight active:scale-[0.99] transition";
-const btnPrimary =
-"rounded-3xl border border-white/10 bg-white text-black px-6 py-8 text-xl font-semibold tracking-tight active:scale-[0.99] transition";
-const card =
-"rounded-3xl border border-white/10 bg-white/5 backdrop-blur px-6 py-6 shadow-[0_0_0_1px_rgba(255,255,255,0.04)]";
+const downloadJSON = () => {
+const payload = {
+exported_at: new Date().toISOString(),
+session_id: sessionId,
+samples_count: samples.length,
+tags_count: tags,
+samples,
+};
+const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+const url = URL.createObjectURL(blob);
+const a = document.createElement("a");
+a.href = url;
+a.download = `axis-one-session-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
+a.click();
+URL.revokeObjectURL(url);
+};
+
+// Axis Line series
+const axisLine = useMemo(() => {
+if (!samples.length) return [];
+const mags = samples.map((s) => s.amag);
+const filtered = hpFilter(mags, 0.92);
+// keep it visually stable
+const scaled = filtered.map((v) => clamp(v, -15, 15));
+return scaled;
+}, [samples]);
 
 return (
-<main className="min-h-screen bg-black text-white px-6 py-10">
-<div className="max-w-xl mx-auto">
-<h1 className="text-6xl font-semibold tracking-tight">Run (Axis One)</h1>
-<p className="text-white/60 mt-3">
+<main className="min-h-screen bg-black text-white px-5 py-10">
+<div className="max-w-xl mx-auto space-y-6">
+<header>
+<h1 className="text-5xl font-semibold tracking-tight">Run (Axis One)</h1>
+<p className="text-white/60 mt-2">
 Capture motion, tag decision windows, export the session.
 </p>
+<div className="text-white/40 text-sm mt-3">
+Session: <span className="text-white/70">{sessionId}</span>{" "}
+{lastCmd ? (
+<span className="ml-3 text-white/40">
+last: <span className="text-white/70">{lastCmd}</span>
+</span>
+) : null}
+</div>
+</header>
 
-<div className="mt-6 grid gap-4">
-<div className={card}>
-<div className="text-white/60 text-sm">Axis One • Run</div>
-<div className="text-5xl font-semibold mt-2">
-{permission === "granted" ? (capturing ? "Capturing..." : "Permission granted.") : "Idle"}
+<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
+<div className="text-white/40 text-sm mb-2">Axis One • Run</div>
+<div className="text-4xl font-semibold">
+{permission === "granted" ? (runState === "capturing" ? "Capturing…" : "Permission granted.") : "Idle"}
 </div>
 
 <div className="grid grid-cols-2 gap-4 mt-6">
-<button onClick={enableSensors} className={btnBase}>
+<button
+onClick={enableSensors}
+className="rounded-3xl border border-white/10 bg-white/10 px-6 py-7 text-xl font-semibold active:scale-[0.99]"
+>
 1) Enable
 <br />
 Sensors
 </button>
+
 <button
-onClick={startCapture}
-className={btnPrimary}
+onClick={doStart}
 disabled={permission !== "granted"}
+className="rounded-3xl px-6 py-7 text-xl font-semibold bg-white text-black disabled:opacity-40 active:scale-[0.99]"
 >
 2) Start
 </button>
 
-<button onClick={stopCapture} className={btnBase} disabled={!capturing}>
+<button
+onClick={doStop}
+disabled={runState !== "capturing"}
+className="rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
+>
 Stop
 </button>
-<button onClick={addDecision} className={btnBase} disabled={!capturing}>
+
+<button
+onClick={doDecision}
+disabled={runState !== "capturing"}
+className="rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
+>
 Decision
 </button>
-</div>
 
-<button onClick={addTag} className="mt-4 rounded-3xl border border-white/10 bg-white/5 py-6 text-xl font-semibold">
+<button
+onClick={doTag}
+disabled={runState !== "capturing"}
+className="col-span-2 rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold disabled:opacity-40 active:scale-[0.99]"
+>
 3) Tag
 </button>
 
-<button className="mt-4 rounded-3xl border border-white/10 bg-white/5 py-6 text-xl font-semibold">
+<button
+onClick={downloadJSON}
+className="col-span-2 rounded-3xl border border-white/10 bg-white/10 px-6 py-6 text-xl font-semibold active:scale-[0.99]"
+>
 Download JSON
 </button>
+</div>
+</section>
 
-<div className="mt-6 rounded-3xl border border-white/10 bg-black/40 px-5 py-5">
+<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
 <div className="flex items-center justify-between">
-<div className="text-3xl font-semibold">Axis Line</div>
+<h2 className="text-3xl font-semibold">Axis Line</h2>
 <div className="text-white/50">live signal</div>
 </div>
 
-<div className="mt-4 rounded-2xl border border-white/10 bg-black/60 p-3">
-<svg viewBox="0 0 400 140" width="100%" height="140" role="img" aria-label="Axis line">
-<path
-d={line.length ? buildPath(line, 400, 140) : ""}
-fill="none"
-stroke="white"
-strokeWidth="2"
-strokeLinejoin="round"
-strokeLinecap="round"
-opacity="0.95"
-/>
-{/* simple grid */}
-{Array.from({ length: 7 }).map((_, i) => (
-<line
-key={`v${i}`}
-x1={(i * 400) / 6}
-y1={0}
-x2={(i * 400) / 6}
-y2={140}
-stroke="rgba(255,255,255,0.08)"
-strokeWidth="1"
-/>
-))}
-{Array.from({ length: 5 }).map((_, i) => (
-<line
-key={`h${i}`}
-x1={0}
-y1={(i * 140) / 4}
-x2={400}
-y2={(i * 140) / 4}
-stroke="rgba(255,255,255,0.08)"
-strokeWidth="1"
-/>
-))}
-</svg>
+<div className="mt-4 rounded-3xl border border-white/10 bg-black/40 p-3">
+<AxisLineCanvas data={axisLine} height={160} />
 </div>
 
-<div className="mt-3 text-white/45 text-sm">
-(Stable high-pass from accel+gravity magnitude.)
-</div>
-</div>
+<p className="text-white/45 mt-3">
+(Stable high-pass signal from accel+gravity magnitude. Next step is D/R/J extraction.)
+</p>
+</section>
 
-<div className="grid grid-cols-2 gap-4 mt-6">
-<div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-6">
-<div className="text-white/50">Samples</div>
-<div className="text-6xl font-semibold mt-1">{samples}</div>
-<div className="text-white/45 mt-1">~60 Hz</div>
+<section className="grid grid-cols-2 gap-4">
+<div className="rounded-3xl border border-white/10 bg-white/5 p-5">
+<div className="text-white/45">Samples</div>
+<div className="text-6xl font-semibold mt-2">{samples.length}</div>
+<div className="text-white/35 mt-1">~60 Hz</div>
 </div>
-<div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-6">
-<div className="text-white/50">Tags</div>
-<div className="text-6xl font-semibold mt-1">{tags}</div>
-<div className="text-white/45 mt-1">Decision events</div>
+<div className="rounded-3xl border border-white/10 bg-white/5 p-5">
+<div className="text-white/45">Tags</div>
+<div className="text-6xl font-semibold mt-2">{tags}</div>
+<div className="text-white/35 mt-1">Decision events</div>
 </div>
-</div>
-</div>
+</section>
 
-<div className={card}>
-<div className="text-white/60 text-sm mb-3">Pair a controller</div>
-<div className="flex items-center gap-4">
-<div className="rounded-2xl bg-white p-3">
-<QRCodeCanvas value={controlUrl || "about:blank"} size={150} />
-</div>
-<div className="text-sm text-white/60 break-all">
-Open this on the other device:
-<div className="mt-2 text-white/80">{controlUrl || "—"}</div>
-</div>
+<section className="rounded-3xl border border-white/10 bg-white/5 p-5">
+<div className="text-white/50 text-sm mb-2">Pairing</div>
+<div className="text-white/80">
+Open Controller on another device:
+<div className="mt-2 font-mono text-white/70 break-all">
+{typeof window !== "undefined"
+? `${window.location.origin}/control?sid=${encodeURIComponent(sessionId)}`
+: ""}
 </div>
 </div>
-</div>
+</section>
 </div>
 </main>
 );
-}
-
-function buildPath(data: number[], w: number, h: number) {
-const min = Math.min(...data);
-const max = Math.max(...data);
-const range = Math.max(1e-6, max - min);
-
-const pad = 10;
-const innerH = h - pad * 2;
-const innerW = w;
-
-const points = data.map((v, i) => {
-const x = (i / Math.max(1, data.length - 1)) * (innerW - 2) + 1;
-const t = (v - min) / range; // 0..1
-const y = pad + (1 - t) * innerH;
-return [x, y] as const;
-});
-
-return points.reduce((d, [x, y], i) => (i === 0 ? `M ${x} ${y}` : `${d} L ${x} ${y}`), "");
 }
