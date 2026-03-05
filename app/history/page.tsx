@@ -25,6 +25,15 @@ setSelected(0);
 try {
 const txt = await file.text();
 const json = JSON.parse(txt) as AxisOneSession;
+
+// Debug: confirms whether tags exist in the file
+console.log("SESSION META:", {
+samples_count: json.samples_count,
+tags_count: json.tags_count,
+tags_len: (json as any).tags?.length,
+first_tags: (json as any).tags?.slice?.(0, 3),
+});
+
 setSession(json);
 
 const out = interpretAxisOneSession(json, {
@@ -35,8 +44,9 @@ N: 128,
 gyroUnits: "deg/s",
 });
 
-// @ts-expect-error optional warning
-if (out.warning) setError(String(out.warning));
+// Some sessions might return a warning string
+if ((out as any).warning) setError(String((out as any).warning));
+
 setDecisions(out.decisions);
 } catch (e: any) {
 setError(e?.message ?? "Failed to load JSON.");
@@ -169,8 +179,8 @@ Window: {fmtMs(d.windowStartMs)} → {fmtMs(d.windowEndMs)}
 </div>
 ) : session ? (
 <div className="mt-5 text-sm text-white/70">
-Loaded session, but no decisions were produced. If your export has <b>tags_count</b> but no <b>tags</b>{" "}
-array, update the exporter to include tags.
+Loaded session, but no decisions were produced. This usually means the export is missing a{" "}
+<b>tags: []</b> array (even if <b>tags_count</b> is non-zero). Fix the exporter to include tags.
 </div>
 ) : null}
 </div>
