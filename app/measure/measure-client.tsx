@@ -16,6 +16,8 @@ charge: number;
 };
 
 const BANK_KEY = "axis_shared_charge_v1";
+const ACCENT = "rgba(78,245,225,1)";
+const ACCENT_SOFT = "rgba(78,245,225,0.35)";
 
 function getPyronStage(charge: number) {
 if (charge < 50) return "Seed";
@@ -59,7 +61,7 @@ export default function MeasureClient() {
 const [running, setRunning] = useState(false);
 const [isCalibrating, setIsCalibrating] = useState(false);
 const [time, setTime] = useState(0);
-const [bank, setBank] = useState(0);
+const [charge, setCharge] = useState(0);
 
 const [reading, setReading] = useState<Reading>({
 form: "In Control",
@@ -79,7 +81,7 @@ const motionEnabledRef = useRef(false);
 
 useEffect(() => {
 const raw = localStorage.getItem(BANK_KEY);
-setBank(raw ? Number(raw) || 0 : 0);
+setCharge(raw ? Number(raw) || 0 : 0);
 
 return () => {
 window.removeEventListener("devicemotion", handleMotion);
@@ -87,9 +89,9 @@ if (timerRef.current) clearInterval(timerRef.current);
 };
 }, []);
 
-function writeBank(next: number) {
+function writeCharge(next: number) {
 localStorage.setItem(BANK_KEY, String(next));
-setBank(next);
+setCharge(next);
 window.dispatchEvent(
 new CustomEvent("axis-charge-updated", {
 detail: next,
@@ -99,7 +101,7 @@ detail: next,
 
 function resetAll() {
 localStorage.removeItem(BANK_KEY);
-setBank(0);
+setCharge(0);
 
 window.dispatchEvent(
 new CustomEvent("axis-charge-updated", {
@@ -235,8 +237,8 @@ charge: sessionCharge,
 
 if (running && sessionCharge > 0) {
 const raw = localStorage.getItem(BANK_KEY);
-const currentBank = raw ? Number(raw) || 0 : 0;
-writeBank(currentBank + sessionCharge);
+const currentCharge = raw ? Number(raw) || 0 : 0;
+writeCharge(currentCharge + sessionCharge);
 }
 }
 
@@ -280,9 +282,9 @@ timerRef.current = null;
 computeReading(time);
 }
 
-const bankFill = useMemo(() => {
-return Math.min(100, Math.round((bank / 2000) * 100));
-}, [bank]);
+const chargeFill = useMemo(() => {
+return Math.min(100, Math.round((charge / 2000) * 100));
+}, [charge]);
 
 const linePoints = useMemo(() => {
 const values = smoothSeries(samplesRef.current, 4);
@@ -302,7 +304,7 @@ return `${x},${y}`;
 .join(" ");
 }, [time, running, reading.charge]);
 
-const pyronStage = getPyronStage(bank);
+const pyronStage = getPyronStage(charge);
 const pyronSize = getPyronSize(pyronStage);
 
 return (
@@ -358,7 +360,11 @@ flexWrap: "wrap",
 Start
 </button>
 ) : (
-<button onClick={stop} disabled={isCalibrating} style={machineButton(false, isCalibrating)}>
+<button
+onClick={stop}
+disabled={isCalibrating}
+style={machineButton(false, isCalibrating)}
+>
 Off
 </button>
 )}
@@ -384,7 +390,7 @@ fontSize: 14,
 color: "rgba(255,255,255,0.58)",
 }}
 >
-Bank
+Charge
 </div>
 
 <div
@@ -393,7 +399,7 @@ fontSize: 18,
 fontWeight: 700,
 }}
 >
-{bank}
+{charge}
 </div>
 </div>
 
@@ -410,12 +416,11 @@ boxSizing: "border-box",
 >
 <div
 style={{
-width: `${bankFill}%`,
+width: `${chargeFill}%`,
 height: "100%",
 borderRadius: 999,
-background:
-"linear-gradient(90deg, rgba(0,212,166,0.55) 0%, rgba(0,212,166,1) 100%)",
-boxShadow: "0 0 22px rgba(0,212,166,0.35)",
+background: `linear-gradient(90deg, rgba(78,245,225,0.55) 0%, ${ACCENT} 100%)`,
+boxShadow: `0 0 22px ${ACCENT_SOFT}`,
 transition: "width 200ms ease",
 }}
 />
@@ -448,7 +453,7 @@ style={{ width: "100%", height: "100%" }}
 >
 <polyline
 fill="none"
-stroke="rgba(0,212,166,1)"
+stroke={ACCENT}
 strokeWidth="1.8"
 points={linePoints || "0,44 100,44"}
 />
@@ -492,7 +497,7 @@ fontSize: 14,
 color: "rgba(255,255,255,0.58)",
 }}
 >
-Live from Bank
+Ready to ignite
 </div>
 </div>
 
@@ -501,8 +506,9 @@ style={{
 width: pyronSize,
 height: pyronSize,
 borderRadius: "50%",
-background: "radial-gradient(circle, #9fe8ff 0%, #4a8cff 30%, #12306f 70%, #08111f 100%)",
-boxShadow: "0 0 70px rgba(74,140,255,0.4)",
+background:
+"radial-gradient(circle, rgba(160,255,242,0.98) 0%, rgba(78,245,225,0.92) 28%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)",
+boxShadow: `0 0 70px ${ACCENT_SOFT}`,
 transition: "all .35s ease",
 }}
 />
@@ -529,10 +535,10 @@ gap: 12,
 function machineButton(primary: boolean, disabled = false): React.CSSProperties {
 return {
 border: primary
-? "1px solid rgba(0,212,166,0.35)"
+? "1px solid rgba(78,245,225,0.35)"
 : "1px solid rgba(255,255,255,0.12)",
 background: primary
-? "rgba(0,212,166,0.12)"
+? "rgba(78,245,225,0.12)"
 : "rgba(255,255,255,0.05)",
 color: "#f5f7fa",
 borderRadius: 18,

@@ -3,9 +3,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const BANK_KEY = "axis_shared_charge_v1";
+const ACCENT = "rgba(78,245,225,1)";
+const ACCENT_SOFT = "rgba(78,245,225,0.35)";
+const ACCENT_DIM = "rgba(78,245,225,0.12)";
 
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
-type Mood = "Dormant" | "Calm" | "Awake" | "Bright" | "Wild";
+type Mood = "Dormant" | "Calm" | "Awake" | "Bright" | "Charged";
 
 function getStage(charge: number): Stage {
 if (charge < 50) return "Seed";
@@ -20,15 +23,15 @@ if (charge < 50) return "Dormant";
 if (charge < 150) return "Calm";
 if (charge < 400) return "Awake";
 if (charge < 1000) return "Bright";
-return "Wild";
+return "Charged";
 }
 
 function getCoreSize(stage: Stage) {
-if (stage === "Seed") return 150;
-if (stage === "Core") return 168;
-if (stage === "Pulse") return 188;
-if (stage === "Nova") return 212;
-return 236;
+if (stage === "Seed") return 156;
+if (stage === "Core") return 172;
+if (stage === "Pulse") return 194;
+if (stage === "Nova") return 220;
+return 246;
 }
 
 function getRingCount(stage: Stage) {
@@ -65,7 +68,7 @@ return 100;
 
 function getSocketPositions(count: number) {
 if (count <= 0) return [];
-const radius = 154;
+const radius = 156;
 const startAngle = -90;
 
 return Array.from({ length: count }, (_, i) => {
@@ -80,14 +83,13 @@ y: Math.sin(angle) * radius,
 export default function PyronClient() {
 const [bank, setBank] = useState(0);
 const [pulseOn, setPulseOn] = useState(false);
-const [igniting, setIgniting] = useState(false);
-const [spin, setSpin] = useState(0);
-const [flare, setFlare] = useState(false);
+const [surgeOn, setSurgeOn] = useState(false);
+const [touchGlow, setTouchGlow] = useState(false);
 
 const previousBankRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-const igniteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-const flareTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const surgeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const touchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 useEffect(() => {
 const readBank = () => {
@@ -128,28 +130,24 @@ const progress = useMemo(() => getProgress(bank, stage), [bank, stage]);
 const sockets = useMemo(() => getSocketPositions(socketLimit), [socketLimit]);
 
 useEffect(() => {
-const isFirstLoad = previousBankRef.current === null;
-const bankIncreased =
+const firstLoad = previousBankRef.current === null;
+const increased =
 previousBankRef.current !== null && bank > previousBankRef.current;
 
-if (isFirstLoad || bankIncreased) {
-setIgniting(true);
+if (firstLoad || increased) {
+setSurgeOn(true);
 setPulseOn(true);
 
-if (igniteTimeoutRef.current) clearTimeout(igniteTimeoutRef.current);
+if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
 if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
 
-igniteTimeoutRef.current = setTimeout(() => {
-setIgniting(false);
-}, 900);
+surgeTimeoutRef.current = setTimeout(() => {
+setSurgeOn(false);
+}, 1100);
 
 pulseTimeoutRef.current = setTimeout(() => {
 setPulseOn(false);
 }, 260);
-
-if (bankIncreased) {
-setSpin((s) => s + 18);
-}
 }
 
 previousBankRef.current = bank;
@@ -164,7 +162,7 @@ stage === "Seed"
 : stage === "Pulse"
 ? 1150
 : stage === "Nova"
-? 900
+? 920
 : 760;
 
 const interval = setInterval(() => {
@@ -179,17 +177,16 @@ setPulseOn(false);
 return () => clearInterval(interval);
 }, [stage]);
 
-function triggerTouch(extraSpin = 24) {
-setFlare(true);
-setSpin((s) => s + extraSpin);
+function handleOrbTouch() {
+setTouchGlow(true);
 
-if (flareTimeoutRef.current) clearTimeout(flareTimeoutRef.current);
-flareTimeoutRef.current = setTimeout(() => {
-setFlare(false);
-}, 220);
+if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
+touchTimeoutRef.current = setTimeout(() => {
+setTouchGlow(false);
+}, 180);
 
 if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-navigator.vibrate(14);
+navigator.vibrate(12);
 }
 }
 
@@ -197,11 +194,11 @@ const glowStrength =
 stage === "Seed"
 ? 0.34
 : stage === "Core"
-? 0.5
+? 0.48
 : stage === "Pulse"
-? 0.68
+? 0.66
 : stage === "Nova"
-? 0.84
+? 0.82
 : 1;
 
 const chamberMinHeight = 640;
@@ -211,7 +208,7 @@ return (
 style={{
 minHeight: "100dvh",
 background:
-"radial-gradient(circle at center, rgba(8,14,30,1) 0%, rgba(4,8,18,1) 58%, rgba(0,0,0,1) 100%)",
+"radial-gradient(circle at center, rgba(6,12,18,1) 0%, rgba(2,6,10,1) 58%, rgba(0,0,0,1) 100%)",
 color: "white",
 padding: "16px 14px 40px",
 fontFamily:
@@ -260,23 +257,22 @@ style={{
 width: `${progress}%`,
 height: "100%",
 borderRadius: 999,
-background:
-"linear-gradient(90deg, rgba(130,255,235,1) 0%, rgba(84,162,255,1) 100%)",
+background: `linear-gradient(90deg, ${ACCENT} 0%, rgba(78,245,225,0.65) 100%)`,
 transition: "width 220ms ease",
-boxShadow: "0 0 18px rgba(84,162,255,0.35)",
+boxShadow: `0 0 18px ${ACCENT_SOFT}`,
 }}
 />
 </div>
 
 <div
 style={{
-border: "1px solid rgba(255,255,255,0.1)",
+border: "1px solid rgba(255,255,255,0.08)",
 borderRadius: 28,
 minHeight: chamberMinHeight,
 position: "relative",
 overflow: "hidden",
 background:
-"radial-gradient(circle at center, rgba(28,56,120,0.22) 0%, rgba(7,12,24,0.52) 56%, rgba(0,0,0,0.35) 100%)",
+"radial-gradient(circle at center, rgba(10,28,30,0.30) 0%, rgba(5,10,14,0.72) 56%, rgba(0,0,0,0.35) 100%)",
 }}
 >
 {[...Array(ringCount)].map((_, i) => (
@@ -291,9 +287,9 @@ height: 190 + i * 76,
 marginLeft: -(190 + i * 76) / 2,
 marginTop: -(190 + i * 76) / 2,
 borderRadius: "50%",
-border: `1px solid rgba(120,180,255,${0.18 + i * 0.08})`,
-boxShadow: pulseOn ? "0 0 26px rgba(100,160,255,0.14)" : "none",
-transform: `scale(${pulseOn ? 1.025 : 1}) rotate(${spin * 0.08}deg)`,
+border: `1px solid rgba(78,245,225,${0.16 + i * 0.08})`,
+boxShadow: pulseOn || surgeOn ? `0 0 22px ${ACCENT_DIM}` : "none",
+transform: `scale(${surgeOn ? 1.04 : pulseOn ? 1.02 : 1})`,
 transition: "transform 220ms ease, box-shadow 180ms ease",
 }}
 />
@@ -306,18 +302,18 @@ style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-transform: `translate(${pos.x}px, ${pos.y}px) scale(${pulseOn || igniting ? 1.18 : 1})`,
+transform: `translate(${pos.x}px, ${pos.y}px) scale(${surgeOn ? 1.22 : pulseOn ? 1.14 : 1})`,
 width: 18,
 height: 18,
 marginLeft: -9,
 marginTop: -9,
 borderRadius: "50%",
 background:
-pulseOn || igniting
-? "rgba(255,255,255,0.96)"
-: "rgba(255,255,255,0.5)",
+surgeOn || pulseOn
+? "rgba(78,245,225,0.96)"
+: "rgba(78,245,225,0.55)",
 boxShadow:
-pulseOn || igniting ? "0 0 18px rgba(255,255,255,0.42)" : "none",
+surgeOn || pulseOn ? `0 0 18px ${ACCENT_SOFT}` : "none",
 transition: "all 180ms ease",
 }}
 />
@@ -328,24 +324,24 @@ style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: coreSize + 52,
-height: coreSize + 52,
-marginLeft: -(coreSize + 52) / 2,
-marginTop: -(coreSize + 52) / 2,
+width: coreSize + 58,
+height: coreSize + 58,
+marginLeft: -(coreSize + 58) / 2,
+marginTop: -(coreSize + 58) / 2,
 borderRadius: "50%",
-background: igniting
-? "radial-gradient(circle, rgba(180,235,255,0.24) 0%, rgba(80,150,255,0.10) 55%, rgba(0,0,0,0) 100%)"
-: flare
-? "radial-gradient(circle, rgba(160,230,255,0.16) 0%, rgba(70,140,255,0.06) 55%, rgba(0,0,0,0) 100%)"
-: "radial-gradient(circle, rgba(140,220,255,0.08) 0%, rgba(60,140,255,0.03) 55%, rgba(0,0,0,0) 100%)",
-transform: `scale(${igniting ? 1.12 : flare ? 1.05 : 1})`,
+background: surgeOn
+? "radial-gradient(circle, rgba(78,245,225,0.22) 0%, rgba(78,245,225,0.08) 55%, rgba(0,0,0,0) 100%)"
+: touchGlow
+? "radial-gradient(circle, rgba(78,245,225,0.14) 0%, rgba(78,245,225,0.05) 55%, rgba(0,0,0,0) 100%)"
+: "radial-gradient(circle, rgba(78,245,225,0.08) 0%, rgba(78,245,225,0.03) 55%, rgba(0,0,0,0) 100%)",
+transform: `scale(${surgeOn ? 1.12 : touchGlow ? 1.05 : 1})`,
 transition: "all 220ms ease",
 }}
 />
 
 <div
-onClick={() => triggerTouch(28)}
-onTouchStart={() => triggerTouch(18)}
+onClick={handleOrbTouch}
+onTouchStart={handleOrbTouch}
 style={{
 position: "absolute",
 left: "50%",
@@ -355,11 +351,11 @@ height: coreSize,
 marginLeft: -coreSize / 2,
 marginTop: -coreSize / 2,
 borderRadius: "50%",
-border: "1px solid rgba(255,255,255,0.16)",
+border: "1px solid rgba(255,255,255,0.12)",
 background:
-"radial-gradient(circle at 35% 35%, rgba(170,240,255,0.98) 0%, rgba(78,158,255,0.96) 24%, rgba(37,99,235,0.46) 58%, rgba(10,18,34,0.22) 100%)",
-boxShadow: `0 0 ${44 + ringCount * 16}px rgba(59,130,246,${glowStrength}), inset 0 0 54px rgba(255,255,255,0.09)`,
-transform: `scale(${igniting ? 1.08 : pulseOn ? 1.06 : flare ? 1.03 : 1}) rotate(${spin}deg)`,
+"radial-gradient(circle at 35% 35%, rgba(160,255,242,0.98) 0%, rgba(78,245,225,0.92) 26%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)",
+boxShadow: `0 0 ${44 + ringCount * 16}px rgba(78,245,225,${glowStrength}), inset 0 0 54px rgba(255,255,255,0.06)`,
+transform: `scale(${surgeOn ? 1.08 : pulseOn ? 1.05 : touchGlow ? 1.02 : 1})`,
 transition: "transform 240ms ease, box-shadow 220ms ease",
 display: "grid",
 placeItems: "center",
@@ -390,7 +386,13 @@ opacity: 0.78,
 }}
 >
 <div>{socketLimit > 0 ? `${socketLimit} sockets live` : "Dormant core"}</div>
-<div>{stage === "Titan" ? "Fully ignited" : `Next ${nextTarget}`}</div>
+<div>
+{surgeOn
+? "Surge active"
+: stage === "Titan"
+? "Fully ignited"
+: `Next ${nextTarget}`}
+</div>
 </div>
 </div>
 </div>
