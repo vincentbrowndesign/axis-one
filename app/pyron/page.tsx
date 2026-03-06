@@ -1,5 +1,5 @@
-import PyronClient from "./pyron-client"
+import PyronClient from "./pyron-client";
 
 export default function Page() {
-return <PyronClient />
+return <PyronClient />;
 }

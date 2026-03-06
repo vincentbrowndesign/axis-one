@@ -3,8 +3,8 @@ import AxisTopNav from "@/components/AxisTopNav";
 import "./globals.css";
 
 export const metadata: Metadata = {
-title: "Axis Measure",
-description: "Axis reveals activity and turns it into charge.",
+title: "Axis",
+description: "Axis reveals activity. Pyron stores energy.",
 };
 
 export default function RootLayout({
@@ -17,7 +17,7 @@ return (
 <body
 style={{
 margin: 0,
-background: "#050505",
+background: "#030303",
 color: "#f5f7fa",
 fontFamily:
 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
@@ -26,7 +26,7 @@ fontFamily:
 <AxisTopNav />
 <main
 style={{
-maxWidth: 920,
+maxWidth: 980,
 margin: "0 auto",
 padding: "24px 20px 48px",
 }}

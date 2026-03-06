@@ -295,67 +295,118 @@ const pyronSize = getPyronSize(pyronStage);
 return (
 <div
 style={{
-display: "grid",
-gap: 18,
-}}
->
-<section
-style={{
 border: "1px solid rgba(255,255,255,0.08)",
-borderRadius: 28,
-background: "rgba(255,255,255,0.02)",
+background: "#050505",
+borderRadius: 30,
 padding: 22,
+display: "grid",
+gap: 24,
 }}
 >
 <div
 style={{
 display: "flex",
-alignItems: "center",
+alignItems: "flex-start",
 justifyContent: "space-between",
 gap: 16,
-marginBottom: 18,
+flexWrap: "wrap",
 }}
 >
 <div>
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 6 }}>
-Machine
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.58)",
+marginBottom: 6,
+}}
+>
+Axis
 </div>
-<div style={{ fontSize: 30, fontWeight: 700, letterSpacing: "-0.04em" }}>
-{isCalibrating ? "Calibrating" : running ? "Live" : "Ready"}
+<div
+style={{
+fontSize: 34,
+fontWeight: 700,
+letterSpacing: "-0.05em",
+}}
+>
+{isCalibrating ? "Calibrating" : running ? "Live" : "Off"}
 </div>
 </div>
 
-<div style={{ minWidth: 92, textAlign: "right" }}>
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 6 }}>
-Time
-</div>
-<div style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.04em" }}>
-{time}s
-</div>
+<div
+style={{
+display: "flex",
+gap: 12,
+flexWrap: "wrap",
+}}
+>
+{!running && !isCalibrating ? (
+<button
+onClick={start}
+style={machineButton(true)}
+>
+Start
+</button>
+) : (
+<button
+onClick={stop}
+disabled={isCalibrating}
+style={machineButton(false, isCalibrating)}
+>
+Off
+</button>
+)}
+
+<button
+onClick={resetCharge}
+style={secondaryButton()}
+>
+Reset
+</button>
 </div>
 </div>
 
-<div style={{ marginBottom: 18 }}>
+<div
+style={{
+display: "grid",
+gap: 10,
+}}
+>
 <div
 style={{
 display: "flex",
 justifyContent: "space-between",
+gap: 12,
 alignItems: "center",
-marginBottom: 10,
 }}
 >
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)" }}>Stored Charge</div>
-<div style={{ fontSize: 16, fontWeight: 700 }}>{storedCharge}</div>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.58)",
+}}
+>
+Charge
+</div>
+
+<div
+style={{
+fontSize: 18,
+fontWeight: 700,
+}}
+>
+{storedCharge}
+</div>
 </div>
 
 <div
 style={{
 width: "100%",
-height: 30,
+height: 24,
 borderRadius: 999,
-border: "1px solid rgba(255,255,255,0.12)",
+border: "1px solid rgba(255,255,255,0.1)",
 background: "#0a0a0a",
-padding: 4,
+padding: 3,
 boxSizing: "border-box",
 }}
 >
@@ -366,185 +417,175 @@ height: "100%",
 borderRadius: 999,
 background:
 "linear-gradient(90deg, rgba(0,212,166,0.55) 0%, rgba(0,212,166,1) 100%)",
-boxShadow: "0 0 24px rgba(0,212,166,0.35)",
+boxShadow: "0 0 22px rgba(0,212,166,0.35)",
 transition: "width 200ms ease",
 }}
 />
 </div>
 </div>
 
-<div style={{ marginBottom: 18 }}>
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 10 }}>
+<div
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 22,
+padding: 14,
+background: "rgba(255,255,255,0.015)",
+}}
+>
+<div
+style={{
+fontSize: 13,
+color: "rgba(255,255,255,0.55)",
+marginBottom: 10,
+}}
+>
 Axis Line
 </div>
 
-<div
-style={{
-width: "100%",
-height: 96,
-borderRadius: 20,
-border: "1px solid rgba(255,255,255,0.08)",
-background: "rgba(255,255,255,0.02)",
-padding: 10,
-boxSizing: "border-box",
-}}
+<div style={{ width: "100%", height: 120 }}>
+<svg
+viewBox="0 0 100 44"
+preserveAspectRatio="none"
+style={{ width: "100%", height: "100%" }}
 >
-<svg viewBox="0 0 100 44" preserveAspectRatio="none" style={{ width: "100%", height: "100%" }}>
 <polyline
 fill="none"
 stroke="rgba(0,212,166,1)"
-strokeWidth="1.6"
+strokeWidth="1.8"
 points={linePoints || "0,44 100,44"}
 />
 </svg>
 </div>
 </div>
 
-<div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-{!running && !isCalibrating ? (
-<button
-onClick={start}
+<div
 style={{
-border: "1px solid rgba(0,212,166,0.35)",
-background: "rgba(0,212,166,0.12)",
-color: "#f5f7fa",
-borderRadius: 18,
-padding: "16px 26px",
-fontSize: 18,
-fontWeight: 700,
-cursor: "pointer",
+display: "grid",
+gridTemplateColumns: "1fr auto",
+gap: 18,
+alignItems: "center",
+borderTop: "1px solid rgba(255,255,255,0.06)",
+borderBottom: "1px solid rgba(255,255,255,0.06)",
+padding: "20px 0",
 }}
 >
-On
-</button>
-) : (
-<button
-onClick={stop}
-disabled={isCalibrating}
+<div>
+<div
 style={{
-border: "1px solid rgba(255,255,255,0.12)",
-background: "rgba(255,255,255,0.06)",
-color: "#f5f7fa",
-borderRadius: 18,
-padding: "16px 26px",
-fontSize: 18,
-fontWeight: 700,
-cursor: isCalibrating ? "not-allowed" : "pointer",
-opacity: isCalibrating ? 0.5 : 1,
+fontSize: 13,
+color: "rgba(255,255,255,0.55)",
+marginBottom: 6,
 }}
 >
-Off
-</button>
-)}
-
-<button
-onClick={resetCharge}
-style={{
-border: "1px solid rgba(255,255,255,0.12)",
-background: "rgba(255,255,255,0.04)",
-color: "#f5f7fa",
-borderRadius: 18,
-padding: "16px 26px",
-fontSize: 18,
-fontWeight: 700,
-cursor: "pointer",
-}}
->
-Reset
-</button>
-</div>
-</section>
-
-<section
-style={{
-border: "1px solid rgba(255,255,255,0.08)",
-borderRadius: 28,
-background: "rgba(255,255,255,0.02)",
-padding: 22,
-textAlign: "center",
-}}
->
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>
 Pyron
 </div>
-
-<div style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>{pyronStage}</div>
+<div
+style={{
+fontSize: 22,
+fontWeight: 700,
+marginBottom: 6,
+}}
+>
+{pyronStage}
+</div>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.58)",
+}}
+>
+Generated from Axis charge
+</div>
+</div>
 
 <div
 style={{
 width: pyronSize,
 height: pyronSize,
-margin: "20px auto",
 borderRadius: "50%",
 background: "radial-gradient(circle, #00ffcc 0%, #007777 70%, #001111 100%)",
 boxShadow: "0 0 80px rgba(0,255,200,0.55)",
 transition: "all .4s ease",
 }}
 />
-
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)" }}>
-Generated from Axis Charge
-</div>
-</section>
-
-<section
-style={{
-border: "1px solid rgba(255,255,255,0.08)",
-borderRadius: 28,
-background: "rgba(255,255,255,0.02)",
-padding: 22,
-}}
->
-<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>
-Output
 </div>
 
 <div
 style={{
-fontSize: 26,
-fontWeight: 700,
-letterSpacing: "-0.04em",
-marginBottom: 18,
+display: "grid",
+gap: 12,
 }}
 >
-Reading
+<Readout label="Form" value={reading.form} />
+<Readout label="Signal" value={reading.signal} />
+<Readout label="Energy" value={reading.energy} />
+<Readout label="Transitions" value={String(reading.transitions)} />
+<Readout label="Windows" value={String(reading.windows)} />
+<Readout label="Session Charge" value={`+${reading.charge}`} />
+<Readout label="Time" value={`${time}s`} />
 </div>
-
-<div style={{ display: "grid", gap: 12 }}>
-<MetricRow label="Form" value={reading.form} />
-<MetricRow label="Signal" value={reading.signal} />
-<MetricRow label="Energy" value={reading.energy} />
-<MetricRow label="Transitions" value={String(reading.transitions)} />
-<MetricRow label="Windows" value={String(reading.windows)} />
-<MetricRow label="Charge" value={`+${reading.charge}`} />
-<MetricRow label="Stored Charge" value={String(storedCharge)} />
-</div>
-</section>
 </div>
 );
 }
 
-function MetricRow({ label, value }: { label: string; value: string }) {
+function machineButton(primary: boolean, disabled = false): React.CSSProperties {
+return {
+border: primary
+? "1px solid rgba(0,212,166,0.35)"
+: "1px solid rgba(255,255,255,0.12)",
+background: primary
+? "rgba(0,212,166,0.12)"
+: "rgba(255,255,255,0.05)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "14px 24px",
+fontSize: 18,
+fontWeight: 700,
+cursor: disabled ? "not-allowed" : "pointer",
+opacity: disabled ? 0.5 : 1,
+};
+}
+
+function secondaryButton(): React.CSSProperties {
+return {
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.04)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "14px 24px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+};
+}
+
+function Readout({ label, value }: { label: string; value: string }) {
 return (
 <div
 style={{
-display: "flex",
-justifyContent: "space-between",
-alignItems: "center",
+display: "grid",
+gridTemplateColumns: "120px 1fr",
 gap: 16,
-border: "1px solid rgba(255,255,255,0.06)",
-background: "rgba(255,255,255,0.02)",
-borderRadius: 18,
-padding: "16px 18px",
+alignItems: "center",
+borderBottom: "1px solid rgba(255,255,255,0.05)",
+paddingBottom: 10,
 }}
 >
-<div style={{ color: "rgba(255,255,255,0.62)", fontSize: 15 }}>{label}</div>
 <div
 style={{
-color: "#ffffff",
-fontSize: 17,
+fontSize: 13,
+color: "rgba(255,255,255,0.55)",
+}}
+>
+{label}
+</div>
+
+<div
+style={{
+fontSize: 18,
 fontWeight: 700,
 textAlign: "right",
+color: "#fff",
 }}
 >
 {value}
