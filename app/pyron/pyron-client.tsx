@@ -3,12 +3,25 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const BANK_KEY = "axis_shared_charge_v1";
+const PYRON_STATE_KEY = "axis_pyron_build_v1";
+
 const ACCENT = "rgba(78,245,225,1)";
 const ACCENT_SOFT = "rgba(78,245,225,0.35)";
 const ACCENT_DIM = "rgba(78,245,225,0.12)";
 
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
 type Mood = "Dormant" | "Calm" | "Awake" | "Bright" | "Charged";
+type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
+
+type NodeItem = {
+id: string;
+type: NodeType;
+socketIndex: number;
+};
+
+type SavedPyronState = {
+nodes: NodeItem[];
+};
 
 function getStage(charge: number): Stage {
 if (charge < 50) return "Seed";
@@ -80,11 +93,33 @@ y: Math.sin(angle) * radius,
 });
 }
 
+function nodeCost(type: NodeType) {
+if (type === "storage") return 40;
+if (type === "amplifier") return 60;
+if (type === "stabilizer") return 80;
+return 100;
+}
+
+function nodeLabel(type: NodeType) {
+if (type === "storage") return "Storage";
+if (type === "amplifier") return "Amplifier";
+if (type === "stabilizer") return "Stabilizer";
+return "Relay";
+}
+
+function nodeColor(type: NodeType) {
+if (type === "storage") return "rgba(78,245,225,0.95)";
+if (type === "amplifier") return "rgba(82,179,255,0.95)";
+if (type === "stabilizer") return "rgba(255,210,90,0.95)";
+return "rgba(255,117,166,0.95)";
+}
+
 export default function PyronClient() {
 const [bank, setBank] = useState(0);
 const [pulseOn, setPulseOn] = useState(false);
 const [surgeOn, setSurgeOn] = useState(false);
 const [touchGlow, setTouchGlow] = useState(false);
+const [nodes, setNodes] = useState<NodeItem[]>([]);
 
 const previousBankRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -120,6 +155,24 @@ window.removeEventListener("storage", onStorage);
 };
 }, []);
 
+useEffect(() => {
+try {
+const raw = window.localStorage.getItem(PYRON_STATE_KEY);
+if (!raw) return;
+const parsed = JSON.parse(raw) as SavedPyronState;
+if (Array.isArray(parsed.nodes)) {
+setNodes(parsed.nodes);
+}
+} catch {
+window.localStorage.removeItem(PYRON_STATE_KEY);
+}
+}, []);
+
+useEffect(() => {
+const saved: SavedPyronState = { nodes };
+window.localStorage.setItem(PYRON_STATE_KEY, JSON.stringify(saved));
+}, [nodes]);
+
 const stage = useMemo(() => getStage(bank), [bank]);
 const mood = useMemo(() => getMood(bank), [bank]);
 const coreSize = useMemo(() => getCoreSize(stage), [stage]);
@@ -128,6 +181,14 @@ const socketLimit = useMemo(() => getSocketLimit(stage), [stage]);
 const nextTarget = useMemo(() => getNextTarget(stage), [stage]);
 const progress = useMemo(() => getProgress(bank, stage), [bank, stage]);
 const sockets = useMemo(() => getSocketPositions(socketLimit), [socketLimit]);
+
+const counts = useMemo(() => {
+const storage = nodes.filter((n) => n.type === "storage").length;
+const amplifier = nodes.filter((n) => n.type === "amplifier").length;
+const stabilizer = nodes.filter((n) => n.type === "stabilizer").length;
+const relay = nodes.filter((n) => n.type === "relay").length;
+return { storage, amplifier, stabilizer, relay };
+}, [nodes]);
 
 useEffect(() => {
 const firstLoad = previousBankRef.current === null;
@@ -177,6 +238,16 @@ setPulseOn(false);
 return () => clearInterval(interval);
 }, [stage]);
 
+function writeBank(next: number) {
+window.localStorage.setItem(BANK_KEY, String(next));
+setBank(next);
+window.dispatchEvent(
+new CustomEvent("axis-charge-updated", {
+detail: next,
+})
+);
+}
+
 function handleOrbTouch() {
 setTouchGlow(true);
 
@@ -190,6 +261,49 @@ navigator.vibrate(12);
 }
 }
 
+function nextOpenSocketIndex() {
+for (let i = 0; i < socketLimit; i += 1) {
+const taken = nodes.some((n) => n.socketIndex === i);
+if (!taken) return i;
+}
+return -1;
+}
+
+function addNode(type: NodeType) {
+const cost = nodeCost(type);
+
+if (socketLimit === 0) return;
+if (nodes.length >= socketLimit) return;
+if (bank < cost) return;
+
+const socketIndex = nextOpenSocketIndex();
+if (socketIndex === -1) return;
+
+const item: NodeItem = {
+id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+type,
+socketIndex,
+};
+
+setNodes((prev) => [...prev, item]);
+writeBank(bank - cost);
+setSurgeOn(true);
+
+if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
+surgeTimeoutRef.current = setTimeout(() => {
+setSurgeOn(false);
+}, 900);
+
+if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+navigator.vibrate(18);
+}
+}
+
+function resetPyron() {
+setNodes([]);
+window.localStorage.removeItem(PYRON_STATE_KEY);
+}
+
 const glowStrength =
 stage === "Seed"
 ? 0.34
@@ -200,8 +314,6 @@ stage === "Seed"
 : stage === "Nova"
 ? 0.82
 : 1;
-
-const chamberMinHeight = 640;
 
 return (
 <div
@@ -268,7 +380,7 @@ boxShadow: `0 0 18px ${ACCENT_SOFT}`,
 style={{
 border: "1px solid rgba(255,255,255,0.08)",
 borderRadius: 28,
-minHeight: chamberMinHeight,
+minHeight: 640,
 position: "relative",
 overflow: "hidden",
 background:
@@ -295,7 +407,9 @@ transition: "transform 220ms ease, box-shadow 180ms ease",
 />
 ))}
 
-{sockets.map((pos, i) => (
+{sockets.map((pos, i) => {
+const built = nodes.find((n) => n.socketIndex === i);
+return (
 <div
 key={i}
 style={{
@@ -308,16 +422,24 @@ height: 18,
 marginLeft: -9,
 marginTop: -9,
 borderRadius: "50%",
-background:
-surgeOn || pulseOn
+background: built
+? nodeColor(built.type)
+: surgeOn || pulseOn
 ? "rgba(78,245,225,0.96)"
-: "rgba(78,245,225,0.55)",
-boxShadow:
-surgeOn || pulseOn ? `0 0 18px ${ACCENT_SOFT}` : "none",
+: "rgba(78,245,225,0.20)",
+boxShadow: built
+? `0 0 16px ${nodeColor(built.type)}`
+: surgeOn || pulseOn
+? `0 0 18px ${ACCENT_SOFT}`
+: "none",
+border: built
+? "none"
+: "1px dashed rgba(78,245,225,0.18)",
 transition: "all 180ms ease",
 }}
 />
-))}
+);
+})}
 
 <div
 style={{
@@ -385,7 +507,7 @@ fontSize: 14,
 opacity: 0.78,
 }}
 >
-<div>{socketLimit > 0 ? `${socketLimit} sockets live` : "Dormant core"}</div>
+<div>{nodes.length} / {socketLimit}</div>
 <div>
 {surgeOn
 ? "Surge active"
@@ -395,7 +517,159 @@ opacity: 0.78,
 </div>
 </div>
 </div>
+
+<div
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 24,
+padding: 16,
+background: "rgba(255,255,255,0.03)",
+display: "grid",
+gap: 12,
+}}
+>
+<div style={{ fontSize: 13, opacity: 0.58 }}>Build</div>
+
+<div
+style={{
+display: "grid",
+gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+gap: 10,
+}}
+>
+<MiniBuildButton
+label="Storage"
+value="40"
+color={nodeColor("storage")}
+disabled={bank < 40 || nodes.length >= socketLimit || socketLimit === 0}
+onClick={() => addNode("storage")}
+/>
+<MiniBuildButton
+label="Amplifier"
+value="60"
+color={nodeColor("amplifier")}
+disabled={bank < 60 || nodes.length >= socketLimit || socketLimit === 0}
+onClick={() => addNode("amplifier")}
+/>
+<MiniBuildButton
+label="Stabilizer"
+value="80"
+color={nodeColor("stabilizer")}
+disabled={bank < 80 || nodes.length >= socketLimit || socketLimit === 0}
+onClick={() => addNode("stabilizer")}
+/>
+<MiniBuildButton
+label="Relay"
+value="100"
+color={nodeColor("relay")}
+disabled={bank < 100 || nodes.length >= socketLimit || socketLimit === 0}
+onClick={() => addNode("relay")}
+/>
+</div>
+
+<div
+style={{
+display: "grid",
+gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+gap: 8,
+fontSize: 12,
+opacity: 0.7,
+}}
+>
+<div>S {counts.storage}</div>
+<div>A {counts.amplifier}</div>
+<div>Z {counts.stabilizer}</div>
+<div>R {counts.relay}</div>
+</div>
+
+<div>
+<button
+onClick={resetPyron}
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.04)",
+color: "#fff",
+borderRadius: 16,
+padding: "12px 16px",
+fontSize: 16,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
+Reset Pyron
+</button>
 </div>
 </div>
+</div>
+</div>
+);
+}
+
+function MiniBuildButton({
+label,
+value,
+color,
+disabled,
+onClick,
+}: {
+label: string;
+value: string;
+color: string;
+disabled?: boolean;
+onClick: () => void;
+}) {
+return (
+<button
+onClick={onClick}
+disabled={disabled}
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+background: disabled ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.05)",
+color: "#fff",
+borderRadius: 18,
+padding: "14px 12px",
+display: "flex",
+alignItems: "center",
+justifyContent: "space-between",
+gap: 10,
+cursor: disabled ? "not-allowed" : "pointer",
+opacity: disabled ? 0.45 : 1,
+}}
+>
+<div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+<div
+style={{
+width: 14,
+height: 14,
+borderRadius: "50%",
+background: color,
+boxShadow: `0 0 14px ${color}`,
+flexShrink: 0,
+}}
+/>
+<div
+style={{
+fontSize: 15,
+fontWeight: 700,
+whiteSpace: "nowrap",
+overflow: "hidden",
+textOverflow: "ellipsis",
+}}
+>
+{label}
+</div>
+</div>
+
+<div
+style={{
+fontSize: 15,
+fontWeight: 800,
+opacity: 0.9,
+flexShrink: 0,
+}}
+>
+{value}
+</div>
+</button>
 );
 }
