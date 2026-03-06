@@ -51,6 +51,26 @@ localStorage.setItem(CHARGE_KEY, String(next));
 setStoredCharge(next);
 }
 
+function resetCharge() {
+localStorage.removeItem(CHARGE_KEY);
+setStoredCharge(0);
+setReading({
+form: "In Control",
+signal: "Clean",
+energy: "Off",
+transitions: 0,
+windows: 0,
+charge: 0,
+});
+samplesRef.current = [];
+setTime(0);
+setRunning(false);
+if (timerRef.current) {
+clearInterval(timerRef.current);
+timerRef.current = null;
+}
+}
+
 function magnitude(x: number, y: number, z: number) {
 return Math.sqrt(x * x + y * y + z * z);
 }
@@ -99,6 +119,7 @@ motionEnabledRef.current = true;
 
 function computeReading() {
 const values = samplesRef.current;
+
 if (values.length < 8) {
 setReading({
 form: "In Control",
@@ -134,7 +155,7 @@ form = "Out of Control";
 
 const transitions = values.filter((v) => v > 1.1).length;
 const windows = Math.max(0, Math.floor(time / 5));
-const charge = Math.max(1, Math.floor(total * 2));
+const charge = running ? Math.max(1, Math.floor(total * 0.5)) : 0;
 
 const nextReading = {
 form,
@@ -147,7 +168,7 @@ charge,
 
 setReading(nextReading);
 
-if (charge > 0) {
+if (running && charge > 0) {
 const raw = localStorage.getItem(CHARGE_KEY);
 const current = raw ? Number(raw) || 0 : 0;
 const next = current + charge;
@@ -184,6 +205,24 @@ computeReading();
 const batteryFill = useMemo(() => {
 return Math.min(100, Math.round((storedCharge / 2000) * 100));
 }, [storedCharge]);
+
+const linePoints = useMemo(() => {
+const values = samplesRef.current;
+const width = 100;
+const height = 44;
+
+if (!values.length) return "";
+
+const max = Math.max(...values, 1);
+
+return values
+.map((v, i) => {
+const x = (i / Math.max(values.length - 1, 1)) * width;
+const y = height - (v / max) * height;
+return `${x},${y}`;
+})
+.join(" ");
+}, [time, running, reading.charge]);
 
 return (
 <div
@@ -266,6 +305,33 @@ transition: "width 200ms ease",
 </div>
 </div>
 
+<div style={{ marginBottom: 18 }}>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 10 }}>
+Axis Line
+</div>
+
+<div
+style={{
+width: "100%",
+height: 96,
+borderRadius: 20,
+border: "1px solid rgba(255,255,255,0.08)",
+background: "rgba(255,255,255,0.02)",
+padding: 10,
+boxSizing: "border-box",
+}}
+>
+<svg viewBox="0 0 100 44" preserveAspectRatio="none" style={{ width: "100%", height: "100%" }}>
+<polyline
+fill="none"
+stroke="rgba(0,212,166,1)"
+strokeWidth="1.6"
+points={linePoints || "0,44 100,44"}
+/>
+</svg>
+</div>
+</div>
+
 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
 {!running ? (
 <button
@@ -300,6 +366,22 @@ cursor: "pointer",
 Off
 </button>
 )}
+
+<button
+onClick={resetCharge}
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.04)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "16px 26px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
+Reset
+</button>
 </div>
 </section>
 
