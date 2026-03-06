@@ -2,53 +2,15 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const CHARGE_KEY = "axis_charge_v1";
-const NODES_KEY = "axis_pyron_nodes_v1";
+const CHARGE_KEY = "axis_charge_v2";
 
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
 type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
-type FlashType = NodeType | null;
 
-const NODE_COST: Record<NodeType, number> = {
-storage: 40,
-amplifier: 60,
-stabilizer: 80,
-relay: 100,
-};
-
-const NODE_META: Record<
-NodeType,
-{
-name: string;
-description: string;
-color: string;
-glow: string;
-}
-> = {
-storage: {
-name: "Storage",
-description: "Expands holding capacity",
-color: "#39f3d2",
-glow: "rgba(57,243,210,.45)",
-},
-amplifier: {
-name: "Amplifier",
-description: "Strengthens output",
-color: "#4bb8ff",
-glow: "rgba(75,184,255,.45)",
-},
-stabilizer: {
-name: "Stabilizer",
-description: "Settles the system",
-color: "#ffd15a",
-glow: "rgba(255,209,90,.42)",
-},
-relay: {
-name: "Relay",
-description: "Extends the field",
-color: "#ff7aa8",
-glow: "rgba(255,122,168,.40)",
-},
+type NodeItem = {
+id: string;
+type: NodeType;
+socketIndex: number;
 };
 
 function getStage(charge: number): Stage {
@@ -75,691 +37,640 @@ if (stage === "Nova") return 3;
 return 4;
 }
 
+function getStageThreshold(stage: Stage) {
+if (stage === "Seed") return 50;
+if (stage === "Core") return 150;
+if (stage === "Pulse") return 400;
+if (stage === "Nova") return 1000;
+return 1000;
+}
+
 function clamp(value: number, min: number, max: number) {
 return Math.max(min, Math.min(max, value));
 }
 
-function getNodeCounts(nodes: NodeType[]) {
-return nodes.reduce(
-(acc, node) => {
-acc[node] += 1;
-return acc;
-},
-{
-storage: 0,
-amplifier: 0,
-stabilizer: 0,
-relay: 0,
-} as Record<NodeType, number>
-);
+function getSocketPositions(count: number) {
+if (count <= 0) return [];
+const radius = 150;
+const startAngle = -90;
+
+return Array.from({ length: count }, (_, i) => {
+const angle = ((360 / count) * i + startAngle) * (Math.PI / 180);
+return {
+x: Math.cos(angle) * radius,
+y: Math.sin(angle) * radius,
+};
+});
+}
+
+function niceNodeLabel(type: NodeType) {
+if (type === "storage") return "Storage";
+if (type === "amplifier") return "Amplifier";
+if (type === "stabilizer") return "Stabilizer";
+return "Relay";
 }
 
 export default function PyronClient() {
 const [charge, setCharge] = useState(0);
-const [displayCharge, setDisplayCharge] = useState(0);
-const [nodes, setNodes] = useState<NodeType[]>([]);
-const [flashType, setFlashType] = useState<FlashType>(null);
-const [impactKey, setImpactKey] = useState(0);
-const [isLoaded, setIsLoaded] = useState(false);
+const [nodes, setNodes] = useState<NodeItem[]>([]);
+const [hold, setHold] = useState(72);
+const [surge, setSurge] = useState(0);
+const [surgeActive, setSurgeActive] = useState(false);
+const [pulseOn, setPulseOn] = useState(false);
+const [strikeOn, setStrikeOn] = useState(false);
+const [lastAction, setLastAction] = useState("System idle");
+const [limitMessage, setLimitMessage] = useState("");
+const [flash, setFlash] = useState(false);
 
-const flashTimerRef = useRef<number | null>(null);
+const strikeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 useEffect(() => {
-const storedCharge = localStorage.getItem(CHARGE_KEY);
-const storedNodes = localStorage.getItem(NODES_KEY);
-
-if (storedCharge) {
-const parsed = Number(storedCharge);
-if (!Number.isNaN(parsed)) {
-setCharge(parsed);
-setDisplayCharge(parsed);
+const saved = window.localStorage.getItem(CHARGE_KEY);
+if (saved) {
+const parsed = Number(saved);
+if (!Number.isNaN(parsed)) setCharge(parsed);
 }
-}
-
-if (storedNodes) {
-try {
-const parsed = JSON.parse(storedNodes) as NodeType[];
-if (Array.isArray(parsed)) {
-setNodes(
-parsed.filter((n) =>
-["storage", "amplifier", "stabilizer", "relay"].includes(n)
-) as NodeType[]
-);
-}
-} catch {
-// ignore bad localStorage payload
-}
-}
-
-setIsLoaded(true);
 }, []);
 
 useEffect(() => {
-if (!isLoaded) return;
-localStorage.setItem(CHARGE_KEY, String(charge));
-}, [charge, isLoaded]);
-
-useEffect(() => {
-if (!isLoaded) return;
-localStorage.setItem(NODES_KEY, JSON.stringify(nodes));
-}, [nodes, isLoaded]);
-
-useEffect(() => {
-let frame = 0;
-const start = displayCharge;
-const end = charge;
-
-if (start === end) return;
-
-const duration = 500;
-const startTime = performance.now();
-
-const tick = (now: number) => {
-const t = clamp((now - startTime) / duration, 0, 1);
-const eased = 1 - Math.pow(1 - t, 3);
-setDisplayCharge(Math.round(start + (end - start) * eased));
-
-if (t < 1) {
-frame = requestAnimationFrame(tick);
-}
-};
-
-frame = requestAnimationFrame(tick);
-return () => cancelAnimationFrame(frame);
+window.localStorage.setItem(CHARGE_KEY, String(charge));
 }, [charge]);
 
+const stage = useMemo(() => getStage(charge), [charge]);
+const socketLimit = useMemo(() => getSocketLimit(stage), [stage]);
+const ringCount = useMemo(() => getRingCount(stage), [stage]);
+const sockets = useMemo(() => getSocketPositions(socketLimit), [socketLimit]);
+
+const counts = useMemo(() => {
+const storage = nodes.filter((n) => n.type === "storage").length;
+const amplifier = nodes.filter((n) => n.type === "amplifier").length;
+const stabilizer = nodes.filter((n) => n.type === "stabilizer").length;
+const relay = nodes.filter((n) => n.type === "relay").length;
+return { storage, amplifier, stabilizer, relay };
+}, [nodes]);
+
+const maxCharge =
+1000 +
+counts.storage * 120 +
+(surgeActive ? 120 : 0);
+
+const gainMultiplier =
+1 +
+counts.amplifier * 0.2 +
+(surgeActive ? 0.5 : 0);
+
+const decayRate = Math.max(
+1,
+3 - counts.stabilizer * 0.4 - (surgeActive ? 0.5 : 0)
+);
+
+const stageTarget = getStageThreshold(stage);
+const progressToNext = clamp((charge / stageTarget) * 100, 0, 100);
+
 useEffect(() => {
-return () => {
-if (flashTimerRef.current) {
-window.clearTimeout(flashTimerRef.current);
+const intervalMs = Math.max(700, 1500 - charge * 0.25);
+
+const rhythm = setInterval(() => {
+setPulseOn(true);
+setStrikeOn(true);
+
+if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+if (strikeTimeoutRef.current) clearTimeout(strikeTimeoutRef.current);
+
+pulseTimeoutRef.current = setTimeout(() => {
+setPulseOn(false);
+}, 260);
+
+strikeTimeoutRef.current = setTimeout(() => {
+setStrikeOn(false);
+}, Math.max(240, 420 - counts.stabilizer * 20));
+}, intervalMs);
+
+return () => clearInterval(rhythm);
+}, [charge, counts.stabilizer]);
+
+useEffect(() => {
+const decay = setInterval(() => {
+setCharge((c) => Math.max(0, c - decayRate));
+setSurge((s) => Math.max(0, s - (surgeActive ? 1.6 : 0.6)));
+setHold((h) => clamp(h - 0.35 + counts.stabilizer * 0.08, 0, 100));
+}, 1800);
+
+return () => clearInterval(decay);
+}, [counts.stabilizer, decayRate, surgeActive]);
+
+useEffect(() => {
+if (surge >= 100 && !surgeActive) {
+setSurgeActive(true);
+setLastAction("Surge active");
+setFlash(true);
+setTimeout(() => setFlash(false), 260);
 }
-};
-}, []);
+}, [surge, surgeActive]);
 
-const stage = getStage(charge);
-const socketLimit = getSocketLimit(stage);
-const baseRings = getRingCount(stage);
-const nodeCounts = useMemo(() => getNodeCounts(nodes), [nodes]);
+useEffect(() => {
+if (surgeActive && (surge <= 15 || hold <= 10)) {
+setSurgeActive(false);
+setLastAction(hold <= 10 ? "Surge lost from low Hold" : "Surge ended");
+setSurge((s) => clamp(s, 0, 40));
+}
+}, [surgeActive, surge, hold]);
 
-const totalRings = baseRings + Math.min(nodeCounts.storage, 3);
-const canBuild = nodes.length < socketLimit;
+function triggerFeedback(text: string) {
+setLastAction(text);
+setFlash(true);
+setTimeout(() => setFlash(false), 180);
 
-const coreScale = 1 + Math.min(nodeCounts.amplifier * 0.04, 0.16);
-const haloScale = 1 + Math.min(nodeCounts.storage * 0.12, 0.36);
-const fieldScale = 1 + Math.min(nodeCounts.relay * 0.18, 0.54);
-const stability = clamp(1 - nodeCounts.stabilizer * 0.18, 0.28, 1);
-
-function triggerInstall(type: NodeType) {
-setFlashType(type);
-setImpactKey((prev) => prev + 1);
-
-if (flashTimerRef.current) {
-window.clearTimeout(flashTimerRef.current);
+if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+navigator.vibrate(18);
+}
 }
 
-flashTimerRef.current = window.setTimeout(() => {
-setFlashType(null);
-}, 650);
+function addCharge(base: number, hitStrike: boolean) {
+const strikeBonus = hitStrike ? 1.7 : 1;
+const total = Math.round(base * gainMultiplier * strikeBonus);
+
+setCharge((c) => clamp(c + total, 0, maxCharge));
+setSurge((s) => clamp(s + (hitStrike ? 16 : 8), 0, 100));
+setHold((h) => clamp(h + (hitStrike ? 5 : 2), 0, 100));
+}
+
+function handleCoreTap() {
+const hitStrike = strikeOn;
+addCharge(12, hitStrike);
+triggerFeedback(hitStrike ? "Strike hit on core" : "Core tapped");
+}
+
+function nextOpenSocketIndex() {
+for (let i = 0; i < socketLimit; i += 1) {
+const taken = nodes.some((n) => n.socketIndex === i);
+if (!taken) return i;
+}
+return -1;
 }
 
 function addNode(type: NodeType) {
-const cost = NODE_COST[type];
-if (charge < cost) return;
-if (nodes.length >= socketLimit) return;
-
-setNodes((prev) => [...prev, type]);
-setCharge((prev) => prev - cost);
-triggerInstall(type);
+if (socketLimit === 0) {
+setLimitMessage("Build more Charge to unlock sockets");
+triggerFeedback("No sockets unlocked");
+return;
 }
 
-function resetPyron() {
+if (nodes.length >= socketLimit) {
+setLimitMessage("All sockets filled");
+triggerFeedback("Socket limit reached");
+return;
+}
+
+const socketIndex = nextOpenSocketIndex();
+if (socketIndex === -1) {
+setLimitMessage("No open socket");
+triggerFeedback("No open socket");
+return;
+}
+
+const hitStrike = strikeOn;
+const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+setNodes((prev) => [...prev, { id, type, socketIndex }]);
+setLimitMessage("");
+
+if (type === "storage") {
+addCharge(10, hitStrike);
+setHold((h) => clamp(h + 2, 0, 100));
+}
+
+if (type === "amplifier") {
+addCharge(14, hitStrike);
+setHold((h) => clamp(h - 2, 0, 100));
+}
+
+if (type === "stabilizer") {
+addCharge(8, hitStrike);
+setHold((h) => clamp(h + 8, 0, 100));
+}
+
+if (type === "relay") {
+addCharge(12, hitStrike);
+setSurge((s) => clamp(s + 10, 0, 100));
+}
+
+triggerFeedback(
+`${niceNodeLabel(type)} added${hitStrike ? " with Strike" : ""}`
+);
+}
+
+function resetSystem() {
+setCharge(0);
 setNodes([]);
-setFlashType("relay");
-setImpactKey((prev) => prev + 1);
-
-if (flashTimerRef.current) {
-window.clearTimeout(flashTimerRef.current);
+setHold(72);
+setSurge(0);
+setSurgeActive(false);
+setLimitMessage("");
+setLastAction("System reset");
+window.localStorage.removeItem(CHARGE_KEY);
 }
 
-flashTimerRef.current = window.setTimeout(() => {
-setFlashType(null);
-}, 500);
-}
-
-const sparkColor = flashType ? NODE_META[flashType].color : "#2ef0d0";
-const sparkGlow = flashType ? NODE_META[flashType].glow : "rgba(46,240,208,.42)";
+const shellGlow = surgeActive ? 0.95 : 0.55;
+const coreScale = pulseOn ? 1.08 : 1;
+const ringScale = pulseOn ? 1.03 : 1;
 
 return (
-<>
-<style>{`
-@keyframes pyronBreath {
-0% { transform: scale(0.985); }
-50% { transform: scale(1.035); }
-100% { transform: scale(0.985); }
-}
-
-@keyframes pyronHalo {
-0% { transform: scale(.94); opacity: .38; }
-50% { transform: scale(1.06); opacity: .62; }
-100% { transform: scale(.94); opacity: .38; }
-}
-
-@keyframes pyronShimmer {
-0% { transform: rotate(0deg) scale(1); opacity: .22; }
-50% { transform: rotate(180deg) scale(1.03); opacity: .32; }
-100% { transform: rotate(360deg) scale(1); opacity: .22; }
-}
-
-@keyframes pyronRingDraw {
-0% {
-opacity: 0;
-transform: scale(.78);
-}
-100% {
-opacity: 1;
-transform: scale(1);
-}
-}
-
-@keyframes pyronImpact {
-0% {
-opacity: .8;
-transform: translate(-50%, -50%) scale(.35);
-}
-100% {
-opacity: 0;
-transform: translate(-50%, -50%) scale(1.55);
-}
-}
-
-@keyframes pyronOrbit {
-0% { transform: rotate(0deg); }
-100% { transform: rotate(360deg); }
-}
-
-@keyframes pyronCardPulse {
-0% { box-shadow: 0 0 0 rgba(255,255,255,0); }
-50% { box-shadow: 0 0 24px rgba(255,255,255,.08); }
-100% { box-shadow: 0 0 0 rgba(255,255,255,0); }
-}
-
-@keyframes pyronNumberPop {
-0% { transform: translateY(2px); opacity: .7; }
-50% { transform: translateY(-1px); opacity: 1; }
-100% { transform: translateY(0px); opacity: 1; }
-}
-
-@keyframes pyronInstallBeam {
-0% {
-opacity: 0;
-transform: translateY(12px) scale(.92);
-}
-20% {
-opacity: .95;
-transform: translateY(0px) scale(1);
-}
-100% {
-opacity: 0;
-transform: translateY(-120px) scale(.5);
-}
-}
-
-@keyframes pyronRelayField {
-0% {
-opacity: .12;
-transform: translate(-50%, -50%) scale(.8);
-}
-50% {
-opacity: .22;
-transform: translate(-50%, -50%) scale(1.02);
-}
-100% {
-opacity: .12;
-transform: translate(-50%, -50%) scale(.8);
-}
-}
-`}</style>
+<div
+style={{
+minHeight: "100dvh",
+background:
+"radial-gradient(circle at center, rgba(25,35,60,1) 0%, rgba(7,10,18,1) 55%, rgba(0,0,0,1) 100%)",
+color: "white",
+padding: "20px 16px 32px",
+fontFamily:
+"ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
+}}
+>
+<div
+style={{
+maxWidth: 980,
+margin: "0 auto",
+display: "grid",
+gridTemplateColumns: "1fr",
+gap: 20,
+}}
+>
+<div
+style={{
+display: "grid",
+gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+gap: 12,
+}}
+>
+<StatCard label="Charge" value={charge} sub={`${stage} stage`} />
+<StatCard
+label="Surge"
+value={`${Math.round(surge)}%`}
+sub={surgeActive ? "Active" : surge >= 80 ? "Ready" : "Building"}
+/>
+<StatCard label="Hold" value={`${Math.round(hold)}%`} sub={hold > 55 ? "Controlled" : hold > 25 ? "Shifting" : "Low"} />
+<StatCard
+label="Sockets"
+value={`${nodes.length} / ${socketLimit}`}
+sub={socketLimit === 0 ? "Locked" : "Open system"}
+/>
+</div>
 
 <div
 style={{
-border: "1px solid rgba(255,255,255,.08)",
-borderRadius: 28,
-padding: 24,
-background: "#050505",
-display: "grid",
-gap: 28,
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 24,
+padding: 18,
+background: "rgba(255,255,255,0.04)",
+backdropFilter: "blur(16px)",
+}}
+>
+<div
+style={{
+display: "flex",
+justifyContent: "space-between",
+gap: 12,
+alignItems: "center",
+marginBottom: 12,
+flexWrap: "wrap",
+}}
+>
+<div>
+<div style={{ fontSize: 13, opacity: 0.7 }}>Pyron Core</div>
+<div style={{ fontSize: 22, fontWeight: 700 }}>{stage}</div>
+</div>
+
+<div
+style={{
+display: "flex",
+gap: 8,
+alignItems: "center",
+flexWrap: "wrap",
+}}
+>
+<Badge active={pulseOn}>Pulse</Badge>
+<Badge active={strikeOn}>Strike</Badge>
+<Badge active={surgeActive}>Surge</Badge>
+</div>
+</div>
+
+<div style={{ marginBottom: 14 }}>
+<div
+style={{
+height: 10,
+borderRadius: 999,
+background: "rgba(255,255,255,0.08)",
 overflow: "hidden",
 }}
 >
-<div style={{ textAlign: "center" }}>
 <div
 style={{
-fontSize: 13,
-color: "rgba(255,255,255,.5)",
+width: `${progressToNext}%`,
+height: "100%",
+borderRadius: 999,
+background:
+"linear-gradient(90deg, rgba(94,234,212,1) 0%, rgba(59,130,246,1) 100%)",
+transition: "width 180ms ease",
 }}
->
-Pyron
+/>
 </div>
-
-<div
-style={{
-fontSize: 36,
-fontWeight: 700,
-marginTop: 6,
-}}
->
-{stage}
-</div>
-
-<div
-style={{
-color: "rgba(255,255,255,.6)",
-marginTop: 6,
-}}
->
-Living energy grown from Axis charge
+<div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+Next stage target: {stageTarget}
 </div>
 </div>
 
-<div
-style={{
-display: "flex",
-justifyContent: "space-around",
-textAlign: "center",
-}}
->
-<Stat label="Stored Charge" value={displayCharge} animated />
-<Stat label="Rings" value={totalRings} />
-<Stat label="Nodes" value={`${nodes.length}/${socketLimit}`} />
-</div>
-
-<div
-style={{
-display: "flex",
-justifyContent: "center",
-padding: "12px 8px 8px",
-}}
->
 <div
 style={{
 position: "relative",
-width: 320,
-height: 320,
-maxWidth: "100%",
-}}
->
-{nodeCounts.relay > 0 && (
-<div
-style={{
-position: "absolute",
-left: "50%",
-top: "50%",
-width: 260 * fieldScale,
-height: 260 * fieldScale,
-borderRadius: "50%",
-border: "1px solid rgba(255,122,168,.16)",
-boxShadow: "0 0 44px rgba(255,122,168,.08)",
-animation: `pyronRelayField ${4.8 - Math.min(nodeCounts.relay * 0.2, 0.8)}s ease-in-out infinite`,
-pointerEvents: "none",
-}}
-/>
-)}
-
-<div
-style={{
-position: "absolute",
-inset: 0,
+width: "100%",
+minHeight: 430,
 display: "grid",
 placeItems: "center",
+overflow: "hidden",
 }}
 >
-{[...Array(totalRings)].map((_, i) => {
-const size = 145 + i * 34;
-const ringOpacity = clamp(0.26 - i * 0.035, 0.09, 0.26);
-const ringDuration =
-10 + i * 1.4 - Math.min(nodeCounts.amplifier * 0.45, 1.4);
-return (
+{[...Array(ringCount)].map((_, i) => (
 <div
-key={`ring-${i}-${totalRings}`}
+key={i}
 style={{
 position: "absolute",
-width: size,
-height: size,
+width: 170 + i * 58,
+height: 170 + i * 58,
 borderRadius: "50%",
-border: `1px solid rgba(46,240,208,${ringOpacity})`,
-boxShadow: `0 0 ${18 + i * 6}px rgba(46,240,208,${ringOpacity * 0.45})`,
-animation: `
-pyronRingDraw .55s ease-out both,
-pyronHalo ${ringDuration}s ease-in-out ${i * 0.14}s infinite
-`,
-transformOrigin: "center",
-pointerEvents: "none",
+border: `1px solid rgba(120,180,255,${0.18 + i * 0.08})`,
+transform: `scale(${ringScale})`,
+transition: "transform 180ms ease, opacity 180ms ease",
+boxShadow: pulseOn
+? "0 0 20px rgba(120,180,255,0.12)"
+: "none",
 }}
 />
-);
-})}
+))}
 
-{nodes.length > 0 && (
-<div
-style={{
-position: "absolute",
-width: 228,
-height: 228,
-animation: `pyronOrbit ${10 * stability}s linear infinite`,
-pointerEvents: "none",
-}}
->
-{nodes.map((node, i) => {
-const angle = (360 / Math.max(nodes.length, 1)) * i;
+{sockets.map((pos, i) => {
+const node = nodes.find((n) => n.socketIndex === i);
 return (
 <div
-key={`${node}-${i}`}
+key={`socket-${i}`}
 style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: 14,
-height: 14,
-marginLeft: -7,
-marginTop: -114,
+transform: `translate(${pos.x}px, ${pos.y}px)`,
+width: 42,
+height: 42,
+marginLeft: -21,
+marginTop: -21,
 borderRadius: "50%",
-background: NODE_META[node].color,
-boxShadow: `0 0 16px ${NODE_META[node].glow}`,
-transform: `rotate(${angle}deg) translateY(-100px)`,
-opacity: 0.95,
+display: "grid",
+placeItems: "center",
+border: node
+? "1px solid rgba(255,255,255,0.4)"
+: "1px dashed rgba(255,255,255,0.22)",
+background: node
+? "rgba(255,255,255,0.08)"
+: pulseOn
+? "rgba(80,120,255,0.10)"
+: "rgba(255,255,255,0.03)",
+transition: "all 180ms ease",
+fontSize: 10,
+textTransform: "uppercase",
+letterSpacing: 0.8,
 }}
-/>
-);
-})}
+>
+{node ? node.type.slice(0, 3) : ""}
 </div>
-)}
+);
+})}
 
-{impactKey > 0 && (
-<div
-key={impactKey}
+<button
+onClick={handleCoreTap}
 style={{
-position: "absolute",
-left: "50%",
-top: "50%",
 width: 140,
 height: 140,
 borderRadius: "50%",
-border: `1px solid ${sparkGlow}`,
-boxShadow: `0 0 40px ${sparkGlow}`,
-animation: "pyronImpact .7s ease-out forwards",
-pointerEvents: "none",
-}}
-/>
-)}
-
-{flashType && (
-<div
-key={`beam-${impactKey}`}
-style={{
-position: "absolute",
-bottom: 8,
-left: "50%",
-width: 10,
-height: 90,
-borderRadius: 999,
-background: `linear-gradient(180deg, ${NODE_META[flashType].color}, transparent)`,
-boxShadow: `0 0 18px ${NODE_META[flashType].glow}`,
-animation: "pyronInstallBeam .65s ease-out forwards",
-pointerEvents: "none",
-}}
-/>
-)}
-
-<div
-style={{
-position: "absolute",
-width: 190 * haloScale,
-height: 190 * haloScale,
-borderRadius: "50%",
-background: `radial-gradient(circle, ${sparkGlow} 0%, rgba(0,0,0,0) 72%)`,
-filter: "blur(10px)",
-animation: `pyronHalo ${4.6 - Math.min(nodeCounts.amplifier * 0.24, 1)}s ease-in-out infinite`,
-opacity: 0.95,
-pointerEvents: "none",
-}}
-/>
-
-<div
-style={{
-position: "absolute",
-width: 152,
-height: 152,
-borderRadius: "50%",
-background:
-"conic-gradient(from 0deg, rgba(46,240,208,.05), rgba(46,240,208,.18), rgba(75,184,255,.10), rgba(46,240,208,.05))",
-filter: "blur(1px)",
-animation: `pyronShimmer ${9 * stability}s linear infinite`,
-opacity: 0.9,
-pointerEvents: "none",
-}}
-/>
-
-<div
-style={{
-width: 118 * coreScale,
-height: 118 * coreScale,
-borderRadius: "50%",
-background: `radial-gradient(circle at 42% 38%, #86fff1 0%, ${sparkColor} 34%, #088b8d 68%, #031516 100%)`,
-boxShadow: `0 0 80px ${sparkGlow}, inset 0 -10px 24px rgba(0,0,0,.25), inset 0 8px 18px rgba(255,255,255,.08)`,
-animation: `pyronBreath ${3.8 - Math.min(nodeCounts.amplifier * 0.22, 0.9)}s ease-in-out infinite`,
-}}
-/>
-</div>
-</div>
-</div>
-
-<div
-style={{
-textAlign: "center",
-color: "rgba(255,255,255,.62)",
-marginTop: -4,
+border: strikeOn
+? "1px solid rgba(255,255,255,0.65)"
+: "1px solid rgba(255,255,255,0.18)",
+background: flash
+? "radial-gradient(circle at center, rgba(96,165,250,0.95) 0%, rgba(37,99,235,0.45) 55%, rgba(15,23,42,0.25) 100%)"
+: "radial-gradient(circle at center, rgba(59,130,246,0.82) 0%, rgba(37,99,235,0.35) 55%, rgba(15,23,42,0.18) 100%)",
+boxShadow: `0 0 50px rgba(59,130,246,${shellGlow}), inset 0 0 40px rgba(255,255,255,0.08)`,
+transform: `scale(${coreScale})`,
+transition:
+"transform 180ms ease, box-shadow 180ms ease, background 180ms ease, border 180ms ease",
+color: "white",
+cursor: "pointer",
 }}
 >
-Build the inner environment from charge.
+<div style={{ fontSize: 14, opacity: 0.75 }}>PYRON</div>
+<div style={{ fontSize: 24, fontWeight: 800, marginTop: 4 }}>
+{strikeOn ? "STRIKE" : "TAP"}
+</div>
+</button>
 </div>
 
-<div style={{ display: "grid", gap: 14 }}>
 <div
 style={{
-fontSize: 22,
-fontWeight: 600,
+display: "flex",
+justifyContent: "space-between",
+gap: 12,
+flexWrap: "wrap",
+alignItems: "center",
+marginTop: 8,
 }}
 >
+<div style={{ fontSize: 13, opacity: 0.8 }}>{lastAction}</div>
+<div style={{ fontSize: 13, opacity: 0.8 }}>
+{limitMessage || (strikeOn ? "Strike window open" : "Build Charge")}
+</div>
+</div>
+</div>
+
+<div
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 24,
+padding: 18,
+background: "rgba(255,255,255,0.04)",
+}}
+>
+<div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
 Nodes
 </div>
 
+<div
+style={{
+display: "grid",
+gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+gap: 12,
+}}
+>
 <NodeButton
-type="storage"
-charge={charge}
-canBuild={canBuild}
-installedCount={nodeCounts.storage}
+label="Storage"
+hint="More capacity"
+disabled={nodes.length >= socketLimit}
 onClick={() => addNode("storage")}
 />
-
 <NodeButton
-type="amplifier"
-charge={charge}
-canBuild={canBuild}
-installedCount={nodeCounts.amplifier}
+label="Amplifier"
+hint="More gain"
+disabled={nodes.length >= socketLimit}
 onClick={() => addNode("amplifier")}
 />
-
 <NodeButton
-type="stabilizer"
-charge={charge}
-canBuild={canBuild}
-installedCount={nodeCounts.stabilizer}
+label="Stabilizer"
+hint="More control"
+disabled={nodes.length >= socketLimit}
 onClick={() => addNode("stabilizer")}
 />
-
 <NodeButton
-type="relay"
-charge={charge}
-canBuild={canBuild}
-installedCount={nodeCounts.relay}
+label="Relay"
+hint="More reach"
+disabled={nodes.length >= socketLimit}
 onClick={() => addNode("relay")}
 />
 </div>
 
-<button
-onClick={resetPyron}
+<div
 style={{
-padding: 16,
-borderRadius: 18,
-border: "1px solid rgba(255,255,255,.1)",
-background: "rgba(255,255,255,.05)",
+marginTop: 14,
+display: "grid",
+gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+gap: 10,
+fontSize: 13,
+opacity: 0.85,
+}}
+>
+<div>Storage: {counts.storage}</div>
+<div>Amplifier: {counts.amplifier}</div>
+<div>Stabilizer: {counts.stabilizer}</div>
+<div>Relay: {counts.relay}</div>
+</div>
+
+<div
+style={{
+display: "flex",
+gap: 10,
+flexWrap: "wrap",
+marginTop: 16,
+}}
+>
+<button
+onClick={resetSystem}
+style={{
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.18)",
+background: "rgba(255,255,255,0.06)",
 color: "white",
-fontWeight: 700,
-fontSize: 16,
+padding: "10px 14px",
 cursor: "pointer",
 }}
 >
-Reset Pyron
+Reset
+</button>
+
+<button
+onClick={handleCoreTap}
+style={{
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.18)",
+background: "rgba(59,130,246,0.18)",
+color: "white",
+padding: "10px 14px",
+cursor: "pointer",
+}}
+>
+Build Charge
 </button>
 </div>
-</>
+</div>
+</div>
+</div>
 );
 }
 
-function Stat({
+function StatCard({
 label,
 value,
-animated = false,
+sub,
 }: {
 label: string;
-value: React.ReactNode;
-animated?: boolean;
+value: string | number;
+sub: string;
 }) {
 return (
-<div>
 <div
 style={{
-color: "rgba(255,255,255,.5)",
-fontSize: 12,
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 20,
+padding: 14,
+background: "rgba(255,255,255,0.04)",
 }}
 >
-{label}
+<div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
+<div style={{ fontSize: 28, fontWeight: 800, marginTop: 4 }}>{value}</div>
+<div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>{sub}</div>
 </div>
+);
+}
 
+function Badge({
+children,
+active,
+}: {
+children: React.ReactNode;
+active?: boolean;
+}) {
+return (
 <div
 style={{
-fontSize: 22,
+borderRadius: 999,
+padding: "8px 12px",
+border: active
+? "1px solid rgba(255,255,255,0.55)"
+: "1px solid rgba(255,255,255,0.12)",
+background: active ? "rgba(59,130,246,0.22)" : "rgba(255,255,255,0.04)",
+fontSize: 12,
 fontWeight: 700,
-marginTop: 4,
-animation: animated ? "pyronNumberPop .45s ease" : undefined,
+letterSpacing: 0.5,
 }}
 >
-{value}
-</div>
+{children}
 </div>
 );
 }
 
 function NodeButton({
-type,
-charge,
-canBuild,
-installedCount,
+label,
+hint,
+disabled,
 onClick,
 }: {
-type: NodeType;
-charge: number;
-canBuild: boolean;
-installedCount: number;
+label: string;
+hint: string;
+disabled?: boolean;
 onClick: () => void;
 }) {
-const meta = NODE_META[type];
-const cost = NODE_COST[type];
-const locked = charge < cost || !canBuild;
-
 return (
 <button
 onClick={onClick}
-disabled={locked}
+disabled={disabled}
 style={{
-display: "flex",
-alignItems: "center",
-justifyContent: "space-between",
-gap: 16,
-padding: 18,
-borderRadius: 20,
-border: "1px solid rgba(255,255,255,.08)",
-background: locked ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.05)",
+borderRadius: 18,
+border: "1px solid rgba(255,255,255,0.12)",
+background: disabled ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.06)",
 color: "white",
-opacity: locked ? 0.46 : 1,
-cursor: locked ? "not-allowed" : "pointer",
-transition: "transform .14s ease, border-color .18s ease, opacity .18s ease",
-animation: !locked && installedCount > 0 ? "pyronCardPulse 2.8s ease-in-out infinite" : undefined,
+padding: "14px 12px",
+textAlign: "left",
+cursor: disabled ? "not-allowed" : "pointer",
+opacity: disabled ? 0.45 : 1,
 }}
 >
-<div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-<div
-style={{
-width: 22,
-height: 22,
-borderRadius: "50%",
-background: meta.color,
-boxShadow: `0 0 20px ${meta.glow}`,
-flexShrink: 0,
-}}
-/>
-
-<div style={{ textAlign: "left" }}>
-<div
-style={{
-fontSize: 16,
-fontWeight: 700,
-}}
->
-{meta.name}
-</div>
-
-<div
-style={{
-fontSize: 13,
-color: "rgba(255,255,255,.58)",
-marginTop: 4,
-}}
->
-{meta.description}
-</div>
-</div>
-</div>
-
-<div
-style={{
-display: "grid",
-gap: 4,
-justifyItems: "end",
-minWidth: 54,
-}}
->
-<div
-style={{
-fontSize: 22,
-fontWeight: 800,
-}}
->
-{cost}
-</div>
-
-{installedCount > 0 && (
-<div
-style={{
-fontSize: 12,
-color: meta.color,
-fontWeight: 700,
-}}
->
-+{installedCount}
-</div>
-)}
-</div>
+<div style={{ fontSize: 16, fontWeight: 700 }}>{label}</div>
+<div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{hint}</div>
 </button>
 );
 }
