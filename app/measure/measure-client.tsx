@@ -17,6 +17,22 @@ charge: number;
 
 const CHARGE_KEY = "axis_charge_v1";
 
+function getPyronStage(charge: number) {
+if (charge < 50) return "Spark";
+if (charge < 150) return "Core";
+if (charge < 400) return "Reactor";
+if (charge < 800) return "Nova";
+return "Titan";
+}
+
+function getPyronSize(stage: string) {
+if (stage === "Spark") return 50;
+if (stage === "Core") return 70;
+if (stage === "Reactor") return 100;
+if (stage === "Nova") return 140;
+return 180;
+}
+
 export default function MeasureClient() {
 const [running, setRunning] = useState(false);
 const [time, setTime] = useState(0);
@@ -65,6 +81,7 @@ charge: 0,
 samplesRef.current = [];
 setTime(0);
 setRunning(false);
+
 if (timerRef.current) {
 clearInterval(timerRef.current);
 timerRef.current = null;
@@ -157,16 +174,14 @@ const transitions = values.filter((v) => v > 1.1).length;
 const windows = Math.max(0, Math.floor(time / 5));
 const charge = running ? Math.max(1, Math.floor(total * 0.5)) : 0;
 
-const nextReading = {
+setReading({
 form,
 signal,
 energy,
 transitions,
 windows,
 charge,
-};
-
-setReading(nextReading);
+});
 
 if (running && charge > 0) {
 const raw = localStorage.getItem(CHARGE_KEY);
@@ -195,10 +210,12 @@ computeReading();
 
 function stop() {
 setRunning(false);
+
 if (timerRef.current) {
 clearInterval(timerRef.current);
 timerRef.current = null;
 }
+
 computeReading();
 }
 
@@ -223,6 +240,9 @@ return `${x},${y}`;
 })
 .join(" ");
 }, [time, running, reading.charge]);
+
+const pyronStage = getPyronStage(storedCharge);
+const pyronSize = getPyronSize(pyronStage);
 
 return (
 <div
@@ -382,6 +402,38 @@ cursor: "pointer",
 >
 Reset
 </button>
+</div>
+</section>
+
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 28,
+background: "rgba(255,255,255,0.02)",
+padding: 22,
+textAlign: "center",
+}}
+>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>
+Pyron
+</div>
+
+<div style={{ fontSize: 22, fontWeight: 700, marginBottom: 12 }}>{pyronStage}</div>
+
+<div
+style={{
+width: pyronSize,
+height: pyronSize,
+margin: "20px auto",
+borderRadius: "50%",
+background: "radial-gradient(circle, #00ffcc 0%, #007777 70%, #001111 100%)",
+boxShadow: "0 0 80px rgba(0,255,200,0.55)",
+transition: "all .4s ease",
+}}
+/>
+
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)" }}>
+Generated from Axis Charge
 </div>
 </section>
 
