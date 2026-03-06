@@ -15,7 +15,7 @@ windows: number;
 charge: number;
 };
 
-const CHARGE_KEY = "axis_charge_v1";
+const AXIS_CHARGE_KEY = "axis_shared_charge_v1";
 
 function getPyronStage(charge: number) {
 if (charge < 50) return "Seed";
@@ -74,7 +74,7 @@ const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 const motionEnabledRef = useRef(false);
 
 useEffect(() => {
-const raw = localStorage.getItem(CHARGE_KEY);
+const raw = localStorage.getItem(AXIS_CHARGE_KEY);
 setStoredCharge(raw ? Number(raw) || 0 : 0);
 
 return () => {
@@ -83,14 +83,26 @@ if (timerRef.current) clearInterval(timerRef.current);
 };
 }, []);
 
-function saveCharge(next: number) {
-localStorage.setItem(CHARGE_KEY, String(next));
+function broadcastCharge(next: number) {
+localStorage.setItem(AXIS_CHARGE_KEY, String(next));
 setStoredCharge(next);
+window.dispatchEvent(
+new CustomEvent("axis-charge-updated", {
+detail: next,
+})
+);
 }
 
 function resetCharge() {
-localStorage.removeItem(CHARGE_KEY);
+localStorage.removeItem(AXIS_CHARGE_KEY);
 setStoredCharge(0);
+
+window.dispatchEvent(
+new CustomEvent("axis-charge-updated", {
+detail: 0,
+})
+);
+
 setReading({
 form: "In Control",
 signal: "Clean",
@@ -99,6 +111,7 @@ transitions: 0,
 windows: 0,
 charge: 0,
 });
+
 samplesRef.current = [];
 baselineSamplesRef.current = [];
 baselineRef.current = 0;
@@ -220,10 +233,10 @@ charge,
 });
 
 if (running && charge > 0) {
-const raw = localStorage.getItem(CHARGE_KEY);
+const raw = localStorage.getItem(AXIS_CHARGE_KEY);
 const current = raw ? Number(raw) || 0 : 0;
 const next = current + charge;
-saveCharge(next);
+broadcastCharge(next);
 }
 }
 
@@ -341,26 +354,16 @@ flexWrap: "wrap",
 }}
 >
 {!running && !isCalibrating ? (
-<button
-onClick={start}
-style={machineButton(true)}
->
+<button onClick={start} style={machineButton(true)}>
 Start
 </button>
 ) : (
-<button
-onClick={stop}
-disabled={isCalibrating}
-style={machineButton(false, isCalibrating)}
->
+<button onClick={stop} disabled={isCalibrating} style={machineButton(false, isCalibrating)}>
 Off
 </button>
 )}
 
-<button
-onClick={resetCharge}
-style={secondaryButton()}
->
+<button onClick={resetCharge} style={secondaryButton()}>
 Reset
 </button>
 </div>
@@ -494,7 +497,7 @@ fontSize: 14,
 color: "rgba(255,255,255,0.58)",
 }}
 >
-Generated from Axis charge
+Live from Axis charge
 </div>
 </div>
 
