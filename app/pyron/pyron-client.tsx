@@ -3,14 +3,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const BANK_KEY = "axis_shared_charge_v1";
-const PYRON_STATE_KEY = "axis_pyron_build_v1";
+const PYRON_STATE_KEY = "axis_pyron_build_v2";
 
 const ACCENT = "rgba(78,245,225,1)";
 const ACCENT_SOFT = "rgba(78,245,225,0.35)";
 const ACCENT_DIM = "rgba(78,245,225,0.12)";
 
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
-type Mood = "Dormant" | "Calm" | "Awake" | "Bright" | "Charged";
 type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
 
 type NodeItem = {
@@ -31,20 +30,12 @@ if (charge < 1000) return "Nova";
 return "Titan";
 }
 
-function getMood(charge: number): Mood {
-if (charge < 50) return "Dormant";
-if (charge < 150) return "Calm";
-if (charge < 400) return "Awake";
-if (charge < 1000) return "Bright";
-return "Charged";
-}
-
 function getCoreSize(stage: Stage) {
-if (stage === "Seed") return 156;
-if (stage === "Core") return 172;
-if (stage === "Pulse") return 194;
-if (stage === "Nova") return 220;
-return 246;
+if (stage === "Seed") return 164;
+if (stage === "Core") return 180;
+if (stage === "Pulse") return 202;
+if (stage === "Nova") return 228;
+return 252;
 }
 
 function getRingCount(stage: Stage) {
@@ -81,7 +72,7 @@ return 100;
 
 function getSocketPositions(count: number) {
 if (count <= 0) return [];
-const radius = 156;
+const radius = 158;
 const startAngle = -90;
 
 return Array.from({ length: count }, (_, i) => {
@@ -100,13 +91,6 @@ if (type === "stabilizer") return 80;
 return 100;
 }
 
-function nodeLabel(type: NodeType) {
-if (type === "storage") return "Storage";
-if (type === "amplifier") return "Amplifier";
-if (type === "stabilizer") return "Stabilizer";
-return "Relay";
-}
-
 function nodeColor(type: NodeType) {
 if (type === "storage") return "rgba(78,245,225,0.95)";
 if (type === "amplifier") return "rgba(82,179,255,0.95)";
@@ -120,6 +104,7 @@ const [pulseOn, setPulseOn] = useState(false);
 const [surgeOn, setSurgeOn] = useState(false);
 const [touchGlow, setTouchGlow] = useState(false);
 const [nodes, setNodes] = useState<NodeItem[]>([]);
+const [deployBurst, setDeployBurst] = useState(0);
 
 const previousBankRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -174,7 +159,6 @@ window.localStorage.setItem(PYRON_STATE_KEY, JSON.stringify(saved));
 }, [nodes]);
 
 const stage = useMemo(() => getStage(bank), [bank]);
-const mood = useMemo(() => getMood(bank), [bank]);
 const coreSize = useMemo(() => getCoreSize(stage), [stage]);
 const ringCount = useMemo(() => getRingCount(stage), [stage]);
 const socketLimit = useMemo(() => getSocketLimit(stage), [stage]);
@@ -190,25 +174,30 @@ const relay = nodes.filter((n) => n.type === "relay").length;
 return { storage, amplifier, stabilizer, relay };
 }, [nodes]);
 
+function triggerSurge() {
+setSurgeOn(true);
+setPulseOn(true);
+setDeployBurst((n) => n + 1);
+
+if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
+if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+
+pulseTimeoutRef.current = setTimeout(() => {
+setPulseOn(false);
+}, 260);
+
+surgeTimeoutRef.current = setTimeout(() => {
+setSurgeOn(false);
+}, 1100);
+}
+
 useEffect(() => {
 const firstLoad = previousBankRef.current === null;
 const increased =
 previousBankRef.current !== null && bank > previousBankRef.current;
 
 if (firstLoad || increased) {
-setSurgeOn(true);
-setPulseOn(true);
-
-if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
-if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
-
-surgeTimeoutRef.current = setTimeout(() => {
-setSurgeOn(false);
-}, 1100);
-
-pulseTimeoutRef.current = setTimeout(() => {
-setPulseOn(false);
-}, 260);
+triggerSurge();
 }
 
 previousBankRef.current = bank;
@@ -287,12 +276,7 @@ socketIndex,
 
 setNodes((prev) => [...prev, item]);
 writeBank(bank - cost);
-setSurgeOn(true);
-
-if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
-surgeTimeoutRef.current = setTimeout(() => {
-setSurgeOn(false);
-}, 900);
+triggerSurge();
 
 if (typeof navigator !== "undefined" && "vibrate" in navigator) {
 navigator.vibrate(18);
@@ -314,6 +298,8 @@ stage === "Seed"
 : stage === "Nova"
 ? 0.82
 : 1;
+
+const deployScale = surgeOn ? 1.22 : pulseOn ? 1.08 : 1;
 
 return (
 <div
@@ -409,14 +395,16 @@ transition: "transform 220ms ease, box-shadow 180ms ease",
 
 {sockets.map((pos, i) => {
 const built = nodes.find((n) => n.socketIndex === i);
+const delay = i * 45;
+
 return (
 <div
-key={i}
+key={`${deployBurst}-${i}-${built ? built.id : "empty"}`}
 style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-transform: `translate(${pos.x}px, ${pos.y}px) scale(${surgeOn ? 1.22 : pulseOn ? 1.14 : 1})`,
+transform: `translate(${pos.x}px, ${pos.y}px) scale(${deployScale})`,
 width: 18,
 height: 18,
 marginLeft: -9,
@@ -426,16 +414,17 @@ background: built
 ? nodeColor(built.type)
 : surgeOn || pulseOn
 ? "rgba(78,245,225,0.96)"
-: "rgba(78,245,225,0.20)",
+: "rgba(78,245,225,0.12)",
 boxShadow: built
-? `0 0 16px ${nodeColor(built.type)}`
+? `0 0 18px ${nodeColor(built.type)}`
 : surgeOn || pulseOn
 ? `0 0 18px ${ACCENT_SOFT}`
 : "none",
 border: built
 ? "none"
-: "1px dashed rgba(78,245,225,0.18)",
-transition: "all 180ms ease",
+: "1px dashed rgba(78,245,225,0.16)",
+opacity: surgeOn ? 1 : built ? 1 : 0.55,
+transition: `transform 320ms ease ${delay}ms, opacity 220ms ease ${delay}ms, box-shadow 220ms ease ${delay}ms, background 220ms ease ${delay}ms`,
 }}
 />
 );
@@ -473,10 +462,10 @@ height: coreSize,
 marginLeft: -coreSize / 2,
 marginTop: -coreSize / 2,
 borderRadius: "50%",
-border: "1px solid rgba(255,255,255,0.12)",
+border: "1px solid rgba(255,255,255,0.10)",
 background:
 "radial-gradient(circle at 35% 35%, rgba(160,255,242,0.98) 0%, rgba(78,245,225,0.92) 26%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)",
-boxShadow: `0 0 ${44 + ringCount * 16}px rgba(78,245,225,${glowStrength}), inset 0 0 54px rgba(255,255,255,0.06)`,
+boxShadow: `0 0 ${44 + ringCount * 16}px rgba(78,245,225,${glowStrength}), inset 0 0 54px rgba(255,255,255,0.05)`,
 transform: `scale(${surgeOn ? 1.08 : pulseOn ? 1.05 : touchGlow ? 1.02 : 1})`,
 transition: "transform 240ms ease, box-shadow 220ms ease",
 display: "grid",
@@ -486,10 +475,7 @@ userSelect: "none",
 }}
 >
 <div style={{ textAlign: "center", pointerEvents: "none" }}>
-<div style={{ fontSize: 14, opacity: 0.78 }}>PYRON</div>
-<div style={{ fontSize: 30, fontWeight: 800, marginTop: 4 }}>
-{mood}
-</div>
+<div style={{ fontSize: 14, opacity: 0.74, letterSpacing: 0.6 }}>PYRON</div>
 </div>
 </div>
 
@@ -507,14 +493,10 @@ fontSize: 14,
 opacity: 0.78,
 }}
 >
-<div>{nodes.length} / {socketLimit}</div>
 <div>
-{surgeOn
-? "Surge active"
-: stage === "Titan"
-? "Fully ignited"
-: `Next ${nextTarget}`}
+{nodes.length} / {socketLimit}
 </div>
+<div>{surgeOn ? "Surge" : `Next ${nextTarget}`}</div>
 </div>
 </div>
 
@@ -573,7 +555,7 @@ display: "grid",
 gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
 gap: 8,
 fontSize: 12,
-opacity: 0.7,
+opacity: 0.72,
 }}
 >
 <div>S {counts.storage}</div>
