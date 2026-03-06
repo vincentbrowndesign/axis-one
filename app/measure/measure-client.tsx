@@ -18,23 +18,42 @@ charge: number;
 const CHARGE_KEY = "axis_charge_v1";
 
 function getPyronStage(charge: number) {
-if (charge < 50) return "Spark";
+if (charge < 50) return "Seed";
 if (charge < 150) return "Core";
-if (charge < 400) return "Reactor";
-if (charge < 800) return "Nova";
+if (charge < 400) return "Pulse";
+if (charge < 1000) return "Nova";
 return "Titan";
 }
 
 function getPyronSize(stage: string) {
-if (stage === "Spark") return 50;
+if (stage === "Seed") return 50;
 if (stage === "Core") return 70;
-if (stage === "Reactor") return 100;
+if (stage === "Pulse") return 100;
 if (stage === "Nova") return 140;
 return 180;
 }
 
+function average(values: number[]) {
+if (!values.length) return 0;
+return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+function smoothSeries(values: number[], windowSize = 4) {
+if (!values.length) return [];
+const out: number[] = [];
+
+for (let i = 0; i < values.length; i++) {
+const start = Math.max(0, i - windowSize + 1);
+const slice = values.slice(start, i + 1);
+out.push(average(slice));
+}
+
+return out;
+}
+
 export default function MeasureClient() {
 const [running, setRunning] = useState(false);
+const [isCalibrating, setIsCalibrating] = useState(false);
 const [time, setTime] = useState(0);
 const [storedCharge, setStoredCharge] = useState(0);
 
@@ -48,6 +67,8 @@ charge: 0,
 });
 
 const samplesRef = useRef<number[]>([]);
+const baselineSamplesRef = useRef<number[]>([]);
+const baselineRef = useRef<number>(0);
 const startTimeRef = useRef<number>(0);
 const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 const motionEnabledRef = useRef(false);
@@ -79,8 +100,11 @@ windows: 0,
 charge: 0,
 });
 samplesRef.current = [];
+baselineSamplesRef.current = [];
+baselineRef.current = 0;
 setTime(0);
 setRunning(false);
+setIsCalibrating(false);
 
 if (timerRef.current) {
 clearInterval(timerRef.current);
@@ -105,8 +129,17 @@ const accel = magnitude(ax, ay, az);
 const gyro = magnitude(gx, gy, gz) / 50;
 const rawMotion = accel + gyro;
 
-const deadZone = 0.12;
-const motion = rawMotion < deadZone ? 0 : rawMotion;
+if (isCalibrating) {
+baselineSamplesRef.current.push(rawMotion);
+if (baselineSamplesRef.current.length > 80) {
+baselineSamplesRef.current.shift();
+}
+return;
+}
+
+const adjusted = Math.max(0, rawMotion - baselineRef.current);
+const deadZone = 0.08;
+const motion = adjusted < deadZone ? 0 : adjusted;
 
 samplesRef.current.push(motion);
 
@@ -125,17 +158,20 @@ const res = await (
 DeviceMotionEvent as unknown as { requestPermission: () => Promise<string> }
 ).requestPermission();
 
-if (res !== "granted") return;
+if (res !== "granted") return false;
 }
 
 if (!motionEnabledRef.current) {
 window.addEventListener("devicemotion", handleMotion);
 motionEnabledRef.current = true;
 }
+
+return true;
 }
 
 function computeReading() {
-const values = samplesRef.current;
+const rawValues = samplesRef.current;
+const values = smoothSeries(rawValues, 4);
 
 if (values.length < 8) {
 setReading({
@@ -156,11 +192,11 @@ let signal: SignalState = "Clean";
 let energy: EnergyState = "Off";
 let form: FormState = "In Control";
 
-if (avg < 0.2) {
+if (avg < 0.12) {
 signal = "Clean";
 energy = "Off";
 form = "In Control";
-} else if (avg < 0.9) {
+} else if (avg < 0.55) {
 signal = "Reactive";
 energy = "On";
 form = "In Rhythm";
@@ -170,9 +206,9 @@ energy = "High";
 form = "Out of Control";
 }
 
-const transitions = values.filter((v) => v > 1.1).length;
+const transitions = values.filter((v) => v > 0.8).length;
 const windows = Math.max(0, Math.floor(time / 5));
-const charge = running ? Math.max(1, Math.floor(total * 0.5)) : 0;
+const charge = running ? Math.max(1, Math.floor(total * 0.35)) : 0;
 
 setReading({
 form,
@@ -192,11 +228,22 @@ saveCharge(next);
 }
 
 async function start() {
-await enableMotion();
+const ok = await enableMotion();
+if (!ok) return;
 
+samplesRef.current = [];
+baselineSamplesRef.current = [];
+baselineRef.current = 0;
+setTime(0);
+setRunning(false);
+setIsCalibrating(true);
+
+setTimeout(() => {
+baselineRef.current = average(baselineSamplesRef.current);
 samplesRef.current = [];
 startTimeRef.current = Date.now();
 setTime(0);
+setIsCalibrating(false);
 setRunning(true);
 
 if (timerRef.current) clearInterval(timerRef.current);
@@ -206,6 +253,7 @@ const t = Math.floor((Date.now() - startTimeRef.current) / 1000);
 setTime(t);
 computeReading();
 }, 1000);
+}, 1500);
 }
 
 function stop() {
@@ -224,7 +272,7 @@ return Math.min(100, Math.round((storedCharge / 2000) * 100));
 }, [storedCharge]);
 
 const linePoints = useMemo(() => {
-const values = samplesRef.current;
+const values = smoothSeries(samplesRef.current, 4);
 const width = 100;
 const height = 44;
 
@@ -273,7 +321,7 @@ marginBottom: 18,
 Machine
 </div>
 <div style={{ fontSize: 30, fontWeight: 700, letterSpacing: "-0.04em" }}>
-{running ? "Live" : "Ready"}
+{isCalibrating ? "Calibrating" : running ? "Live" : "Ready"}
 </div>
 </div>
 
@@ -353,7 +401,7 @@ points={linePoints || "0,44 100,44"}
 </div>
 
 <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-{!running ? (
+{!running && !isCalibrating ? (
 <button
 onClick={start}
 style={{
@@ -372,6 +420,7 @@ On
 ) : (
 <button
 onClick={stop}
+disabled={isCalibrating}
 style={{
 border: "1px solid rgba(255,255,255,0.12)",
 background: "rgba(255,255,255,0.06)",
@@ -380,7 +429,8 @@ borderRadius: 18,
 padding: "16px 26px",
 fontSize: 18,
 fontWeight: 700,
-cursor: "pointer",
+cursor: isCalibrating ? "not-allowed" : "pointer",
+opacity: isCalibrating ? 0.5 : 1,
 }}
 >
 Off
