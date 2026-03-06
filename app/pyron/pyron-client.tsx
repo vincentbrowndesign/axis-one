@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-const CHARGE_KEY = "axis_charge_v2";
+const STORAGE_KEY = "axis_pyron_state_v3";
 
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
 type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
@@ -13,12 +13,31 @@ type: NodeType;
 socketIndex: number;
 };
 
+type SavedState = {
+charge: number;
+hold: number;
+surge: number;
+nodes: NodeItem[];
+};
+
+function clamp(value: number, min: number, max: number) {
+return Math.max(min, Math.min(max, value));
+}
+
 function getStage(charge: number): Stage {
 if (charge < 50) return "Seed";
 if (charge < 150) return "Core";
 if (charge < 400) return "Pulse";
 if (charge < 1000) return "Nova";
 return "Titan";
+}
+
+function getNextStageTarget(stage: Stage) {
+if (stage === "Seed") return 50;
+if (stage === "Core") return 150;
+if (stage === "Pulse") return 400;
+if (stage === "Nova") return 1000;
+return 1000;
 }
 
 function getSocketLimit(stage: Stage) {
@@ -37,21 +56,9 @@ if (stage === "Nova") return 3;
 return 4;
 }
 
-function getStageThreshold(stage: Stage) {
-if (stage === "Seed") return 50;
-if (stage === "Core") return 150;
-if (stage === "Pulse") return 400;
-if (stage === "Nova") return 1000;
-return 1000;
-}
-
-function clamp(value: number, min: number, max: number) {
-return Math.max(min, Math.min(max, value));
-}
-
 function getSocketPositions(count: number) {
 if (count <= 0) return [];
-const radius = 150;
+const radius = 148;
 const startAngle = -90;
 
 return Array.from({ length: count }, (_, i) => {
@@ -63,41 +70,65 @@ y: Math.sin(angle) * radius,
 });
 }
 
-function niceNodeLabel(type: NodeType) {
+function nodeLabel(type: NodeType) {
 if (type === "storage") return "Storage";
 if (type === "amplifier") return "Amplifier";
 if (type === "stabilizer") return "Stabilizer";
 return "Relay";
 }
 
+function nodeShort(type: NodeType) {
+if (type === "storage") return "S";
+if (type === "amplifier") return "A";
+if (type === "stabilizer") return "Z";
+return "R";
+}
+
 export default function PyronClient() {
+const [ready, setReady] = useState(false);
 const [charge, setCharge] = useState(0);
-const [nodes, setNodes] = useState<NodeItem[]>([]);
-const [hold, setHold] = useState(72);
+const [hold, setHold] = useState(68);
 const [surge, setSurge] = useState(0);
 const [surgeActive, setSurgeActive] = useState(false);
+const [nodes, setNodes] = useState<NodeItem[]>([]);
 const [pulseOn, setPulseOn] = useState(false);
 const [strikeOn, setStrikeOn] = useState(false);
-const [lastAction, setLastAction] = useState("System idle");
-const [limitMessage, setLimitMessage] = useState("");
+const [tuned, setTuned] = useState(false);
 const [flash, setFlash] = useState(false);
+const [status, setStatus] = useState("Awaiting signal");
+const [notice, setNotice] = useState("Core tap tunes Strike");
+const [lastFeedAt, setLastFeedAt] = useState<number | null>(null);
 
-const strikeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const strikeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const tunedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const flashTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 useEffect(() => {
-const saved = window.localStorage.getItem(CHARGE_KEY);
-if (saved) {
-const parsed = Number(saved);
-if (!Number.isNaN(parsed)) setCharge(parsed);
+try {
+const raw = window.localStorage.getItem(STORAGE_KEY);
+if (raw) {
+const parsed = JSON.parse(raw) as SavedState;
+setCharge(clamp(parsed.charge ?? 0, 0, 3000));
+setHold(clamp(parsed.hold ?? 68, 0, 100));
+setSurge(clamp(parsed.surge ?? 0, 0, 100));
+setNodes(Array.isArray(parsed.nodes) ? parsed.nodes : []);
+}
+} catch {
+window.localStorage.removeItem(STORAGE_KEY);
+} finally {
+setReady(true);
 }
 }, []);
 
 useEffect(() => {
-window.localStorage.setItem(CHARGE_KEY, String(charge));
-}, [charge]);
+if (!ready) return;
+const state: SavedState = { charge, hold, surge, nodes };
+window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}, [ready, charge, hold, surge, nodes]);
 
 const stage = useMemo(() => getStage(charge), [charge]);
+const nextStageTarget = useMemo(() => getNextStageTarget(stage), [stage]);
 const socketLimit = useMemo(() => getSocketLimit(stage), [stage]);
 const ringCount = useMemo(() => getRingCount(stage), [stage]);
 const sockets = useMemo(() => getSocketPositions(socketLimit), [socketLimit]);
@@ -110,96 +141,111 @@ const relay = nodes.filter((n) => n.type === "relay").length;
 return { storage, amplifier, stabilizer, relay };
 }, [nodes]);
 
-const maxCharge =
-1000 +
-counts.storage * 120 +
-(surgeActive ? 120 : 0);
+const maxCharge = 1000 + counts.storage * 140;
+const feedMultiplier = 1 + counts.amplifier * 0.25 + (surgeActive ? 0.35 : 0);
+const holdSupport = counts.stabilizer * 0.3;
+const surgeAssist = counts.relay * 2;
 
-const gainMultiplier =
-1 +
-counts.amplifier * 0.2 +
-(surgeActive ? 0.5 : 0);
+const progress = stage === "Titan"
+? 100
+: clamp((charge / nextStageTarget) * 100, 0, 100);
 
-const decayRate = Math.max(
-1,
-3 - counts.stabilizer * 0.4 - (surgeActive ? 0.5 : 0)
-);
+function pulseFlash(text: string) {
+setStatus(text);
+setFlash(true);
+if (flashTimeoutRef.current) clearTimeout(flashTimeoutRef.current);
+flashTimeoutRef.current = setTimeout(() => setFlash(false), 180);
 
-const stageTarget = getStageThreshold(stage);
-const progressToNext = clamp((charge / stageTarget) * 100, 0, 100);
+if (typeof navigator !== "undefined" && "vibrate" in navigator) {
+navigator.vibrate(15);
+}
+}
 
 useEffect(() => {
-const intervalMs = Math.max(700, 1500 - charge * 0.25);
+const intervalMs = surgeActive ? 1050 : 1450;
 
-const rhythm = setInterval(() => {
+const interval = setInterval(() => {
 setPulseOn(true);
-setStrikeOn(true);
 
 if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
+pulseTimeoutRef.current = setTimeout(() => setPulseOn(false), 220);
+
+const strikeChanceBase = tuned ? 0.9 : 0.35;
+const strikeChance = clamp(strikeChanceBase + hold / 200, 0, 0.96);
+
+if (Math.random() < strikeChance) {
+setStrikeOn(true);
+setNotice("Strike window open");
+
 if (strikeTimeoutRef.current) clearTimeout(strikeTimeoutRef.current);
-
-pulseTimeoutRef.current = setTimeout(() => {
-setPulseOn(false);
-}, 260);
-
 strikeTimeoutRef.current = setTimeout(() => {
 setStrikeOn(false);
-}, Math.max(240, 420 - counts.stabilizer * 20));
+setNotice("Core tap tunes Strike");
+}, surgeActive ? 320 : 240);
+}
 }, intervalMs);
 
-return () => clearInterval(rhythm);
-}, [charge, counts.stabilizer]);
+return () => clearInterval(interval);
+}, [hold, tuned, surgeActive]);
 
 useEffect(() => {
 const decay = setInterval(() => {
-setCharge((c) => Math.max(0, c - decayRate));
-setSurge((s) => Math.max(0, s - (surgeActive ? 1.6 : 0.6)));
-setHold((h) => clamp(h - 0.35 + counts.stabilizer * 0.08, 0, 100));
-}, 1800);
+setCharge((c) => Math.max(0, c - Math.max(1, 2 - holdSupport)));
+setSurge((s) => Math.max(0, s - (surgeActive ? 2.4 : 0.7)));
+setHold((h) => clamp(h - (surgeActive ? 1.2 : 0.55) + holdSupport * 0.25, 0, 100));
+}, 2500);
 
 return () => clearInterval(decay);
-}, [counts.stabilizer, decayRate, surgeActive]);
+}, [surgeActive, holdSupport]);
 
 useEffect(() => {
 if (surge >= 100 && !surgeActive) {
 setSurgeActive(true);
-setLastAction("Surge active");
-setFlash(true);
-setTimeout(() => setFlash(false), 260);
+pulseFlash("Surge active");
+setNotice("Feed signal while Surge is active");
 }
 }, [surge, surgeActive]);
 
 useEffect(() => {
-if (surgeActive && (surge <= 15 || hold <= 10)) {
+if (surgeActive && (surge <= 12 || hold <= 8)) {
 setSurgeActive(false);
-setLastAction(hold <= 10 ? "Surge lost from low Hold" : "Surge ended");
-setSurge((s) => clamp(s, 0, 40));
+setSurge((s) => clamp(s, 0, 30));
+setNotice("Core tap tunes Strike");
+pulseFlash(hold <= 8 ? "Surge lost" : "Surge ended");
 }
 }, [surgeActive, surge, hold]);
 
-function triggerFeedback(text: string) {
-setLastAction(text);
-setFlash(true);
-setTimeout(() => setFlash(false), 180);
+function handleCoreTap() {
+setTuned(true);
+setHold((h) => clamp(h + (strikeOn ? 7 : 3), 0, 100));
+setSurge((s) => clamp(s + (strikeOn ? 6 : 2), 0, 100));
+pulseFlash(strikeOn ? "Core tuned on Strike" : "Core tuned");
 
-if (typeof navigator !== "undefined" && "vibrate" in navigator) {
-navigator.vibrate(18);
-}
+if (tunedTimeoutRef.current) clearTimeout(tunedTimeoutRef.current);
+tunedTimeoutRef.current = setTimeout(() => {
+setTuned(false);
+}, 1400);
 }
 
-function addCharge(base: number, hitStrike: boolean) {
-const strikeBonus = hitStrike ? 1.7 : 1;
-const total = Math.round(base * gainMultiplier * strikeBonus);
+function feedSignal(base = 16) {
+const withinRhythm = lastFeedAt && Date.now() - lastFeedAt < 1800;
+const strikeBonus = strikeOn ? 1.8 : 1;
+const tunedBonus = tuned ? 1.25 : 1;
+const rhythmBonus = withinRhythm ? 1.15 : 1;
+const total = Math.round(base * feedMultiplier * strikeBonus * tunedBonus * rhythmBonus);
 
 setCharge((c) => clamp(c + total, 0, maxCharge));
-setSurge((s) => clamp(s + (hitStrike ? 16 : 8), 0, 100));
-setHold((h) => clamp(h + (hitStrike ? 5 : 2), 0, 100));
-}
+setSurge((s) => clamp(s + 12 + surgeAssist + (strikeOn ? 8 : 0), 0, 100));
+setHold((h) => clamp(h + (strikeOn ? 5 : 2), 0, 100));
+setLastFeedAt(Date.now());
 
-function handleCoreTap() {
-const hitStrike = strikeOn;
-addCharge(12, hitStrike);
-triggerFeedback(hitStrike ? "Strike hit on core" : "Core tapped");
+if (strikeOn) {
+pulseFlash(`Signal converted with Strike +${total}`);
+} else if (tuned) {
+pulseFlash(`Signal converted +${total}`);
+} else {
+pulseFlash(`Signal fed +${total}`);
+}
 }
 
 function nextOpenSocketIndex() {
@@ -212,91 +258,93 @@ return -1;
 
 function addNode(type: NodeType) {
 if (socketLimit === 0) {
-setLimitMessage("Build more Charge to unlock sockets");
-triggerFeedback("No sockets unlocked");
+pulseFlash("No sockets unlocked");
+setNotice("Build Charge to unlock sockets");
 return;
 }
 
 if (nodes.length >= socketLimit) {
-setLimitMessage("All sockets filled");
-triggerFeedback("Socket limit reached");
+pulseFlash("All sockets filled");
+setNotice("Advance stage to unlock more sockets");
+return;
+}
+
+const cost = type === "storage" ? 40 : type === "amplifier" ? 60 : type === "stabilizer" ? 80 : 100;
+
+if (charge < cost) {
+pulseFlash("Not enough Charge");
+setNotice(`${cost} Charge needed for ${nodeLabel(type)}`);
 return;
 }
 
 const socketIndex = nextOpenSocketIndex();
-if (socketIndex === -1) {
-setLimitMessage("No open socket");
-triggerFeedback("No open socket");
-return;
-}
+if (socketIndex === -1) return;
 
-const hitStrike = strikeOn;
-const id = `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const item: NodeItem = {
+id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+type,
+socketIndex,
+};
 
-setNodes((prev) => [...prev, { id, type, socketIndex }]);
-setLimitMessage("");
+setCharge((c) => Math.max(0, c - cost));
+setNodes((prev) => [...prev, item]);
 
 if (type === "storage") {
-addCharge(10, hitStrike);
-setHold((h) => clamp(h + 2, 0, 100));
+setHold((h) => clamp(h + 4, 0, 100));
+setSurge((s) => clamp(s + 4, 0, 100));
 }
 
 if (type === "amplifier") {
-addCharge(14, hitStrike);
-setHold((h) => clamp(h - 2, 0, 100));
+setHold((h) => clamp(h - 3, 0, 100));
+setSurge((s) => clamp(s + 8, 0, 100));
 }
 
 if (type === "stabilizer") {
-addCharge(8, hitStrike);
-setHold((h) => clamp(h + 8, 0, 100));
+setHold((h) => clamp(h + 10, 0, 100));
+setSurge((s) => clamp(s + 3, 0, 100));
 }
 
 if (type === "relay") {
-addCharge(12, hitStrike);
+setHold((h) => clamp(h + 2, 0, 100));
 setSurge((s) => clamp(s + 10, 0, 100));
 }
 
-triggerFeedback(
-`${niceNodeLabel(type)} added${hitStrike ? " with Strike" : ""}`
-);
+pulseFlash(`${nodeLabel(type)} added`);
+setNotice("Feed more signal");
 }
 
 function resetSystem() {
 setCharge(0);
-setNodes([]);
-setHold(72);
+setHold(68);
 setSurge(0);
 setSurgeActive(false);
-setLimitMessage("");
-setLastAction("System reset");
-window.localStorage.removeItem(CHARGE_KEY);
+setNodes([]);
+setPulseOn(false);
+setStrikeOn(false);
+setTuned(false);
+setStatus("System reset");
+setNotice("Core tap tunes Strike");
+setLastFeedAt(null);
+window.localStorage.removeItem(STORAGE_KEY);
 }
 
-const shellGlow = surgeActive ? 0.95 : 0.55;
-const coreScale = pulseOn ? 1.08 : 1;
-const ringScale = pulseOn ? 1.03 : 1;
+const shellGlow = surgeActive ? 0.9 : 0.48;
+const coreScale = pulseOn ? 1.06 : tuned ? 1.03 : 1;
+const ringScale = pulseOn ? 1.025 : 1;
 
 return (
 <div
 style={{
 minHeight: "100dvh",
 background:
-"radial-gradient(circle at center, rgba(25,35,60,1) 0%, rgba(7,10,18,1) 55%, rgba(0,0,0,1) 100%)",
+"radial-gradient(circle at center, rgba(15,22,40,1) 0%, rgba(5,8,16,1) 58%, rgba(0,0,0,1) 100%)",
 color: "white",
-padding: "20px 16px 32px",
+padding: "16px 14px 40px",
 fontFamily:
 "ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif",
 }}
 >
-<div
-style={{
-maxWidth: 980,
-margin: "0 auto",
-display: "grid",
-gridTemplateColumns: "1fr",
-gap: 20,
-}}
->
+<div style={{ maxWidth: 920, margin: "0 auto", display: "grid", gap: 18 }}>
 <div
 style={{
 display: "grid",
@@ -304,13 +352,17 @@ gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
 gap: 12,
 }}
 >
-<StatCard label="Charge" value={charge} sub={`${stage} stage`} />
+<StatCard label="Charge" value={Math.round(charge)} sub={`${stage} stage`} />
 <StatCard
 label="Surge"
 value={`${Math.round(surge)}%`}
-sub={surgeActive ? "Active" : surge >= 80 ? "Ready" : "Building"}
+sub={surgeActive ? "Active" : surge >= 80 ? "Building high" : "Building"}
 />
-<StatCard label="Hold" value={`${Math.round(hold)}%`} sub={hold > 55 ? "Controlled" : hold > 25 ? "Shifting" : "Low"} />
+<StatCard
+label="Hold"
+value={`${Math.round(hold)}%`}
+sub={hold > 55 ? "Tuned" : hold > 25 ? "Shifting" : "Low"}
+/>
 <StatCard
 label="Sockets"
 value={`${nodes.length} / ${socketLimit}`}
@@ -322,34 +374,27 @@ sub={socketLimit === 0 ? "Locked" : "Open system"}
 style={{
 border: "1px solid rgba(255,255,255,0.12)",
 borderRadius: 24,
-padding: 18,
+padding: 16,
 background: "rgba(255,255,255,0.04)",
-backdropFilter: "blur(16px)",
+backdropFilter: "blur(14px)",
 }}
 >
 <div
 style={{
 display: "flex",
 justifyContent: "space-between",
-gap: 12,
 alignItems: "center",
-marginBottom: 12,
+gap: 12,
 flexWrap: "wrap",
+marginBottom: 10,
 }}
 >
 <div>
-<div style={{ fontSize: 13, opacity: 0.7 }}>Pyron Core</div>
-<div style={{ fontSize: 22, fontWeight: 700 }}>{stage}</div>
+<div style={{ fontSize: 13, opacity: 0.72 }}>Pyron Core</div>
+<div style={{ fontSize: 22, fontWeight: 800 }}>{stage}</div>
 </div>
 
-<div
-style={{
-display: "flex",
-gap: 8,
-alignItems: "center",
-flexWrap: "wrap",
-}}
->
+<div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
 <Badge active={pulseOn}>Pulse</Badge>
 <Badge active={strikeOn}>Strike</Badge>
 <Badge active={surgeActive}>Surge</Badge>
@@ -367,7 +412,7 @@ overflow: "hidden",
 >
 <div
 style={{
-width: `${progressToNext}%`,
+width: `${progress}%`,
 height: "100%",
 borderRadius: 999,
 background:
@@ -376,8 +421,8 @@ transition: "width 180ms ease",
 }}
 />
 </div>
-<div style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
-Next stage target: {stageTarget}
+<div style={{ fontSize: 12, opacity: 0.72, marginTop: 6 }}>
+{stage === "Titan" ? "Titan reached" : `Next stage target: ${nextStageTarget}`}
 </div>
 </div>
 
@@ -385,7 +430,7 @@ Next stage target: {stageTarget}
 style={{
 position: "relative",
 width: "100%",
-minHeight: 430,
+minHeight: 420,
 display: "grid",
 placeItems: "center",
 overflow: "hidden",
@@ -396,15 +441,13 @@ overflow: "hidden",
 key={i}
 style={{
 position: "absolute",
-width: 170 + i * 58,
-height: 170 + i * 58,
+width: 170 + i * 56,
+height: 170 + i * 56,
 borderRadius: "50%",
-border: `1px solid rgba(120,180,255,${0.18 + i * 0.08})`,
+border: `1px solid rgba(120,180,255,${0.16 + i * 0.08})`,
+boxShadow: pulseOn ? "0 0 24px rgba(90,140,255,0.12)" : "none",
 transform: `scale(${ringScale})`,
-transition: "transform 180ms ease, opacity 180ms ease",
-boxShadow: pulseOn
-? "0 0 20px rgba(120,180,255,0.12)"
-: "none",
+transition: "transform 180ms ease, box-shadow 180ms ease",
 }}
 />
 ))}
@@ -427,20 +470,18 @@ borderRadius: "50%",
 display: "grid",
 placeItems: "center",
 border: node
-? "1px solid rgba(255,255,255,0.4)"
+? "1px solid rgba(255,255,255,0.42)"
 : "1px dashed rgba(255,255,255,0.22)",
 background: node
 ? "rgba(255,255,255,0.08)"
-: pulseOn
-? "rgba(80,120,255,0.10)"
 : "rgba(255,255,255,0.03)",
-transition: "all 180ms ease",
-fontSize: 10,
-textTransform: "uppercase",
-letterSpacing: 0.8,
+fontSize: 13,
+fontWeight: 700,
+color: "rgba(255,255,255,0.88)",
 }}
+title={node ? nodeLabel(node.type) : "Open socket"}
 >
-{node ? node.type.slice(0, 3) : ""}
+{node ? nodeShort(node.type) : ""}
 </div>
 );
 })}
@@ -448,26 +489,27 @@ letterSpacing: 0.8,
 <button
 onClick={handleCoreTap}
 style={{
-width: 140,
-height: 140,
+width: 148,
+height: 148,
 borderRadius: "50%",
 border: strikeOn
-? "1px solid rgba(255,255,255,0.65)"
-: "1px solid rgba(255,255,255,0.18)",
+? "1px solid rgba(255,255,255,0.62)"
+: tuned
+? "1px solid rgba(255,255,255,0.38)"
+: "1px solid rgba(255,255,255,0.16)",
 background: flash
-? "radial-gradient(circle at center, rgba(96,165,250,0.95) 0%, rgba(37,99,235,0.45) 55%, rgba(15,23,42,0.25) 100%)"
-: "radial-gradient(circle at center, rgba(59,130,246,0.82) 0%, rgba(37,99,235,0.35) 55%, rgba(15,23,42,0.18) 100%)",
-boxShadow: `0 0 50px rgba(59,130,246,${shellGlow}), inset 0 0 40px rgba(255,255,255,0.08)`,
+? "radial-gradient(circle at center, rgba(96,165,250,0.96) 0%, rgba(37,99,235,0.48) 58%, rgba(15,23,42,0.25) 100%)"
+: "radial-gradient(circle at center, rgba(59,130,246,0.84) 0%, rgba(37,99,235,0.32) 58%, rgba(15,23,42,0.18) 100%)",
+boxShadow: `0 0 52px rgba(59,130,246,${shellGlow}), inset 0 0 40px rgba(255,255,255,0.06)`,
 transform: `scale(${coreScale})`,
-transition:
-"transform 180ms ease, box-shadow 180ms ease, background 180ms ease, border 180ms ease",
+transition: "all 180ms ease",
 color: "white",
 cursor: "pointer",
 }}
 >
-<div style={{ fontSize: 14, opacity: 0.75 }}>PYRON</div>
+<div style={{ fontSize: 14, opacity: 0.78 }}>PYRON</div>
 <div style={{ fontSize: 24, fontWeight: 800, marginTop: 4 }}>
-{strikeOn ? "STRIKE" : "TAP"}
+{strikeOn ? "TUNE" : "CORE"}
 </div>
 </button>
 </div>
@@ -478,14 +520,13 @@ display: "flex",
 justifyContent: "space-between",
 gap: 12,
 flexWrap: "wrap",
-alignItems: "center",
 marginTop: 8,
+fontSize: 13,
+opacity: 0.82,
 }}
 >
-<div style={{ fontSize: 13, opacity: 0.8 }}>{lastAction}</div>
-<div style={{ fontSize: 13, opacity: 0.8 }}>
-{limitMessage || (strikeOn ? "Strike window open" : "Build Charge")}
-</div>
+<div>{status}</div>
+<div>{notice}</div>
 </div>
 </div>
 
@@ -493,13 +534,11 @@ marginTop: 8,
 style={{
 border: "1px solid rgba(255,255,255,0.12)",
 borderRadius: 24,
-padding: 18,
+padding: 16,
 background: "rgba(255,255,255,0.04)",
 }}
 >
-<div style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>
-Nodes
-</div>
+<div style={{ fontSize: 18, fontWeight: 800, marginBottom: 12 }}>Nodes</div>
 
 <div
 style={{
@@ -510,25 +549,25 @@ gap: 12,
 >
 <NodeButton
 label="Storage"
-hint="More capacity"
+hint="40 Charge"
 disabled={nodes.length >= socketLimit}
 onClick={() => addNode("storage")}
 />
 <NodeButton
 label="Amplifier"
-hint="More gain"
+hint="60 Charge"
 disabled={nodes.length >= socketLimit}
 onClick={() => addNode("amplifier")}
 />
 <NodeButton
 label="Stabilizer"
-hint="More control"
+hint="80 Charge"
 disabled={nodes.length >= socketLimit}
 onClick={() => addNode("stabilizer")}
 />
 <NodeButton
 label="Relay"
-hint="More reach"
+hint="100 Charge"
 disabled={nodes.length >= socketLimit}
 onClick={() => addNode("relay")}
 />
@@ -541,7 +580,7 @@ display: "grid",
 gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
 gap: 10,
 fontSize: 13,
-opacity: 0.85,
+opacity: 0.82,
 }}
 >
 <div>Storage: {counts.storage}</div>
@@ -559,6 +598,21 @@ marginTop: 16,
 }}
 >
 <button
+onClick={() => feedSignal(16)}
+style={{
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.18)",
+background: "rgba(59,130,246,0.18)",
+color: "white",
+padding: "10px 14px",
+cursor: "pointer",
+fontWeight: 700,
+}}
+>
+Feed Signal
+</button>
+
+<button
 onClick={resetSystem}
 style={{
 borderRadius: 999,
@@ -571,20 +625,10 @@ cursor: "pointer",
 >
 Reset
 </button>
+</div>
 
-<button
-onClick={handleCoreTap}
-style={{
-borderRadius: 999,
-border: "1px solid rgba(255,255,255,0.18)",
-background: "rgba(59,130,246,0.18)",
-color: "white",
-padding: "10px 14px",
-cursor: "pointer",
-}}
->
-Build Charge
-</button>
+<div style={{ marginTop: 12, fontSize: 12, opacity: 0.62 }}>
+Core tap tunes timing. Feed Signal is a temporary test input until Axis Measure drives Charge.
 </div>
 </div>
 </div>
@@ -610,9 +654,9 @@ padding: 14,
 background: "rgba(255,255,255,0.04)",
 }}
 >
-<div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
+<div style={{ fontSize: 12, opacity: 0.72 }}>{label}</div>
 <div style={{ fontSize: 28, fontWeight: 800, marginTop: 4 }}>{value}</div>
-<div style={{ fontSize: 12, opacity: 0.65, marginTop: 4 }}>{sub}</div>
+<div style={{ fontSize: 12, opacity: 0.64, marginTop: 4 }}>{sub}</div>
 </div>
 );
 }
@@ -630,12 +674,12 @@ style={{
 borderRadius: 999,
 padding: "8px 12px",
 border: active
-? "1px solid rgba(255,255,255,0.55)"
+? "1px solid rgba(255,255,255,0.54)"
 : "1px solid rgba(255,255,255,0.12)",
 background: active ? "rgba(59,130,246,0.22)" : "rgba(255,255,255,0.04)",
 fontSize: 12,
 fontWeight: 700,
-letterSpacing: 0.5,
+letterSpacing: 0.4,
 }}
 >
 {children}
@@ -669,8 +713,8 @@ cursor: disabled ? "not-allowed" : "pointer",
 opacity: disabled ? 0.45 : 1,
 }}
 >
-<div style={{ fontSize: 16, fontWeight: 700 }}>{label}</div>
-<div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{hint}</div>
+<div style={{ fontSize: 16, fontWeight: 800 }}>{label}</div>
+<div style={{ fontSize: 12, opacity: 0.68, marginTop: 4 }}>{hint}</div>
 </button>
 );
 }
