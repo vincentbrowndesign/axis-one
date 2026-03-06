@@ -96,7 +96,6 @@ const angle = ((360 / Math.max(count, 1)) * index + startAngle) * (Math.PI / 180
 return {
 x: Math.cos(angle) * radius,
 y: Math.sin(angle) * radius,
-angle,
 };
 }
 
@@ -318,9 +317,7 @@ stage === "Seed"
 : 1;
 
 const floatingNodes = useMemo(() => {
-return nodes
-.slice(0, socketLimit)
-.map((node, index) => {
+return nodes.slice(0, socketLimit).map((node, index) => {
 const lane =
 stage === "Core"
 ? 158
@@ -345,7 +342,6 @@ x: base.x + fx,
 y: base.y + fy,
 scale: isDeploying ? 0.45 : surgeOn ? cfg.scale * 1.08 : cfg.scale,
 opacity: isDeploying ? 0.2 : 1,
-lane,
 };
 });
 }, [nodes, socketLimit, stage, tick, deployNodeId, surgeOn]);
