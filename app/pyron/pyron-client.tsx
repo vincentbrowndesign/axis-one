@@ -1,157 +1,341 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const CHARGE_KEY = "axis_charge_v1";
+const NODES_KEY = "axis_pyron_nodes_v1";
 
-function getCharge() {
-if (typeof window === "undefined") return 0;
-const raw = localStorage.getItem(CHARGE_KEY);
-return raw ? Number(raw) || 0 : 0;
+type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
+type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
+type FlashType = NodeType | null;
+
+const NODE_COST: Record<NodeType, number> = {
+storage: 40,
+amplifier: 60,
+stabilizer: 80,
+relay: 100,
+};
+
+const NODE_META: Record<
+NodeType,
+{
+name: string;
+description: string;
+color: string;
+glow: string;
 }
+> = {
+storage: {
+name: "Storage",
+description: "Expands holding capacity",
+color: "#39f3d2",
+glow: "rgba(57,243,210,.45)",
+},
+amplifier: {
+name: "Amplifier",
+description: "Strengthens output",
+color: "#4bb8ff",
+glow: "rgba(75,184,255,.45)",
+},
+stabilizer: {
+name: "Stabilizer",
+description: "Settles the system",
+color: "#ffd15a",
+glow: "rgba(255,209,90,.42)",
+},
+relay: {
+name: "Relay",
+description: "Extends the field",
+color: "#ff7aa8",
+glow: "rgba(255,122,168,.40)",
+},
+};
 
-function spendCharge(amount: number) {
-const current = getCharge();
-const next = Math.max(0, current - amount);
-localStorage.setItem(CHARGE_KEY, String(next));
-return next;
-}
-
-function getStage(charge: number) {
-if (charge < 50) return "Spark";
+function getStage(charge: number): Stage {
+if (charge < 50) return "Seed";
 if (charge < 150) return "Core";
-if (charge < 400) return "Reactor";
-if (charge < 800) return "Nova";
+if (charge < 400) return "Pulse";
+if (charge < 1000) return "Nova";
 return "Titan";
 }
 
-function getCoreSize(stage: string) {
-if (stage === "Spark") return 70;
-if (stage === "Core") return 96;
-if (stage === "Reactor") return 124;
-if (stage === "Nova") return 152;
-return 184;
-}
-
-function getRingCount(stage: string) {
-if (stage === "Spark") return 0;
-if (stage === "Core") return 1;
-if (stage === "Reactor") return 2;
-if (stage === "Nova") return 3;
-return 4;
-}
-
-function getSocketLimit(stage: string) {
-if (stage === "Spark") return 0;
+function getSocketLimit(stage: Stage) {
+if (stage === "Seed") return 0;
 if (stage === "Core") return 2;
-if (stage === "Reactor") return 4;
+if (stage === "Pulse") return 4;
 if (stage === "Nova") return 6;
 return 8;
 }
 
-type NodeType = "Storage" | "Amplifier" | "Stabilizer" | "Relay";
+function getRingCount(stage: Stage) {
+if (stage === "Seed") return 0;
+if (stage === "Core") return 1;
+if (stage === "Pulse") return 2;
+if (stage === "Nova") return 3;
+return 4;
+}
 
-type NodeState = {
-id: number;
-type: NodeType;
-};
+function clamp(value: number, min: number, max: number) {
+return Math.max(min, Math.min(max, value));
+}
 
-const ALL_NODE_TYPES: NodeType[] = ["Storage", "Amplifier", "Stabilizer", "Relay"];
-
-const NODE_COSTS: Record<NodeType, number> = {
-Storage: 40,
-Amplifier: 60,
-Stabilizer: 80,
-Relay: 100,
-};
-
-const NODE_COLORS: Record<NodeType, string> = {
-Storage: "#34f5c5",
-Amplifier: "#53c7ff",
-Stabilizer: "#ffd166",
-Relay: "#ff8fab",
-};
+function getNodeCounts(nodes: NodeType[]) {
+return nodes.reduce(
+(acc, node) => {
+acc[node] += 1;
+return acc;
+},
+{
+storage: 0,
+amplifier: 0,
+stabilizer: 0,
+relay: 0,
+} as Record<NodeType, number>
+);
+}
 
 export default function PyronClient() {
 const [charge, setCharge] = useState(0);
-const [nodes, setNodes] = useState<NodeState[]>([]);
+const [displayCharge, setDisplayCharge] = useState(0);
+const [nodes, setNodes] = useState<NodeType[]>([]);
+const [flashType, setFlashType] = useState<FlashType>(null);
+const [impactKey, setImpactKey] = useState(0);
+const [isLoaded, setIsLoaded] = useState(false);
+
+const flashTimerRef = useRef<number | null>(null);
 
 useEffect(() => {
-setCharge(getCharge());
+const storedCharge = localStorage.getItem(CHARGE_KEY);
+const storedNodes = localStorage.getItem(NODES_KEY);
+
+if (storedCharge) {
+const parsed = Number(storedCharge);
+if (!Number.isNaN(parsed)) {
+setCharge(parsed);
+setDisplayCharge(parsed);
+}
+}
+
+if (storedNodes) {
+try {
+const parsed = JSON.parse(storedNodes) as NodeType[];
+if (Array.isArray(parsed)) {
+setNodes(
+parsed.filter((n) =>
+["storage", "amplifier", "stabilizer", "relay"].includes(n)
+) as NodeType[]
+);
+}
+} catch {
+// ignore bad localStorage payload
+}
+}
+
+setIsLoaded(true);
+}, []);
+
+useEffect(() => {
+if (!isLoaded) return;
+localStorage.setItem(CHARGE_KEY, String(charge));
+}, [charge, isLoaded]);
+
+useEffect(() => {
+if (!isLoaded) return;
+localStorage.setItem(NODES_KEY, JSON.stringify(nodes));
+}, [nodes, isLoaded]);
+
+useEffect(() => {
+let frame = 0;
+const start = displayCharge;
+const end = charge;
+
+if (start === end) return;
+
+const duration = 500;
+const startTime = performance.now();
+
+const tick = (now: number) => {
+const t = clamp((now - startTime) / duration, 0, 1);
+const eased = 1 - Math.pow(1 - t, 3);
+setDisplayCharge(Math.round(start + (end - start) * eased));
+
+if (t < 1) {
+frame = requestAnimationFrame(tick);
+}
+};
+
+frame = requestAnimationFrame(tick);
+return () => cancelAnimationFrame(frame);
+}, [charge]);
+
+useEffect(() => {
+return () => {
+if (flashTimerRef.current) {
+window.clearTimeout(flashTimerRef.current);
+}
+};
 }, []);
 
 const stage = getStage(charge);
-const coreSize = getCoreSize(stage);
-const ringCount = getRingCount(stage);
 const socketLimit = getSocketLimit(stage);
+const baseRings = getRingCount(stage);
+const nodeCounts = useMemo(() => getNodeCounts(nodes), [nodes]);
 
-const sockets = useMemo(() => {
-const count = socketLimit;
-if (count === 0) return [];
+const totalRings = baseRings + Math.min(nodeCounts.storage, 3);
+const canBuild = nodes.length < socketLimit;
 
-const radius = coreSize / 2 + 52;
+const coreScale = 1 + Math.min(nodeCounts.amplifier * 0.04, 0.16);
+const haloScale = 1 + Math.min(nodeCounts.storage * 0.12, 0.36);
+const fieldScale = 1 + Math.min(nodeCounts.relay * 0.18, 0.54);
+const stability = clamp(1 - nodeCounts.stabilizer * 0.18, 0.28, 1);
 
-return Array.from({ length: count }).map((_, i) => {
-const angle = (Math.PI * 2 * i) / count - Math.PI / 2;
-const x = Math.cos(angle) * radius;
-const y = Math.sin(angle) * radius;
-return { x, y };
-});
-}, [socketLimit, coreSize]);
+function triggerInstall(type: NodeType) {
+setFlashType(type);
+setImpactKey((prev) => prev + 1);
 
-const glow = useMemo(() => {
-if (stage === "Spark") return "0 0 40px rgba(0,212,166,0.35)";
-if (stage === "Core") return "0 0 70px rgba(0,212,166,0.45)";
-if (stage === "Reactor") return "0 0 95px rgba(0,212,166,0.58)";
-if (stage === "Nova") return "0 0 120px rgba(0,212,166,0.68)";
-return "0 0 150px rgba(0,212,166,0.8)";
-}, [stage]);
+if (flashTimerRef.current) {
+window.clearTimeout(flashTimerRef.current);
+}
 
-function unlockNode(type: NodeType) {
-const cost = NODE_COSTS[type];
+flashTimerRef.current = window.setTimeout(() => {
+setFlashType(null);
+}, 650);
+}
 
+function addNode(type: NodeType) {
+const cost = NODE_COST[type];
 if (charge < cost) return;
 if (nodes.length >= socketLimit) return;
 
-const nextCharge = spendCharge(cost);
-setCharge(nextCharge);
-
-setNodes((prev) => [
-...prev,
-{
-id: Date.now() + prev.length,
-type,
-},
-]);
+setNodes((prev) => [...prev, type]);
+setCharge((prev) => prev - cost);
+triggerInstall(type);
 }
 
 function resetPyron() {
-localStorage.removeItem(CHARGE_KEY);
-setCharge(0);
 setNodes([]);
+setFlashType("relay");
+setImpactKey((prev) => prev + 1);
+
+if (flashTimerRef.current) {
+window.clearTimeout(flashTimerRef.current);
 }
 
+flashTimerRef.current = window.setTimeout(() => {
+setFlashType(null);
+}, 500);
+}
+
+const sparkColor = flashType ? NODE_META[flashType].color : "#2ef0d0";
+const sparkGlow = flashType ? NODE_META[flashType].glow : "rgba(46,240,208,.42)";
+
 return (
+<>
+<style>{`
+@keyframes pyronBreath {
+0% { transform: scale(0.985); }
+50% { transform: scale(1.035); }
+100% { transform: scale(0.985); }
+}
+
+@keyframes pyronHalo {
+0% { transform: scale(.94); opacity: .38; }
+50% { transform: scale(1.06); opacity: .62; }
+100% { transform: scale(.94); opacity: .38; }
+}
+
+@keyframes pyronShimmer {
+0% { transform: rotate(0deg) scale(1); opacity: .22; }
+50% { transform: rotate(180deg) scale(1.03); opacity: .32; }
+100% { transform: rotate(360deg) scale(1); opacity: .22; }
+}
+
+@keyframes pyronRingDraw {
+0% {
+opacity: 0;
+transform: scale(.78);
+}
+100% {
+opacity: 1;
+transform: scale(1);
+}
+}
+
+@keyframes pyronImpact {
+0% {
+opacity: .8;
+transform: translate(-50%, -50%) scale(.35);
+}
+100% {
+opacity: 0;
+transform: translate(-50%, -50%) scale(1.55);
+}
+}
+
+@keyframes pyronOrbit {
+0% { transform: rotate(0deg); }
+100% { transform: rotate(360deg); }
+}
+
+@keyframes pyronCardPulse {
+0% { box-shadow: 0 0 0 rgba(255,255,255,0); }
+50% { box-shadow: 0 0 24px rgba(255,255,255,.08); }
+100% { box-shadow: 0 0 0 rgba(255,255,255,0); }
+}
+
+@keyframes pyronNumberPop {
+0% { transform: translateY(2px); opacity: .7; }
+50% { transform: translateY(-1px); opacity: 1; }
+100% { transform: translateY(0px); opacity: 1; }
+}
+
+@keyframes pyronInstallBeam {
+0% {
+opacity: 0;
+transform: translateY(12px) scale(.92);
+}
+20% {
+opacity: .95;
+transform: translateY(0px) scale(1);
+}
+100% {
+opacity: 0;
+transform: translateY(-120px) scale(.5);
+}
+}
+
+@keyframes pyronRelayField {
+0% {
+opacity: .12;
+transform: translate(-50%, -50%) scale(.8);
+}
+50% {
+opacity: .22;
+transform: translate(-50%, -50%) scale(1.02);
+}
+100% {
+opacity: .12;
+transform: translate(-50%, -50%) scale(.8);
+}
+}
+`}</style>
+
 <div
 style={{
-display: "grid",
-gap: 18,
-}}
->
-<section
-style={{
-border: "1px solid rgba(255,255,255,0.08)",
+border: "1px solid rgba(255,255,255,.08)",
 borderRadius: 28,
-background: "rgba(255,255,255,0.02)",
-padding: 22,
-textAlign: "center",
+padding: 24,
+background: "#050505",
+display: "grid",
+gap: 28,
+overflow: "hidden",
 }}
 >
+<div style={{ textAlign: "center" }}>
 <div
 style={{
-fontSize: 14,
-color: "rgba(255,255,255,0.6)",
-marginBottom: 8,
+fontSize: 13,
+color: "rgba(255,255,255,.5)",
 }}
 >
 Pyron
@@ -159,10 +343,9 @@ Pyron
 
 <div
 style={{
-fontSize: 32,
+fontSize: 36,
 fontWeight: 700,
-letterSpacing: "-0.04em",
-marginBottom: 6,
+marginTop: 6,
 }}
 >
 {stage}
@@ -170,292 +353,413 @@ marginBottom: 6,
 
 <div
 style={{
-fontSize: 15,
-color: "rgba(255,255,255,0.68)",
-marginBottom: 16,
+color: "rgba(255,255,255,.6)",
+marginTop: 6,
 }}
 >
 Living energy grown from Axis charge
+</div>
+</div>
+
+<div
+style={{
+display: "flex",
+justifyContent: "space-around",
+textAlign: "center",
+}}
+>
+<Stat label="Stored Charge" value={displayCharge} animated />
+<Stat label="Rings" value={totalRings} />
+<Stat label="Nodes" value={`${nodes.length}/${socketLimit}`} />
 </div>
 
 <div
 style={{
 display: "flex",
 justifyContent: "center",
-gap: 24,
-flexWrap: "wrap",
-marginBottom: 22,
+padding: "12px 8px 8px",
 }}
 >
-<Stat label="Stored Charge" value={String(charge)} />
-<Stat label="Rings" value={String(ringCount)} />
-<Stat label="Nodes" value={`${nodes.length}/${socketLimit}`} />
-</div>
-
 <div
 style={{
 position: "relative",
-width: 360,
-height: 360,
+width: 320,
+height: 320,
 maxWidth: "100%",
-margin: "8px auto 20px",
-borderRadius: 32,
-background:
-"radial-gradient(circle at center, rgba(0,212,166,0.08) 0%, rgba(255,255,255,0.01) 46%, rgba(255,255,255,0) 72%)",
-overflow: "hidden",
 }}
 >
-{Array.from({ length: ringCount }).map((_, i) => {
-const size = coreSize + 72 + i * 42;
-return (
+{nodeCounts.relay > 0 && (
 <div
-key={i}
 style={{
 position: "absolute",
 left: "50%",
 top: "50%",
+width: 260 * fieldScale,
+height: 260 * fieldScale,
+borderRadius: "50%",
+border: "1px solid rgba(255,122,168,.16)",
+boxShadow: "0 0 44px rgba(255,122,168,.08)",
+animation: `pyronRelayField ${4.8 - Math.min(nodeCounts.relay * 0.2, 0.8)}s ease-in-out infinite`,
+pointerEvents: "none",
+}}
+/>
+)}
+
+<div
+style={{
+position: "absolute",
+inset: 0,
+display: "grid",
+placeItems: "center",
+}}
+>
+{[...Array(totalRings)].map((_, i) => {
+const size = 145 + i * 34;
+const ringOpacity = clamp(0.26 - i * 0.035, 0.09, 0.26);
+const ringDuration =
+10 + i * 1.4 - Math.min(nodeCounts.amplifier * 0.45, 1.4);
+return (
+<div
+key={`ring-${i}-${totalRings}`}
+style={{
+position: "absolute",
 width: size,
 height: size,
-transform: "translate(-50%, -50%)",
 borderRadius: "50%",
-border: "1px solid rgba(0,212,166,0.22)",
-boxShadow: "0 0 18px rgba(0,212,166,0.12)",
+border: `1px solid rgba(46,240,208,${ringOpacity})`,
+boxShadow: `0 0 ${18 + i * 6}px rgba(46,240,208,${ringOpacity * 0.45})`,
+animation: `
+pyronRingDraw .55s ease-out both,
+pyronHalo ${ringDuration}s ease-in-out ${i * 0.14}s infinite
+`,
+transformOrigin: "center",
+pointerEvents: "none",
 }}
 />
 );
 })}
 
-{sockets.map((socket, index) => {
-const node = nodes[index];
-const baseSize = 26;
-
-return (
+{nodes.length > 0 && (
 <div
-key={`${socket.x}-${socket.y}`}
 style={{
 position: "absolute",
-left: "50%",
-top: "50%",
-transform: `translate(calc(-50% + ${socket.x}px), calc(-50% + ${socket.y}px))`,
+width: 228,
+height: 228,
+animation: `pyronOrbit ${10 * stability}s linear infinite`,
+pointerEvents: "none",
 }}
 >
-<div
-style={{
-width: baseSize,
-height: baseSize,
-borderRadius: "50%",
-border: node
-? `1px solid ${NODE_COLORS[node.type]}`
-: "1px dashed rgba(255,255,255,0.18)",
-background: node ? NODE_COLORS[node.type] : "transparent",
-boxShadow: node ? `0 0 18px ${NODE_COLORS[node.type]}` : "none",
-opacity: node ? 1 : 0.55,
-}}
-/>
-</div>
-);
-})}
-
-{nodes.map((node, index) => {
-const socket = sockets[index];
-if (!socket) return null;
-
+{nodes.map((node, i) => {
+const angle = (360 / Math.max(nodes.length, 1)) * i;
 return (
 <div
-key={node.id}
+key={`${node}-${i}`}
 style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-transform: `translate(calc(-50% + ${socket.x}px), calc(-50% + ${socket.y + 22}px))`,
-fontSize: 11,
-color: "rgba(255,255,255,0.75)",
-whiteSpace: "nowrap",
+width: 14,
+height: 14,
+marginLeft: -7,
+marginTop: -114,
+borderRadius: "50%",
+background: NODE_META[node].color,
+boxShadow: `0 0 16px ${NODE_META[node].glow}`,
+transform: `rotate(${angle}deg) translateY(-100px)`,
+opacity: 0.95,
 }}
->
-{node.type}
-</div>
+/>
 );
 })}
+</div>
+)}
 
+{impactKey > 0 && (
 <div
+key={impactKey}
 style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: coreSize,
-height: coreSize,
-transform: "translate(-50%, -50%)",
+width: 140,
+height: 140,
 borderRadius: "50%",
-background: "radial-gradient(circle, #20ffd7 0%, #09bcb1 50%, #04535c 100%)",
-boxShadow: glow,
-transition: "all .35s ease",
+border: `1px solid ${sparkGlow}`,
+boxShadow: `0 0 40px ${sparkGlow}`,
+animation: "pyronImpact .7s ease-out forwards",
+pointerEvents: "none",
+}}
+/>
+)}
+
+{flashType && (
+<div
+key={`beam-${impactKey}`}
+style={{
+position: "absolute",
+bottom: 8,
+left: "50%",
+width: 10,
+height: 90,
+borderRadius: 999,
+background: `linear-gradient(180deg, ${NODE_META[flashType].color}, transparent)`,
+boxShadow: `0 0 18px ${NODE_META[flashType].glow}`,
+animation: "pyronInstallBeam .65s ease-out forwards",
+pointerEvents: "none",
+}}
+/>
+)}
+
+<div
+style={{
+position: "absolute",
+width: 190 * haloScale,
+height: 190 * haloScale,
+borderRadius: "50%",
+background: `radial-gradient(circle, ${sparkGlow} 0%, rgba(0,0,0,0) 72%)`,
+filter: "blur(10px)",
+animation: `pyronHalo ${4.6 - Math.min(nodeCounts.amplifier * 0.24, 1)}s ease-in-out infinite`,
+opacity: 0.95,
+pointerEvents: "none",
 }}
 />
 
 <div
 style={{
 position: "absolute",
-left: "50%",
-top: "50%",
-width: Math.max(18, coreSize * 0.18),
-height: Math.max(18, coreSize * 0.18),
-transform: "translate(-50%, -50%)",
+width: 152,
+height: 152,
 borderRadius: "50%",
-background: "rgba(255,255,255,0.35)",
-filter: "blur(6px)",
+background:
+"conic-gradient(from 0deg, rgba(46,240,208,.05), rgba(46,240,208,.18), rgba(75,184,255,.10), rgba(46,240,208,.05))",
+filter: "blur(1px)",
+animation: `pyronShimmer ${9 * stability}s linear infinite`,
+opacity: 0.9,
+pointerEvents: "none",
 }}
 />
+
+<div
+style={{
+width: 118 * coreScale,
+height: 118 * coreScale,
+borderRadius: "50%",
+background: `radial-gradient(circle at 42% 38%, #86fff1 0%, ${sparkColor} 34%, #088b8d 68%, #031516 100%)`,
+boxShadow: `0 0 80px ${sparkGlow}, inset 0 -10px 24px rgba(0,0,0,.25), inset 0 8px 18px rgba(255,255,255,.08)`,
+animation: `pyronBreath ${3.8 - Math.min(nodeCounts.amplifier * 0.22, 0.9)}s ease-in-out infinite`,
+}}
+/>
+</div>
+</div>
 </div>
 
 <div
 style={{
-fontSize: 14,
-color: "rgba(255,255,255,0.62)",
+textAlign: "center",
+color: "rgba(255,255,255,.62)",
+marginTop: -4,
 }}
 >
 Build the inner environment from charge.
 </div>
-</section>
 
-<section
-style={{
-border: "1px solid rgba(255,255,255,0.08)",
-borderRadius: 28,
-background: "rgba(255,255,255,0.02)",
-padding: 22,
-}}
->
+<div style={{ display: "grid", gap: 14 }}>
 <div
 style={{
-fontSize: 14,
-color: "rgba(255,255,255,0.6)",
-marginBottom: 8,
-}}
->
-Build
-</div>
-
-<div
-style={{
-fontSize: 26,
-fontWeight: 700,
-letterSpacing: "-0.04em",
-marginBottom: 18,
+fontSize: 22,
+fontWeight: 600,
 }}
 >
 Nodes
 </div>
 
-<div
-style={{
-display: "grid",
-gap: 12,
-}}
->
-{ALL_NODE_TYPES.map((type) => {
-const cost = NODE_COSTS[type];
-const disabled = charge < cost || nodes.length >= socketLimit;
-
-return (
-<button
-key={type}
-onClick={() => unlockNode(type)}
-disabled={disabled}
-style={{
-display: "flex",
-justifyContent: "space-between",
-alignItems: "center",
-gap: 16,
-border: "1px solid rgba(255,255,255,0.08)",
-background: disabled ? "rgba(255,255,255,0.03)" : "rgba(255,255,255,0.05)",
-color: "#fff",
-borderRadius: 20,
-padding: "16px 18px",
-cursor: disabled ? "not-allowed" : "pointer",
-opacity: disabled ? 0.5 : 1,
-}}
->
-<div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-<div
-style={{
-width: 14,
-height: 14,
-borderRadius: "50%",
-background: NODE_COLORS[type],
-boxShadow: `0 0 14px ${NODE_COLORS[type]}`,
-}}
+<NodeButton
+type="storage"
+charge={charge}
+canBuild={canBuild}
+installedCount={nodeCounts.storage}
+onClick={() => addNode("storage")}
 />
-<div style={{ textAlign: "left" }}>
-<div style={{ fontSize: 17, fontWeight: 700 }}>{type}</div>
-<div style={{ fontSize: 13, color: "rgba(255,255,255,0.62)" }}>
-{type === "Storage" && "Expands holding capacity"}
-{type === "Amplifier" && "Strengthens output"}
-{type === "Stabilizer" && "Settles the system"}
-{type === "Relay" && "Extends the field"}
-</div>
-</div>
+
+<NodeButton
+type="amplifier"
+charge={charge}
+canBuild={canBuild}
+installedCount={nodeCounts.amplifier}
+onClick={() => addNode("amplifier")}
+/>
+
+<NodeButton
+type="stabilizer"
+charge={charge}
+canBuild={canBuild}
+installedCount={nodeCounts.stabilizer}
+onClick={() => addNode("stabilizer")}
+/>
+
+<NodeButton
+type="relay"
+charge={charge}
+canBuild={canBuild}
+installedCount={nodeCounts.relay}
+onClick={() => addNode("relay")}
+/>
 </div>
 
-<div style={{ fontSize: 15, fontWeight: 700 }}>{cost}</div>
-</button>
-);
-})}
-</div>
-
-<div
-style={{
-display: "flex",
-gap: 12,
-flexWrap: "wrap",
-marginTop: 18,
-}}
->
 <button
 onClick={resetPyron}
 style={{
-border: "1px solid rgba(255,255,255,0.12)",
-background: "rgba(255,255,255,0.04)",
-color: "#f5f7fa",
+padding: 16,
 borderRadius: 18,
-padding: "16px 22px",
-fontSize: 17,
+border: "1px solid rgba(255,255,255,.1)",
+background: "rgba(255,255,255,.05)",
+color: "white",
 fontWeight: 700,
+fontSize: 16,
 cursor: "pointer",
 }}
 >
 Reset Pyron
 </button>
 </div>
-</section>
-</div>
+</>
 );
 }
 
-function Stat({ label, value }: { label: string; value: string }) {
+function Stat({
+label,
+value,
+animated = false,
+}: {
+label: string;
+value: React.ReactNode;
+animated?: boolean;
+}) {
 return (
+<div>
 <div
 style={{
-minWidth: 110,
-}}
->
-<div
-style={{
-fontSize: 13,
-color: "rgba(255,255,255,0.58)",
-marginBottom: 6,
+color: "rgba(255,255,255,.5)",
+fontSize: 12,
 }}
 >
 {label}
 </div>
+
 <div
 style={{
-fontSize: 20,
+fontSize: 22,
 fontWeight: 700,
+marginTop: 4,
+animation: animated ? "pyronNumberPop .45s ease" : undefined,
 }}
 >
 {value}
 </div>
 </div>
+);
+}
+
+function NodeButton({
+type,
+charge,
+canBuild,
+installedCount,
+onClick,
+}: {
+type: NodeType;
+charge: number;
+canBuild: boolean;
+installedCount: number;
+onClick: () => void;
+}) {
+const meta = NODE_META[type];
+const cost = NODE_COST[type];
+const locked = charge < cost || !canBuild;
+
+return (
+<button
+onClick={onClick}
+disabled={locked}
+style={{
+display: "flex",
+alignItems: "center",
+justifyContent: "space-between",
+gap: 16,
+padding: 18,
+borderRadius: 20,
+border: "1px solid rgba(255,255,255,.08)",
+background: locked ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.05)",
+color: "white",
+opacity: locked ? 0.46 : 1,
+cursor: locked ? "not-allowed" : "pointer",
+transition: "transform .14s ease, border-color .18s ease, opacity .18s ease",
+animation: !locked && installedCount > 0 ? "pyronCardPulse 2.8s ease-in-out infinite" : undefined,
+}}
+>
+<div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+<div
+style={{
+width: 22,
+height: 22,
+borderRadius: "50%",
+background: meta.color,
+boxShadow: `0 0 20px ${meta.glow}`,
+flexShrink: 0,
+}}
+/>
+
+<div style={{ textAlign: "left" }}>
+<div
+style={{
+fontSize: 16,
+fontWeight: 700,
+}}
+>
+{meta.name}
+</div>
+
+<div
+style={{
+fontSize: 13,
+color: "rgba(255,255,255,.58)",
+marginTop: 4,
+}}
+>
+{meta.description}
+</div>
+</div>
+</div>
+
+<div
+style={{
+display: "grid",
+gap: 4,
+justifyItems: "end",
+minWidth: 54,
+}}
+>
+<div
+style={{
+fontSize: 22,
+fontWeight: 800,
+}}
+>
+{cost}
+</div>
+
+{installedCount > 0 && (
+<div
+style={{
+fontSize: 12,
+color: meta.color,
+fontWeight: 700,
+}}
+>
++{installedCount}
+</div>
+)}
+</div>
+</button>
 );
 }
