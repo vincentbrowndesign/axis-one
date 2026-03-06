@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const BANK_KEY = "axis_shared_charge_v1";
-const PYRON_STATE_KEY = "axis_pyron_build_v2";
+const PYRON_STATE_KEY = "axis_pyron_build_v3";
 
 const ACCENT = "rgba(78,245,225,1)";
 const ACCENT_SOFT = "rgba(78,245,225,0.35)";
@@ -91,6 +91,13 @@ if (type === "stabilizer") return 80;
 return 100;
 }
 
+function nodeLabel(type: NodeType) {
+if (type === "storage") return "Storage";
+if (type === "amplifier") return "Amplifier";
+if (type === "stabilizer") return "Stabilizer";
+return "Relay";
+}
+
 function nodeColor(type: NodeType) {
 if (type === "storage") return "rgba(78,245,225,0.95)";
 if (type === "amplifier") return "rgba(82,179,255,0.95)";
@@ -105,11 +112,13 @@ const [surgeOn, setSurgeOn] = useState(false);
 const [touchGlow, setTouchGlow] = useState(false);
 const [nodes, setNodes] = useState<NodeItem[]>([]);
 const [deployBurst, setDeployBurst] = useState(0);
+const [lastIgnited, setLastIgnited] = useState<NodeType | null>(null);
 
 const previousBankRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 const surgeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 const touchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+const igniteTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 useEffect(() => {
 const readBank = () => {
@@ -258,7 +267,7 @@ if (!taken) return i;
 return -1;
 }
 
-function addNode(type: NodeType) {
+function igniteNode(type: NodeType) {
 const cost = nodeCost(type);
 
 if (socketLimit === 0) return;
@@ -276,7 +285,13 @@ socketIndex,
 
 setNodes((prev) => [...prev, item]);
 writeBank(bank - cost);
+setLastIgnited(type);
 triggerSurge();
+
+if (igniteTimeoutRef.current) clearTimeout(igniteTimeoutRef.current);
+igniteTimeoutRef.current = setTimeout(() => {
+setLastIgnited(null);
+}, 900);
 
 if (typeof navigator !== "undefined" && "vibrate" in navigator) {
 navigator.vibrate(18);
@@ -285,6 +300,7 @@ navigator.vibrate(18);
 
 function resetPyron() {
 setNodes([]);
+setLastIgnited(null);
 window.localStorage.removeItem(PYRON_STATE_KEY);
 }
 
@@ -300,6 +316,7 @@ stage === "Seed"
 : 1;
 
 const deployScale = surgeOn ? 1.22 : pulseOn ? 1.08 : 1;
+const coreTint = lastIgnited ? nodeColor(lastIgnited) : ACCENT;
 
 return (
 <div
@@ -463,20 +480,17 @@ marginLeft: -coreSize / 2,
 marginTop: -coreSize / 2,
 borderRadius: "50%",
 border: "1px solid rgba(255,255,255,0.10)",
-background:
-"radial-gradient(circle at 35% 35%, rgba(160,255,242,0.98) 0%, rgba(78,245,225,0.92) 26%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)",
+background: `radial-gradient(circle at 35% 35%, rgba(220,255,250,0.98) 0%, ${coreTint} 26%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)`,
 boxShadow: `0 0 ${44 + ringCount * 16}px rgba(78,245,225,${glowStrength}), inset 0 0 54px rgba(255,255,255,0.05)`,
 transform: `scale(${surgeOn ? 1.08 : pulseOn ? 1.05 : touchGlow ? 1.02 : 1})`,
-transition: "transform 240ms ease, box-shadow 220ms ease",
+transition: "transform 240ms ease, box-shadow 220ms ease, background 220ms ease",
 display: "grid",
 placeItems: "center",
 cursor: "pointer",
 userSelect: "none",
 }}
 >
-<div style={{ textAlign: "center", pointerEvents: "none" }}>
-<div style={{ fontSize: 14, opacity: 0.74, letterSpacing: 0.6 }}>PYRON</div>
-</div>
+<div style={{ textAlign: "center", pointerEvents: "none" }} />
 </div>
 
 <div
@@ -493,9 +507,7 @@ fontSize: 14,
 opacity: 0.78,
 }}
 >
-<div>
-{nodes.length} / {socketLimit}
-</div>
+<div>{nodes.length} / {socketLimit}</div>
 <div>{surgeOn ? "Surge" : `Next ${nextTarget}`}</div>
 </div>
 </div>
@@ -510,7 +522,7 @@ display: "grid",
 gap: 12,
 }}
 >
-<div style={{ fontSize: 13, opacity: 0.58 }}>Build</div>
+<div style={{ fontSize: 13, opacity: 0.58 }}>Ignite</div>
 
 <div
 style={{
@@ -519,33 +531,33 @@ gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
 gap: 10,
 }}
 >
-<MiniBuildButton
+<MiniIgniteButton
 label="Storage"
 value="40"
 color={nodeColor("storage")}
 disabled={bank < 40 || nodes.length >= socketLimit || socketLimit === 0}
-onClick={() => addNode("storage")}
+onClick={() => igniteNode("storage")}
 />
-<MiniBuildButton
+<MiniIgniteButton
 label="Amplifier"
 value="60"
 color={nodeColor("amplifier")}
 disabled={bank < 60 || nodes.length >= socketLimit || socketLimit === 0}
-onClick={() => addNode("amplifier")}
+onClick={() => igniteNode("amplifier")}
 />
-<MiniBuildButton
+<MiniIgniteButton
 label="Stabilizer"
 value="80"
 color={nodeColor("stabilizer")}
 disabled={bank < 80 || nodes.length >= socketLimit || socketLimit === 0}
-onClick={() => addNode("stabilizer")}
+onClick={() => igniteNode("stabilizer")}
 />
-<MiniBuildButton
+<MiniIgniteButton
 label="Relay"
 value="100"
 color={nodeColor("relay")}
 disabled={bank < 100 || nodes.length >= socketLimit || socketLimit === 0}
-onClick={() => addNode("relay")}
+onClick={() => igniteNode("relay")}
 />
 </div>
 
@@ -587,7 +599,7 @@ Reset Pyron
 );
 }
 
-function MiniBuildButton({
+function MiniIgniteButton({
 label,
 value,
 color,
