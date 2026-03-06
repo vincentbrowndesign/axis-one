@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const BANK_KEY = "axis_shared_charge_v1";
-const PYRON_STATE_KEY = "axis_pyron_build_v4";
+const PYRON_STATE_KEY = "axis_pyron_build_v5";
 
 const CYAN = "rgba(78,245,225,1)";
 const CYAN_SOFT = "rgba(78,245,225,0.35)";
@@ -15,7 +15,6 @@ type NodeType = "storage" | "amplifier" | "stabilizer" | "relay";
 type NodeItem = {
 id: string;
 type: NodeType;
-socketIndex: number;
 };
 
 type SavedPyronState = {
@@ -33,9 +32,9 @@ return "Titan";
 function getCoreSize(stage: Stage) {
 if (stage === "Seed") return 160;
 if (stage === "Core") return 176;
-if (stage === "Pulse") return 196;
-if (stage === "Nova") return 220;
-return 244;
+if (stage === "Pulse") return 198;
+if (stage === "Nova") return 222;
+return 246;
 }
 
 function getRingCount(stage: Stage) {
@@ -70,20 +69,6 @@ if (stage === "Nova") return Math.min(100, (bank / 1000) * 100);
 return 100;
 }
 
-function getSocketPositions(count: number) {
-if (count <= 0) return [];
-const radius = 158;
-const startAngle = -90;
-
-return Array.from({ length: count }, (_, i) => {
-const angle = ((360 / count) * i + startAngle) * (Math.PI / 180);
-return {
-x: Math.cos(angle) * radius,
-y: Math.sin(angle) * radius,
-};
-});
-}
-
 function nodeCost(type: NodeType) {
 if (type === "storage") return 40;
 if (type === "amplifier") return 60;
@@ -105,13 +90,37 @@ if (type === "stabilizer") return "Stabilizer";
 return "Relay";
 }
 
+function getOrbitBase(count: number, index: number, radius: number) {
+const startAngle = -90;
+const angle = ((360 / Math.max(count, 1)) * index + startAngle) * (Math.PI / 180);
+return {
+x: Math.cos(angle) * radius,
+y: Math.sin(angle) * radius,
+angle,
+};
+}
+
+function getFloatConfig(type: NodeType) {
+if (type === "storage") {
+return { amp: 6, speed: 0.7, scale: 1.12 };
+}
+if (type === "amplifier") {
+return { amp: 4, speed: 1.15, scale: 1.02 };
+}
+if (type === "stabilizer") {
+return { amp: 3, speed: 0.55, scale: 1.08 };
+}
+return { amp: 8, speed: 1.0, scale: 0.98 };
+}
+
 export default function PyronClient() {
 const [bank, setBank] = useState(0);
 const [pulseOn, setPulseOn] = useState(false);
 const [surgeOn, setSurgeOn] = useState(false);
 const [touchGlow, setTouchGlow] = useState(false);
 const [nodes, setNodes] = useState<NodeItem[]>([]);
-const [deployIndex, setDeployIndex] = useState<number | null>(null);
+const [deployNodeId, setDeployNodeId] = useState<string | null>(null);
+const [tick, setTick] = useState(0);
 
 const previousBankRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -166,13 +175,20 @@ const saved: SavedPyronState = { nodes };
 window.localStorage.setItem(PYRON_STATE_KEY, JSON.stringify(saved));
 }, [nodes]);
 
+useEffect(() => {
+const interval = setInterval(() => {
+setTick((t) => t + 1);
+}, 60);
+
+return () => clearInterval(interval);
+}, []);
+
 const stage = useMemo(() => getStage(bank), [bank]);
 const coreSize = useMemo(() => getCoreSize(stage), [stage]);
 const ringCount = useMemo(() => getRingCount(stage), [stage]);
 const socketLimit = useMemo(() => getSocketLimit(stage), [stage]);
 const nextTarget = useMemo(() => getNextTarget(stage), [stage]);
 const progress = useMemo(() => getProgress(bank, stage), [bank, stage]);
-const sockets = useMemo(() => getSocketPositions(socketLimit), [socketLimit]);
 
 const counts = useMemo(() => {
 const storage = nodes.filter((n) => n.type === "storage").length;
@@ -182,10 +198,10 @@ const relay = nodes.filter((n) => n.type === "relay").length;
 return { storage, amplifier, stabilizer, relay };
 }, [nodes]);
 
-function triggerSurge(socketIndex?: number) {
+function triggerSurge(nodeId?: string) {
 setSurgeOn(true);
 setPulseOn(true);
-setDeployIndex(socketIndex ?? null);
+setDeployNodeId(nodeId ?? null);
 
 if (surgeTimeoutRef.current) clearTimeout(surgeTimeoutRef.current);
 if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
@@ -193,14 +209,14 @@ if (deployTimeoutRef.current) clearTimeout(deployTimeoutRef.current);
 
 pulseTimeoutRef.current = setTimeout(() => {
 setPulseOn(false);
-}, 240);
+}, 220);
 
 surgeTimeoutRef.current = setTimeout(() => {
 setSurgeOn(false);
-}, 700);
+}, 720);
 
 deployTimeoutRef.current = setTimeout(() => {
-setDeployIndex(null);
+setDeployNodeId(null);
 }, 520);
 }
 
@@ -219,13 +235,13 @@ previousBankRef.current = bank;
 useEffect(() => {
 const intervalMs =
 stage === "Seed"
-? 1800
+? 1850
 : stage === "Core"
-? 1450
+? 1500
 : stage === "Pulse"
-? 1150
+? 1200
 : stage === "Nova"
-? 920
+? 950
 : 760;
 
 const interval = setInterval(() => {
@@ -234,7 +250,7 @@ setPulseOn(true);
 if (pulseTimeoutRef.current) clearTimeout(pulseTimeoutRef.current);
 pulseTimeoutRef.current = setTimeout(() => {
 setPulseOn(false);
-}, 220);
+}, 210);
 }, intervalMs);
 
 return () => clearInterval(interval);
@@ -256,19 +272,11 @@ setTouchGlow(true);
 if (touchTimeoutRef.current) clearTimeout(touchTimeoutRef.current);
 touchTimeoutRef.current = setTimeout(() => {
 setTouchGlow(false);
-}, 160);
+}, 150);
 
 if (typeof navigator !== "undefined" && "vibrate" in navigator) {
 navigator.vibrate(10);
 }
-}
-
-function nextOpenSocketIndex() {
-for (let i = 0; i < socketLimit; i += 1) {
-const taken = nodes.some((n) => n.socketIndex === i);
-if (!taken) return i;
-}
-return -1;
 }
 
 function igniteNode(type: NodeType) {
@@ -278,18 +286,14 @@ if (socketLimit === 0) return;
 if (nodes.length >= socketLimit) return;
 if (bank < cost) return;
 
-const socketIndex = nextOpenSocketIndex();
-if (socketIndex === -1) return;
-
 const item: NodeItem = {
 id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
 type,
-socketIndex,
 };
 
 setNodes((prev) => [...prev, item]);
 writeBank(bank - cost);
-triggerSurge(socketIndex);
+triggerSurge(item.id);
 
 if (typeof navigator !== "undefined" && "vibrate" in navigator) {
 navigator.vibrate(18);
@@ -298,7 +302,7 @@ navigator.vibrate(18);
 
 function resetPyron() {
 setNodes([]);
-setDeployIndex(null);
+setDeployNodeId(null);
 window.localStorage.removeItem(PYRON_STATE_KEY);
 }
 
@@ -312,6 +316,39 @@ stage === "Seed"
 : stage === "Nova"
 ? 0.82
 : 1;
+
+const floatingNodes = useMemo(() => {
+return nodes
+.slice(0, socketLimit)
+.map((node, index) => {
+const lane =
+stage === "Core"
+? 158
+: stage === "Pulse"
+? 158 + (index % 2) * 22
+: stage === "Nova"
+? 160 + (index % 3) * 18
+: 164 + (index % 3) * 20;
+
+const base = getOrbitBase(Math.max(socketLimit, 1), index, lane);
+const cfg = getFloatConfig(node.type);
+
+const t = tick / 10;
+const fx = Math.sin(t * cfg.speed + index * 1.4) * cfg.amp;
+const fy = Math.cos(t * cfg.speed * 0.85 + index * 1.8) * cfg.amp;
+
+const isDeploying = deployNodeId === node.id;
+
+return {
+...node,
+x: base.x + fx,
+y: base.y + fy,
+scale: isDeploying ? 0.45 : surgeOn ? cfg.scale * 1.08 : cfg.scale,
+opacity: isDeploying ? 0.2 : 1,
+lane,
+};
+});
+}, [nodes, socketLimit, stage, tick, deployNodeId, surgeOn]);
 
 return (
 <div
@@ -392,26 +429,22 @@ style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: 190 + i * 76,
-height: 190 + i * 76,
-marginLeft: -(190 + i * 76) / 2,
-marginTop: -(190 + i * 76) / 2,
+width: 194 + i * 74,
+height: 194 + i * 74,
+marginLeft: -(194 + i * 74) / 2,
+marginTop: -(194 + i * 74) / 2,
 borderRadius: "50%",
-border: `1px solid rgba(78,245,225,${0.16 + i * 0.08})`,
-boxShadow: pulseOn || surgeOn ? `0 0 18px ${CYAN_DIM}` : "none",
-transform: `scale(${surgeOn ? 1.03 : pulseOn ? 1.015 : 1})`,
-transition: "transform 180ms ease, box-shadow 180ms ease",
+border: `1px solid rgba(78,245,225,${0.14 + i * 0.08})`,
+boxShadow: pulseOn || surgeOn ? `0 0 16px ${CYAN_DIM}` : "none",
+transform: `scale(${surgeOn ? 1.02 : pulseOn ? 1.01 : 1})`,
+transition: "transform 160ms ease, box-shadow 160ms ease",
 }}
 />
 ))}
 
-{sockets.map((pos, i) => {
-const built = nodes.find((n) => n.socketIndex === i);
-const isDeploying = deployIndex === i;
-
-return (
+{floatingNodes.map((node) => (
 <div
-key={i}
+key={node.id}
 style={{
 position: "absolute",
 left: "50%",
@@ -421,26 +454,14 @@ height: 18,
 marginLeft: -9,
 marginTop: -9,
 borderRadius: "50%",
-background: built
-? nodeColor(built.type)
-: "rgba(78,245,225,0.10)",
-boxShadow: built
-? `0 0 18px ${nodeColor(built.type)}`
-: "none",
-border: built
-? "none"
-: "1px dashed rgba(78,245,225,0.14)",
-opacity: built ? 1 : 0.5,
-transform: isDeploying
-? `translate(${pos.x * 0.2}px, ${pos.y * 0.2}px) scale(0.6)`
-: `translate(${pos.x}px, ${pos.y}px) scale(${surgeOn ? 1.08 : 1})`,
-transition: isDeploying
-? "transform 420ms cubic-bezier(.2,.8,.2,1), opacity 220ms ease"
-: "transform 220ms ease, opacity 220ms ease, box-shadow 220ms ease",
+background: nodeColor(node.type),
+boxShadow: `0 0 18px ${nodeColor(node.type)}`,
+transform: `translate(${node.x}px, ${node.y}px) scale(${node.scale})`,
+opacity: node.opacity,
+transition: "transform 220ms ease, opacity 220ms ease, box-shadow 220ms ease",
 }}
 />
-);
-})}
+))}
 
 <div
 style={{
@@ -457,8 +478,8 @@ background: surgeOn
 : touchGlow
 ? "radial-gradient(circle, rgba(78,245,225,0.12) 0%, rgba(78,245,225,0.04) 55%, rgba(0,0,0,0) 100%)"
 : "radial-gradient(circle, rgba(78,245,225,0.07) 0%, rgba(78,245,225,0.02) 55%, rgba(0,0,0,0) 100%)",
-transform: `scale(${surgeOn ? 1.08 : touchGlow ? 1.04 : 1})`,
-transition: "all 180ms ease",
+transform: `scale(${surgeOn ? 1.06 : touchGlow ? 1.03 : 1})`,
+transition: "all 160ms ease",
 }}
 />
 
@@ -477,9 +498,9 @@ borderRadius: "50%",
 border: "1px solid rgba(255,255,255,0.08)",
 background:
 "radial-gradient(circle at 35% 35%, rgba(220,255,250,0.98) 0%, rgba(78,245,225,0.92) 26%, rgba(18,130,130,0.42) 58%, rgba(4,14,18,0.24) 100%)",
-boxShadow: `0 0 ${42 + ringCount * 14}px rgba(78,245,225,${glowStrength}), inset 0 0 48px rgba(255,255,255,0.04)`,
-transform: `scale(${surgeOn ? 1.05 : pulseOn ? 1.03 : touchGlow ? 1.015 : 1})`,
-transition: "transform 180ms ease, box-shadow 180ms ease",
+boxShadow: `0 0 ${40 + ringCount * 14}px rgba(78,245,225,${glowStrength}), inset 0 0 42px rgba(255,255,255,0.04)`,
+transform: `scale(${surgeOn ? 1.04 : pulseOn ? 1.02 : touchGlow ? 1.01 : 1})`,
+transition: "transform 160ms ease, box-shadow 160ms ease",
 display: "grid",
 placeItems: "center",
 cursor: "pointer",
