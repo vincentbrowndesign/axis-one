@@ -1,24 +1,26 @@
-"use client"
+"use client";
 
-import { useEffect, useRef, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-type FormState = "Out of Control" | "In Rhythm" | "In Control"
-type SignalState = "Chaotic" | "Reactive" | "Clean"
-type EnergyState = "Off" | "On" | "High"
+type FormState = "Out of Control" | "In Rhythm" | "In Control";
+type SignalState = "Chaotic" | "Reactive" | "Clean";
+type EnergyState = "Off" | "On" | "High";
 
 type Reading = {
-form: FormState
-signal: SignalState
-energy: EnergyState
-transitions: number
-windows: number
-charge: number
-}
+form: FormState;
+signal: SignalState;
+energy: EnergyState;
+transitions: number;
+windows: number;
+charge: number;
+};
+
+const CHARGE_KEY = "axis_charge_v1";
 
 export default function MeasureClient() {
-const [running, setRunning] = useState(false)
-const [time, setTime] = useState(0)
-const [storedCharge, setStoredCharge] = useState(0)
+const [running, setRunning] = useState(false);
+const [time, setTime] = useState(0);
+const [storedCharge, setStoredCharge] = useState(0);
 
 const [reading, setReading] = useState<Reading>({
 form: "In Control",
@@ -27,140 +29,342 @@ energy: "Off",
 transitions: 0,
 windows: 0,
 charge: 0,
-})
+});
 
-const samples = useRef<number[]>([])
-const lastSignal = useRef<SignalState>("Clean")
-const startTime = useRef<number>(0)
-const timer = useRef<ReturnType<typeof setInterval> | null>(null)
+const samplesRef = useRef<number[]>([]);
+const startTimeRef = useRef<number>(0);
+const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+const motionEnabledRef = useRef(false);
 
-const motionHandler = (e: DeviceMotionEvent) => {
-const ax = e.accelerationIncludingGravity?.x || 0
-const ay = e.accelerationIncludingGravity?.y || 0
-const az = e.accelerationIncludingGravity?.z || 0
+useEffect(() => {
+const raw = localStorage.getItem(CHARGE_KEY);
+setStoredCharge(raw ? Number(raw) || 0 : 0);
 
-const mag = Math.sqrt(ax * ax + ay * ay + az * az)
+return () => {
+window.removeEventListener("devicemotion", handleMotion);
+if (timerRef.current) clearInterval(timerRef.current);
+};
+}, []);
 
-samples.current.push(mag)
+function saveCharge(next: number) {
+localStorage.setItem(CHARGE_KEY, String(next));
+setStoredCharge(next);
+}
 
-if (samples.current.length > 60) {
-samples.current.shift()
+function magnitude(x: number, y: number, z: number) {
+return Math.sqrt(x * x + y * y + z * z);
+}
+
+function handleMotion(e: DeviceMotionEvent) {
+const ax = e.acceleration?.x ?? 0;
+const ay = e.acceleration?.y ?? 0;
+const az = e.acceleration?.z ?? 0;
+
+const gx = e.rotationRate?.alpha ?? 0;
+const gy = e.rotationRate?.beta ?? 0;
+const gz = e.rotationRate?.gamma ?? 0;
+
+const accel = magnitude(ax, ay, az);
+const gyro = magnitude(gx, gy, gz) / 50;
+const rawMotion = accel + gyro;
+
+const deadZone = 0.12;
+const motion = rawMotion < deadZone ? 0 : rawMotion;
+
+samplesRef.current.push(motion);
+
+if (samplesRef.current.length > 120) {
+samplesRef.current.shift();
 }
 }
 
 async function enableMotion() {
 if (
 typeof DeviceMotionEvent !== "undefined" &&
-typeof (DeviceMotionEvent as any).requestPermission === "function"
+typeof (DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> })
+.requestPermission === "function"
 ) {
-const res = await (DeviceMotionEvent as any).requestPermission()
+const res = await (
+DeviceMotionEvent as unknown as { requestPermission: () => Promise<string> }
+).requestPermission();
 
-if (res === "granted") {
-window.addEventListener("devicemotion", motionHandler)
+if (res !== "granted") return;
 }
-} else {
-window.addEventListener("devicemotion", motionHandler)
+
+if (!motionEnabledRef.current) {
+window.addEventListener("devicemotion", handleMotion);
+motionEnabledRef.current = true;
 }
 }
 
 function computeReading() {
-if (samples.current.length < 10) return
-
-const avg =
-samples.current.reduce((a, b) => a + b, 0) / samples.current.length
-
-let signal: SignalState
-if (avg < 0.4) signal = "Clean"
-else if (avg < 1.2) signal = "Reactive"
-else signal = "Chaotic"
-
-let energy: EnergyState
-if (avg < 0.3) energy = "Off"
-else if (avg < 1.5) energy = "On"
-else energy = "High"
-
-let form: FormState
-if (signal === "Clean") form = "In Control"
-else if (signal === "Reactive") form = "In Rhythm"
-else form = "Out of Control"
-
-let transitions = reading.transitions
-
-if (signal !== lastSignal.current) {
-transitions++
-lastSignal.current = signal
+const values = samplesRef.current;
+if (values.length < 8) {
+setReading({
+form: "In Control",
+signal: "Clean",
+energy: "Off",
+transitions: 0,
+windows: 0,
+charge: 0,
+});
+return;
 }
 
-const chargeGain = Math.floor(avg * 5)
+const total = values.reduce((a, b) => a + b, 0);
+const avg = total / values.length;
 
-setStoredCharge((c) => c + chargeGain)
+let signal: SignalState = "Clean";
+let energy: EnergyState = "Off";
+let form: FormState = "In Control";
 
-setReading({
+if (avg < 0.2) {
+signal = "Clean";
+energy = "Off";
+form = "In Control";
+} else if (avg < 0.9) {
+signal = "Reactive";
+energy = "On";
+form = "In Rhythm";
+} else {
+signal = "Chaotic";
+energy = "High";
+form = "Out of Control";
+}
+
+const transitions = values.filter((v) => v > 1.1).length;
+const windows = Math.max(0, Math.floor(time / 5));
+const charge = Math.max(1, Math.floor(total * 2));
+
+const nextReading = {
 form,
 signal,
 energy,
 transitions,
-windows: Math.floor(time / 5),
-charge: chargeGain,
-})
+windows,
+charge,
+};
+
+setReading(nextReading);
+
+if (charge > 0) {
+const raw = localStorage.getItem(CHARGE_KEY);
+const current = raw ? Number(raw) || 0 : 0;
+const next = current + charge;
+saveCharge(next);
+}
 }
 
-function start() {
-setRunning(true)
-startTime.current = Date.now()
+async function start() {
+await enableMotion();
 
-timer.current = setInterval(() => {
-const t = Math.floor((Date.now() - startTime.current) / 1000)
-setTime(t)
-computeReading()
-}, 500)
+samplesRef.current = [];
+startTimeRef.current = Date.now();
+setTime(0);
+setRunning(true);
+
+if (timerRef.current) clearInterval(timerRef.current);
+
+timerRef.current = setInterval(() => {
+const t = Math.floor((Date.now() - startTimeRef.current) / 1000);
+setTime(t);
+computeReading();
+}, 1000);
 }
 
 function stop() {
-setRunning(false)
+setRunning(false);
+if (timerRef.current) {
+clearInterval(timerRef.current);
+timerRef.current = null;
+}
+computeReading();
+}
 
-if (timer.current) {
-clearInterval(timer.current)
-timer.current = null
-}
-}
-
-useEffect(() => {
-return () => {
-window.removeEventListener("devicemotion", motionHandler)
-
-if (timer.current) {
-clearInterval(timer.current)
-timer.current = null
-}
-}
-}, [])
+const batteryFill = useMemo(() => {
+return Math.min(100, Math.round((storedCharge / 2000) * 100));
+}, [storedCharge]);
 
 return (
-<div style={{ maxWidth: 600, margin: "40px auto", fontFamily: "sans-serif" }}>
-<h2>Axis Machine</h2>
-
-<p>Time {time}s</p>
-<p>Stored Charge {storedCharge}</p>
-
-<button onClick={enableMotion}>Motion Permission</button>
-
-{!running ? (
-<button onClick={start}>Start</button>
-) : (
-<button onClick={stop}>Stop</button>
-)}
-
-<hr />
-
-<h3>Reading</h3>
-
-<p>Form {reading.form}</p>
-<p>Signal {reading.signal}</p>
-<p>Energy {reading.energy}</p>
-<p>Transitions {reading.transitions}</p>
-<p>Windows {reading.windows}</p>
-<p>Charge +{reading.charge}</p>
+<div
+style={{
+display: "grid",
+gap: 18,
+}}
+>
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 28,
+background: "rgba(255,255,255,0.02)",
+padding: 22,
+}}
+>
+<div
+style={{
+display: "flex",
+alignItems: "center",
+justifyContent: "space-between",
+gap: 16,
+marginBottom: 18,
+}}
+>
+<div>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 6 }}>
+Machine
 </div>
-)
+<div style={{ fontSize: 30, fontWeight: 700, letterSpacing: "-0.04em" }}>
+{running ? "Live" : "Ready"}
+</div>
+</div>
+
+<div style={{ minWidth: 92, textAlign: "right" }}>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 6 }}>
+Time
+</div>
+<div style={{ fontSize: 28, fontWeight: 700, letterSpacing: "-0.04em" }}>
+{time}s
+</div>
+</div>
+</div>
+
+<div style={{ marginBottom: 18 }}>
+<div
+style={{
+display: "flex",
+justifyContent: "space-between",
+alignItems: "center",
+marginBottom: 10,
+}}
+>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)" }}>Stored Charge</div>
+<div style={{ fontSize: 16, fontWeight: 700 }}>{storedCharge}</div>
+</div>
+
+<div
+style={{
+width: "100%",
+height: 30,
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.12)",
+background: "#0a0a0a",
+padding: 4,
+boxSizing: "border-box",
+}}
+>
+<div
+style={{
+width: `${batteryFill}%`,
+height: "100%",
+borderRadius: 999,
+background:
+"linear-gradient(90deg, rgba(0,212,166,0.55) 0%, rgba(0,212,166,1) 100%)",
+boxShadow: "0 0 24px rgba(0,212,166,0.35)",
+transition: "width 200ms ease",
+}}
+/>
+</div>
+</div>
+
+<div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+{!running ? (
+<button
+onClick={start}
+style={{
+border: "1px solid rgba(0,212,166,0.35)",
+background: "rgba(0,212,166,0.12)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "16px 26px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
+On
+</button>
+) : (
+<button
+onClick={stop}
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.06)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "16px 26px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
+Off
+</button>
+)}
+</div>
+</section>
+
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 28,
+background: "rgba(255,255,255,0.02)",
+padding: 22,
+}}
+>
+<div style={{ fontSize: 14, color: "rgba(255,255,255,0.6)", marginBottom: 8 }}>
+Output
+</div>
+
+<div
+style={{
+fontSize: 26,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+marginBottom: 18,
+}}
+>
+Reading
+</div>
+
+<div style={{ display: "grid", gap: 12 }}>
+<MetricRow label="Form" value={reading.form} />
+<MetricRow label="Signal" value={reading.signal} />
+<MetricRow label="Energy" value={reading.energy} />
+<MetricRow label="Transitions" value={String(reading.transitions)} />
+<MetricRow label="Windows" value={String(reading.windows)} />
+<MetricRow label="Charge" value={`+${reading.charge}`} />
+<MetricRow label="Stored Charge" value={String(storedCharge)} />
+</div>
+</section>
+</div>
+);
+}
+
+function MetricRow({ label, value }: { label: string; value: string }) {
+return (
+<div
+style={{
+display: "flex",
+justifyContent: "space-between",
+alignItems: "center",
+gap: 16,
+border: "1px solid rgba(255,255,255,0.06)",
+background: "rgba(255,255,255,0.02)",
+borderRadius: 18,
+padding: "16px 18px",
+}}
+>
+<div style={{ color: "rgba(255,255,255,0.62)", fontSize: 15 }}>{label}</div>
+<div
+style={{
+color: "#ffffff",
+fontSize: 17,
+fontWeight: 700,
+textAlign: "right",
+}}
+>
+{value}
+</div>
+</div>
+);
 }
