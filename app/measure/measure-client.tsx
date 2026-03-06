@@ -23,8 +23,8 @@ startedAt: number;
 endedAt: number;
 };
 
-const STORAGE_KEY = "axis_sessions";
-const CHARGE_KEY = "axis_charge";
+const STORAGE_KEY = "axis_sessions_v1";
+const CHARGE_KEY = "axis_stored_charge_v1";
 
 function magnitude(x: number, y: number, z: number) {
 return Math.sqrt(x * x + y * y + z * z);
@@ -227,63 +227,282 @@ const batteryFill = useMemo(() => {
 return Math.min(100, Math.round((storedCharge / 500) * 100));
 }, [storedCharge]);
 
-return (
-<div style={{ padding: 24, fontFamily: "sans-serif", maxWidth: 480 }}>
-<h1>Axis Measure</h1>
+const liveGlow = useMemo(() => {
+if (!isLive) return "rgba(255,255,255,0.08)";
+return "rgba(0,212,166,0.35)";
+}, [isLive]);
 
-<div style={{ marginBottom: 24 }}>
-<h3>Stored Charge</h3>
+return (
 <div
 style={{
-width: 220,
-height: 22,
-border: "1px solid black",
-position: "relative",
-marginBottom: 8,
+display: "grid",
+gap: 18,
+}}
+>
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 28,
+background: "rgba(255,255,255,0.02)",
+padding: 22,
+boxShadow: `0 0 0 1px rgba(255,255,255,0.01) inset, 0 0 32px ${liveGlow}`,
+}}
+>
+<div
+style={{
+display: "flex",
+alignItems: "center",
+justifyContent: "space-between",
+gap: 16,
+marginBottom: 18,
+}}
+>
+<div>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.6)",
+marginBottom: 6,
+}}
+>
+Machine
+</div>
+<div
+style={{
+fontSize: 30,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+}}
+>
+{isLive ? "Live" : "Ready"}
+</div>
+</div>
+
+<div
+style={{
+minWidth: 92,
+textAlign: "right",
+}}
+>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.6)",
+marginBottom: 6,
+}}
+>
+Time
+</div>
+<div
+style={{
+fontSize: 28,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+}}
+>
+{formatElapsed(elapsed)}
+</div>
+</div>
+</div>
+
+<div style={{ marginBottom: 18 }}>
+<div
+style={{
+display: "flex",
+justifyContent: "space-between",
+alignItems: "center",
+marginBottom: 10,
+}}
+>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.6)",
+}}
+>
+Stored Charge
+</div>
+<div
+style={{
+fontSize: 16,
+fontWeight: 700,
+}}
+>
+{storedCharge}
+</div>
+</div>
+
+<div
+style={{
+width: "100%",
+height: 30,
+borderRadius: 999,
+border: "1px solid rgba(255,255,255,0.12)",
+background: "#0a0a0a",
+padding: 4,
+boxSizing: "border-box",
 }}
 >
 <div
 style={{
 width: `${batteryFill}%`,
 height: "100%",
-background: "limegreen",
+borderRadius: 999,
+background:
+"linear-gradient(90deg, rgba(0,212,166,0.55) 0%, rgba(0,212,166,1) 100%)",
+boxShadow: "0 0 24px rgba(0,212,166,0.35)",
+transition: "width 200ms ease",
 }}
 />
 </div>
-<p>{storedCharge}</p>
 </div>
 
-{!isLive && (
-<button onClick={startLive} style={{ padding: "12px 18px" }}>
+<div
+style={{
+display: "flex",
+gap: 12,
+flexWrap: "wrap",
+}}
+>
+{!isLive ? (
+<button
+onClick={startLive}
+style={{
+border: "1px solid rgba(0,212,166,0.35)",
+background: "rgba(0,212,166,0.12)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "16px 26px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
 On
 </button>
-)}
-
-{isLive && (
-<div style={{ marginBottom: 24 }}>
-<p>LIVE</p>
-<p>{formatElapsed(elapsed)}</p>
-<button onClick={stopLive} style={{ padding: "12px 18px" }}>
+) : (
+<button
+onClick={stopLive}
+style={{
+border: "1px solid rgba(255,255,255,0.12)",
+background: "rgba(255,255,255,0.06)",
+color: "#f5f7fa",
+borderRadius: 18,
+padding: "16px 26px",
+fontSize: 18,
+fontWeight: 700,
+cursor: "pointer",
+}}
+>
 Off
 </button>
+)}
+</div>
+
+{error ? (
+<div
+style={{
+marginTop: 16,
+fontSize: 15,
+color: "#ff8b8b",
+}}
+>
+{error}
+</div>
+) : null}
+</section>
+
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 28,
+background: "rgba(255,255,255,0.02)",
+padding: 22,
+}}
+>
+<div
+style={{
+fontSize: 14,
+color: "rgba(255,255,255,0.6)",
+marginBottom: 8,
+}}
+>
+Output
+</div>
+
+<div
+style={{
+fontSize: 26,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+marginBottom: 18,
+}}
+>
+Reading
+</div>
+
+{!reading ? (
+<div
+style={{
+color: "rgba(255,255,255,0.55)",
+fontSize: 16,
+}}
+>
+Turn Axis on. Go live. Turn it off. The reading appears here.
+</div>
+) : (
+<div
+style={{
+display: "grid",
+gap: 12,
+}}
+>
+<MetricRow label="Form" value={reading.form} />
+<MetricRow label="Signal" value={reading.signal} />
+<MetricRow label="Energy" value={reading.energy} />
+<MetricRow label="Transitions" value={String(reading.transitions)} />
+<MetricRow label="Windows" value={String(reading.windows)} />
+<MetricRow label="Charge" value={`+${reading.charge}`} />
+<MetricRow label="Stored Charge" value={String(reading.storedCharge)} />
 </div>
 )}
-
-{reading && (
-<div style={{ marginTop: 24 }}>
-<h2>Reading</h2>
-
-<p>Form: {reading.form}</p>
-<p>Signal: {reading.signal}</p>
-<p>Energy: {reading.energy}</p>
-<p>Transitions: {reading.transitions}</p>
-<p>Windows: {reading.windows}</p>
-<p>Charge +{reading.charge}</p>
-<p>Stored Charge {reading.storedCharge}</p>
+</section>
 </div>
-)}
+);
+}
 
-{error && <p style={{ color: "red", marginTop: 16 }}>{error}</p>}
+function MetricRow({ label, value }: { label: string; value: string }) {
+return (
+<div
+style={{
+display: "flex",
+justifyContent: "space-between",
+alignItems: "center",
+gap: 16,
+border: "1px solid rgba(255,255,255,0.06)",
+background: "rgba(255,255,255,0.02)",
+borderRadius: 18,
+padding: "16px 18px",
+}}
+>
+<div
+style={{
+color: "rgba(255,255,255,0.62)",
+fontSize: 15,
+}}
+>
+{label}
+</div>
+<div
+style={{
+color: "#ffffff",
+fontSize: 17,
+fontWeight: 700,
+textAlign: "right",
+}}
+>
+{value}
+</div>
 </div>
 );
 }
