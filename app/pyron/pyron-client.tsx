@@ -2,33 +2,34 @@
 
 import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import {
-CircleDot,
-Cpu,
-Orbit,
-Send,
-Sparkles,
-ChevronUp,
-ChevronDown,
-} from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { CircleDot, Send, Sparkles } from "lucide-react";
 
 type LiveState = "OFF" | "LIVE";
+type Sensitivity = "Low" | "Medium" | "High" | "Raw";
+type OrbType = "form" | "scale" | "transmit";
+type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
+type Mode = "ambient" | "place";
+
 type SlotId =
 | "n"
 | "ne"
-| "e"
 | "se"
 | "s"
 | "sw"
-| "w"
 | "nw"
 | "n2"
 | "e2"
 | "s2"
-| "w2";
-type OrbType = "form" | "scale" | "transmit";
-type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
+| "w2"
+| "ne2"
+| "sw2";
+
+type Slot = {
+id: SlotId;
+x: number;
+y: number;
+ring: 1 | 2;
+};
 
 type Orb = {
 id: string;
@@ -39,58 +40,52 @@ size: number;
 transmitting: boolean;
 };
 
-type Slot = {
-id: SlotId;
-x: number;
-y: number;
-ring: 1 | 2;
-};
-
 type Pattern = {
 name: string;
 bonus: number;
 };
 
-const CHARGE_KEY = "axis_pyron_charge_v3";
-const LIVE_KEY = "axis_pyron_live_v3";
-const ENERGY_KEY = "axis_pyron_energy_v3";
-const SENSITIVITY_KEY = "axis_pyron_sensitivity_v3";
-const ORBS_KEY = "axis_pyron_orbs_v3";
-const FOCUS_KEY = "axis_pyron_focus_v3";
-const DRAWER_KEY = "axis_pyron_drawer_v3";
+const CHARGE_KEY = "axis_pyron_charge_v4";
+const LIVE_KEY = "axis_pyron_live_v4";
+const ENERGY_KEY = "axis_pyron_energy_v4";
+const SENSITIVITY_KEY = "axis_pyron_sensitivity_v4";
+const ORBS_KEY = "axis_pyron_orbs_v4";
+const FOCUS_KEY = "axis_pyron_focus_v4";
+const MODE_KEY = "axis_pyron_mode_v4";
 
 const FORM_COST = 45;
 const SCALE_COST = 60;
 const TRANSMIT_COST = 100;
 
 const SLOTS: Slot[] = [
-{ id: "n", x: 0, y: -108, ring: 1 },
-{ id: "ne", x: 76, y: -76, ring: 1 },
-{ id: "e", x: 108, y: 0, ring: 1 },
-{ id: "se", x: 76, y: 76, ring: 1 },
-{ id: "s", x: 0, y: 108, ring: 1 },
-{ id: "sw", x: -76, y: 76, ring: 1 },
-{ id: "w", x: -108, y: 0, ring: 1 },
-{ id: "nw", x: -76, y: -76, ring: 1 },
-{ id: "n2", x: 0, y: -180, ring: 2 },
-{ id: "e2", x: 180, y: 0, ring: 2 },
-{ id: "s2", x: 0, y: 180, ring: 2 },
-{ id: "w2", x: -180, y: 0, ring: 2 },
+{ id: "n", x: 0, y: -120, ring: 1 },
+{ id: "ne", x: 104, y: -60, ring: 1 },
+{ id: "se", x: 104, y: 60, ring: 1 },
+{ id: "s", x: 0, y: 120, ring: 1 },
+{ id: "sw", x: -104, y: 60, ring: 1 },
+{ id: "nw", x: -104, y: -60, ring: 1 },
+
+{ id: "n2", x: 0, y: -198, ring: 2 },
+{ id: "e2", x: 172, y: 0, ring: 2 },
+{ id: "s2", x: 0, y: 198, ring: 2 },
+{ id: "w2", x: -172, y: 0, ring: 2 },
+{ id: "ne2", x: 146, y: -112, ring: 2 },
+{ id: "sw2", x: -146, y: 112, ring: 2 },
 ];
 
 const SLOT_ORDER: SlotId[] = [
 "n",
 "ne",
-"e",
 "se",
 "s",
 "sw",
-"w",
 "nw",
 "n2",
 "e2",
 "s2",
 "w2",
+"ne2",
+"sw2",
 ];
 
 function getStage(charge: number): Stage {
@@ -117,25 +112,22 @@ if (stage === "Nova") return 400;
 return 1000;
 }
 
-function getSensitivityLabel(value: number) {
-if (value <= 25) return "Low";
-if (value <= 50) return "Medium";
-if (value <= 75) return "High";
-return "Raw";
-}
-
-function getEnergyMultiplier(value: number) {
-if (value <= 25) return 0.35;
-if (value <= 50) return 0.7;
-if (value <= 75) return 1;
-return 1.35;
-}
-
 function getUnlockedSlotIds(charge: number): SlotId[] {
-if (charge < 50) return ["n", "e", "w"];
-if (charge < 150) return ["n", "ne", "e", "s", "sw", "w"];
-if (charge < 400) return ["n", "ne", "e", "se", "s", "sw", "w", "nw"];
+if (charge < 50) return ["n", "sw", "se"];
+if (charge < 150) return ["n", "ne", "se", "s", "sw", "nw"];
+if (charge < 400) return ["n", "ne", "se", "s", "sw", "nw", "e2", "w2"];
 return SLOT_ORDER;
+}
+
+function getSensitivityLabel(value: Sensitivity) {
+return value;
+}
+
+function getEnergyMultiplier(value: Sensitivity) {
+if (value === "Low") return 0.4;
+if (value === "Medium") return 0.75;
+if (value === "High") return 1;
+return 1.35;
 }
 
 function getOrbIcon(type: OrbType) {
@@ -157,23 +149,23 @@ id: "orb-n",
 slotId: "n",
 type: "form",
 level: 1,
-size: 48,
+size: 52,
 transmitting: false,
 },
 {
-id: "orb-e",
-slotId: "e",
+id: "orb-sw",
+slotId: "sw",
 type: "scale",
 level: 1,
-size: 48,
+size: 52,
 transmitting: false,
 },
 {
-id: "orb-w",
-slotId: "w",
+id: "orb-se",
+slotId: "se",
 type: "transmit",
 level: 1,
-size: 48,
+size: 52,
 transmitting: false,
 },
 ];
@@ -190,7 +182,11 @@ return getDefaultOrbs();
 }
 }
 
-function getFirstEmptySlot(orbs: Orb[], unlocked: SlotId[]): SlotId | null {
+function findSlot(slotId: SlotId) {
+return SLOTS.find((s) => s.id === slotId)!;
+}
+
+function getFirstEmptySlot(orbs: Orb[], unlocked: SlotId[]) {
 const used = new Set(orbs.map((o) => o.slotId));
 for (const slotId of SLOT_ORDER) {
 if (unlocked.includes(slotId) && !used.has(slotId)) return slotId;
@@ -198,58 +194,52 @@ if (unlocked.includes(slotId) && !used.has(slotId)) return slotId;
 return null;
 }
 
-function findSlot(slotId: SlotId) {
-return SLOTS.find((s) => s.id === slotId)!;
-}
-
-function hasOrb(orbs: Orb[], slotId: SlotId) {
-return orbs.some((o) => o.slotId === slotId);
-}
-
 function detectPattern(orbs: Orb[]): Pattern | null {
 const occupied = new Set(orbs.map((o) => o.slotId));
 
-const triangleSets: SlotId[][] = [
-["n", "e", "w"],
-["n", "se", "sw"],
-["s", "ne", "nw"],
-["e", "nw", "sw"],
-["w", "ne", "se"],
+const triangles: SlotId[][] = [
+["n", "sw", "se"],
+["s", "nw", "ne"],
+["n", "se", "s"],
+["n", "sw", "s"],
 ];
 
-for (const set of triangleSets) {
+for (const set of triangles) {
 if (set.every((id) => occupied.has(id))) {
 return { name: "Triangle", bonus: 12 };
 }
 }
 
-const chainSets: SlotId[][] = [
+const chains: SlotId[][] = [
 ["n2", "n", "s", "s2"],
-["w2", "w", "e", "e2"],
-["nw", "n", "ne", "e"],
-["sw", "s", "se", "e"],
+["w2", "sw", "se", "e2"],
 ];
 
-for (const set of chainSets) {
+for (const set of chains) {
 if (set.every((id) => occupied.has(id))) {
 return { name: "Chain", bonus: 18 };
 }
 }
 
-const hubCount = ["n", "e", "s", "w"].filter((id) =>
+const hubCount = ["n", "ne", "se", "s", "sw", "nw"].filter((id) =>
 occupied.has(id as SlotId)
 ).length;
 
-if (hubCount >= 3) {
+if (hubCount >= 4) {
 return { name: "Hub", bonus: 20 };
 }
 
 return null;
 }
 
-function createAxisLinePath(width: number, height: number, energy: number, live: boolean) {
-const points = 28;
-const amp = live ? 10 + energy * 0.45 : 4;
+function createSignalPath(
+width: number,
+height: number,
+energy: number,
+live: boolean
+) {
+const points = 34;
+const amp = live ? 10 + energy * 0.52 : 4;
 const centerY = height / 2;
 const step = width / (points - 1);
 
@@ -259,9 +249,9 @@ for (let i = 1; i < points; i++) {
 const x = i * step;
 const y =
 centerY +
-Math.sin(i * 0.62) * amp * 0.7 +
-Math.cos(i * 0.25) * amp * 0.35 +
-Math.sin(i * 1.1) * amp * 0.18;
+Math.sin(i * 0.58) * amp * 0.62 +
+Math.cos(i * 0.21) * amp * 0.28 +
+Math.sin(i * 1.15) * amp * 0.18;
 d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
 }
 
@@ -272,30 +262,41 @@ export default function PyronClient() {
 const [charge, setCharge] = useState(149);
 const [liveState, setLiveState] = useState<LiveState>("OFF");
 const [liveEnergy, setLiveEnergy] = useState(18);
-const [sensitivity, setSensitivity] = useState(50);
+const [sensitivity, setSensitivity] = useState<Sensitivity>("Medium");
 const [orbs, setOrbs] = useState<Orb[]>(getDefaultOrbs());
 const [focusedOrbId, setFocusedOrbId] = useState<string | null>("orb-n");
-const [drawerOpen, setDrawerOpen] = useState(false);
+const [mode, setMode] = useState<Mode>("ambient");
 const [message, setMessage] = useState("Focus a structure and shape the field.");
 
 useEffect(() => {
 if (typeof window === "undefined") return;
 
 const savedCharge = Number(window.localStorage.getItem(CHARGE_KEY) ?? 149);
-const savedLive = (window.localStorage.getItem(LIVE_KEY) as LiveState | null) ?? "OFF";
+const savedLive =
+(window.localStorage.getItem(LIVE_KEY) as LiveState | null) ?? "OFF";
 const savedEnergy = Number(window.localStorage.getItem(ENERGY_KEY) ?? 18);
-const savedSensitivity = Number(window.localStorage.getItem(SENSITIVITY_KEY) ?? 50);
+const savedSensitivity =
+(window.localStorage.getItem(SENSITIVITY_KEY) as Sensitivity | null) ??
+"Medium";
 const savedOrbs = safeParseOrbs(window.localStorage.getItem(ORBS_KEY));
 const savedFocus = window.localStorage.getItem(FOCUS_KEY);
-const savedDrawer = window.localStorage.getItem(DRAWER_KEY) === "1";
+const savedMode =
+(window.localStorage.getItem(MODE_KEY) as Mode | null) ?? "ambient";
 
 if (!Number.isNaN(savedCharge)) setCharge(savedCharge);
 if (savedLive === "LIVE" || savedLive === "OFF") setLiveState(savedLive);
 if (!Number.isNaN(savedEnergy)) setLiveEnergy(savedEnergy);
-if (!Number.isNaN(savedSensitivity)) setSensitivity(savedSensitivity);
+if (
+savedSensitivity === "Low" ||
+savedSensitivity === "Medium" ||
+savedSensitivity === "High" ||
+savedSensitivity === "Raw"
+) {
+setSensitivity(savedSensitivity);
+}
 setOrbs(savedOrbs);
 setFocusedOrbId(savedFocus ?? savedOrbs[0]?.id ?? null);
-setDrawerOpen(savedDrawer);
+if (savedMode === "ambient" || savedMode === "place") setMode(savedMode);
 }, []);
 
 useEffect(() => {
@@ -303,11 +304,11 @@ if (typeof window === "undefined") return;
 window.localStorage.setItem(CHARGE_KEY, String(charge));
 window.localStorage.setItem(LIVE_KEY, liveState);
 window.localStorage.setItem(ENERGY_KEY, String(liveEnergy));
-window.localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
+window.localStorage.setItem(SENSITIVITY_KEY, sensitivity);
 window.localStorage.setItem(ORBS_KEY, JSON.stringify(orbs));
 if (focusedOrbId) window.localStorage.setItem(FOCUS_KEY, focusedOrbId);
-window.localStorage.setItem(DRAWER_KEY, drawerOpen ? "1" : "0");
-}, [charge, liveState, liveEnergy, sensitivity, orbs, focusedOrbId, drawerOpen]);
+window.localStorage.setItem(MODE_KEY, mode);
+}, [charge, liveState, liveEnergy, sensitivity, orbs, focusedOrbId, mode]);
 
 useEffect(() => {
 if (liveState !== "LIVE") return;
@@ -325,7 +326,7 @@ setLiveEnergy(Number(nextEnergy.toFixed(1)));
 
 const gain = Math.max(
 0,
-Math.round((nextEnergy / 25) * getEnergyMultiplier(sensitivity))
+Math.round((nextEnergy / 26) * getEnergyMultiplier(sensitivity))
 );
 
 if (gain > 0) {
@@ -352,6 +353,11 @@ const focusedOrb = useMemo(
 );
 const pattern = useMemo(() => detectPattern(orbs), [orbs]);
 
+const axisPath = useMemo(
+() => createSignalPath(760, 300, liveEnergy, liveState === "LIVE"),
+[liveEnergy, liveState]
+);
+
 function toggleLive() {
 setLiveState((prev) => {
 const next = prev === "LIVE" ? "OFF" : "LIVE";
@@ -377,13 +383,14 @@ id: `orb-${nextSlot}-${Date.now()}`,
 slotId: nextSlot,
 type: "form",
 level: 1,
-size: 48,
+size: 52,
 transmitting: false,
 };
 
 setCharge((prev) => prev - FORM_COST);
 setOrbs((prev) => [...prev, nextOrb]);
 setFocusedOrbId(nextOrb.id);
+setMode("ambient");
 setMessage("New structure formed.");
 }
 
@@ -405,7 +412,7 @@ orb.id === focusedOrb.id
 ...orb,
 type: "scale",
 level: orb.level + 1,
-size: Math.min(84, orb.size + 10),
+size: Math.min(90, orb.size + 10),
 }
 : orb
 )
@@ -442,52 +449,85 @@ orb.id === focusedOrb.id ? { ...orb, transmitting: false } : orb
 }, 1300);
 }
 
-const axisPath = useMemo(
-() => createAxisLinePath(700, 260, liveEnergy, liveState === "LIVE"),
-[liveEnergy, liveState]
-);
-
-const sensitivityLabel = getSensitivityLabel(sensitivity);
+const canForm = charge >= FORM_COST && !!getFirstEmptySlot(orbs, unlockedSlots);
+const canScale = charge >= SCALE_COST && !!focusedOrb;
+const canTransmit = charge >= TRANSMIT_COST && !!focusedOrb;
 
 return (
 <div className="min-h-screen bg-black text-white">
-<div className="mx-auto max-w-6xl px-4 py-4">
-<div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.03]">
-<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.12),rgba(255,255,255,0.02)_28%,rgba(0,0,0,0.96)_72%)]" />
+<div className="mx-auto max-w-5xl px-4 py-4">
+<div className="mb-4 flex items-center justify-between">
+<div className="text-3xl font-semibold tracking-tight">Pyron</div>
 
-<div className="relative z-10 flex items-center justify-between px-4 py-4 sm:px-6">
-<div className="flex items-center gap-3">
+<div className="flex items-center gap-2">
 <button
 onClick={toggleLive}
-className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs uppercase tracking-[0.22em] text-white/80"
+className={`rounded-full border px-4 py-2 text-sm tracking-[0.2em] ${
+liveState === "LIVE"
+? "border-white/15 bg-white/[0.10] text-white"
+: "border-white/10 bg-white/[0.04] text-white/70"
+}`}
 >
 {liveState}
 </button>
 
-<div className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs uppercase tracking-[0.22em] text-white/65">
+<div className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm tracking-[0.2em] text-white/60">
 {stage}
 </div>
-</div>
 
-<div className="text-right">
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/45">
-Bank
+<div className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm">
+{charge}
 </div>
-<div className="text-xl font-semibold">{charge}</div>
 </div>
 </div>
 
-<div className="relative z-10 px-2 pb-2 sm:px-4 sm:pb-4">
-<div className="relative mx-auto aspect-square max-w-[760px] overflow-hidden rounded-[1.75rem]">
+<div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.03]">
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.10),rgba(255,255,255,0.02)_30%,rgba(0,0,0,0.96)_72%)]" />
+
+<div className="relative z-10 px-4 pt-4">
+<div className="mb-3 flex items-center justify-between">
+<button
+onClick={() => setMode((m) => (m === "ambient" ? "place" : "ambient"))}
+className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
+>
+{mode === "ambient" ? "Build" : "Hide Grid"}
+</button>
+
+<div className="flex items-center gap-2">
+<SensitivityPill
+active={sensitivity === "Low"}
+onClick={() => setSensitivity("Low")}
+label="Low"
+/>
+<SensitivityPill
+active={sensitivity === "Medium"}
+onClick={() => setSensitivity("Medium")}
+label="Medium"
+/>
+<SensitivityPill
+active={sensitivity === "High"}
+onClick={() => setSensitivity("High")}
+label="High"
+/>
+<SensitivityPill
+active={sensitivity === "Raw"}
+onClick={() => setSensitivity("Raw")}
+label="Raw"
+/>
+</div>
+</div>
+</div>
+
+<div className="relative z-10 mx-auto aspect-square max-w-[760px] overflow-hidden">
 <svg
-viewBox="0 0 700 260"
-className="absolute left-1/2 top-1/2 z-0 h-[52%] w-[92%] -translate-x-1/2 -translate-y-1/2 opacity-30 blur-[0.2px]"
+viewBox="0 0 760 300"
+className="absolute left-1/2 top-1/2 z-0 h-[44%] w-[96%] -translate-x-1/2 -translate-y-1/2 opacity-30"
 aria-hidden="true"
 >
 <path
 d={axisPath}
 fill="none"
-stroke="rgba(255,255,255,0.22)"
+stroke="rgba(255,255,255,0.20)"
 strokeWidth="2.2"
 strokeLinecap="round"
 strokeLinejoin="round"
@@ -495,17 +535,23 @@ strokeLinejoin="round"
 <path
 d={axisPath}
 fill="none"
-stroke="rgba(255,255,255,0.08)"
-strokeWidth="10"
+stroke="rgba(255,255,255,0.05)"
+strokeWidth="12"
 strokeLinecap="round"
 strokeLinejoin="round"
 />
 </svg>
 
 {[1, 2].map((ring) => {
-const size = ring === 1 ? 280 : 420;
-const unlocked =
-ring === 1 ? unlockedSlots.some((id) => findSlot(id).ring === 1) : unlockedSlots.some((id) => findSlot(id).ring === 2);
+const size = ring === 1 ? 300 : 450;
+const show =
+mode === "place" ||
+SLOTS.some(
+(slot) =>
+slot.ring === ring &&
+unlockedSlots.includes(slot.id) &&
+orbs.some((o) => o.slotId === slot.id)
+);
 
 return (
 <motion.div
@@ -518,13 +564,15 @@ transform: "translate(-50%, -50%)",
 }}
 animate={{
 opacity:
-liveState === "LIVE" && unlocked
-? [0.1, 0.22, 0.1]
-: 0.08,
+liveState === "LIVE" && show
+? [0.06, 0.16, 0.06]
+: show
+? 0.08
+: 0.02,
 scale: liveState === "LIVE" ? [1, 1.01, 1] : 1,
 }}
 transition={{
-duration: 4 + ring,
+duration: 4.5 + ring,
 repeat: Infinity,
 ease: "easeInOut",
 }}
@@ -535,15 +583,26 @@ ease: "easeInOut",
 {SLOTS.filter((slot) => unlockedSlots.includes(slot.id)).map((slot) => {
 const orb = orbs.find((o) => o.slotId === slot.id);
 const focused = orb?.id === focusedOrbId;
+const showSlot = mode === "place" || !!orb;
 
 return (
 <React.Fragment key={slot.id}>
-{!orb && (
-<div
-className="absolute left-1/2 top-1/2 z-10 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.05]"
+{showSlot && (
+<motion.div
+className="absolute left-1/2 top-1/2 z-5 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/12"
 style={{
 marginLeft: slot.x,
 marginTop: slot.y,
+background: orb ? "transparent" : "rgba(255,255,255,0.03)",
+}}
+animate={{
+opacity: mode === "place" && !orb ? [0.18, 0.5, 0.18] : 0.14,
+scale: mode === "place" && !orb ? [1, 1.18, 1] : 1,
+}}
+transition={{
+duration: 2.4,
+repeat: Infinity,
+ease: "easeInOut",
 }}
 />
 )}
@@ -551,7 +610,7 @@ marginTop: slot.y,
 {orb && (
 <>
 <motion.div
-className="absolute left-1/2 top-1/2 z-5 h-px origin-left bg-white/18"
+className="absolute left-1/2 top-1/2 z-5 h-px origin-left bg-white/15"
 style={{
 width: Math.sqrt(slot.x * slot.x + slot.y * slot.y),
 transform: `translate(0, 0) rotate(${Math.atan2(
@@ -560,7 +619,7 @@ slot.x
 )}rad)`,
 }}
 animate={{
-opacity: focused ? [0.16, 0.55, 0.16] : [0.08, 0.18, 0.08],
+opacity: focused ? [0.14, 0.48, 0.14] : [0.06, 0.14, 0.06],
 }}
 transition={{
 duration: focused ? 1.8 : 3.2,
@@ -576,6 +635,7 @@ focused={focused}
 onClick={() => {
 setFocusedOrbId(orb.id);
 setMessage(`${getOrbLabel(orb.type)} structure focused.`);
+setMode("ambient");
 }}
 />
 </>
@@ -585,10 +645,10 @@ setMessage(`${getOrbLabel(orb.type)} structure focused.`);
 })}
 
 <motion.div
-className="absolute left-1/2 top-1/2 z-20 h-40 w-40 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.09] text-center shadow-[0_0_90px_rgba(255,255,255,0.12)] backdrop-blur-xl"
+className="absolute left-1/2 top-1/2 z-20 h-44 w-44 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_90px_rgba(255,255,255,0.10)] backdrop-blur-xl"
 animate={{
-scale: liveState === "LIVE" ? [1, 1.04, 1] : 1,
-opacity: liveState === "LIVE" ? [0.92, 1, 0.92] : 0.8,
+scale: liveState === "LIVE" ? [1, 1.035, 1] : 1,
+opacity: liveState === "LIVE" ? [0.9, 1, 0.9] : 0.8,
 }}
 transition={{
 duration: 3,
@@ -596,11 +656,13 @@ repeat: Infinity,
 ease: "easeInOut",
 }}
 >
-<div className="pt-8 text-[10px] uppercase tracking-[0.3em] text-white/45">
+<div className="pt-9 text-[10px] uppercase tracking-[0.3em] text-white/40">
 Pyron
 </div>
-<div className="mt-3 text-2xl font-semibold">{liveState}</div>
-<div className="mt-1 text-sm text-white/55">{Math.round(liveEnergy)} energy</div>
+<div className="mt-3 text-3xl font-semibold">{liveState}</div>
+<div className="mt-1 text-base text-white/65">
+{Math.round(liveEnergy)} energy
+</div>
 
 {pattern && (
 <div className="mx-auto mt-4 inline-flex rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-white/70">
@@ -610,139 +672,92 @@ Pyron
 </motion.div>
 
 {focusedOrb && (
-<>
 <FocusHalo orb={focusedOrb} />
-<ActionNode
+)}
+
+<ActionOrb
 label="Form"
 cost={FORM_COST}
 x={0}
-y={-188}
-enabled={charge >= FORM_COST && !!getFirstEmptySlot(orbs, unlockedSlots)}
+y={-210}
+enabled={canForm}
 onClick={runForm}
 />
-<ActionNode
+<ActionOrb
 label="Scale"
 cost={SCALE_COST}
-x={-170}
-y={145}
-enabled={charge >= SCALE_COST}
+x={-190}
+y={156}
+enabled={canScale}
 onClick={runScale}
 />
-<ActionNode
+<ActionOrb
 label="Transmit"
 cost={TRANSMIT_COST}
-x={170}
-y={145}
-enabled={charge >= TRANSMIT_COST}
+x={190}
+y={156}
+enabled={canTransmit}
 onClick={runTransmit}
 />
-</>
-)}
 
 {focusedOrb?.transmitting && (
 <motion.div
 className="absolute left-1/2 top-1/2 z-15 rounded-full border border-white/20"
 style={{
-width: 180,
-height: 180,
+width: 200,
+height: 200,
 transform: "translate(-50%, -50%)",
 }}
-animate={{ scale: [1, 3.4, 4.2], opacity: [0.7, 0.18, 0] }}
+animate={{ scale: [1, 3.2, 4.1], opacity: [0.75, 0.18, 0] }}
 transition={{ duration: 1.1, ease: "easeOut" }}
 />
 )}
 </div>
+
+<div className="relative z-10 border-t border-white/10 px-4 py-4">
+<div className="flex flex-wrap items-center justify-between gap-3">
+<div className="text-sm text-white/68">{message}</div>
+
+<div className="flex items-center gap-3 text-sm text-white/55">
+<span>{getSensitivityLabel(sensitivity)}</span>
+<span>{orbs.length}/{unlockedSlots.length}</span>
+<span>{charge}/{nextThreshold}</span>
+</div>
 </div>
 
-<div className="relative z-10 border-t border-white/10 bg-black/20 px-4 py-3 sm:px-6">
-<button
-onClick={() => setDrawerOpen((v) => !v)}
-className="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-left"
->
-<div>
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
-System
-</div>
-<div className="mt-1 text-sm text-white/72">{message}</div>
-</div>
-{drawerOpen ? (
-<ChevronDown className="h-4 w-4 text-white/55" />
-) : (
-<ChevronUp className="h-4 w-4 text-white/55" />
-)}
-</button>
-
-{drawerOpen && (
-<div className="mt-3 grid gap-3 md:grid-cols-4">
-<DrawerCard
-title="Sensitivity"
-value={sensitivityLabel}
-body={
-<input
-type="range"
-min={0}
-max={100}
-step={1}
-value={sensitivity}
-onChange={(e) => setSensitivity(Number(e.target.value))}
-className="mt-2 w-full accent-white"
-/>
-}
-/>
-
-<DrawerCard
-title="Focus"
-value={focusedOrb ? getOrbLabel(focusedOrb.type) : "None"}
-body={
-focusedOrb ? (
-<div className="mt-2 text-xs text-white/55">
-Level {focusedOrb.level} · Slot {focusedOrb.slotId.toUpperCase()}
-</div>
-) : (
-<div className="mt-2 text-xs text-white/55">No focused structure</div>
-)
-}
-/>
-
-<DrawerCard
-title="Slots"
-value={`${orbs.length}/${unlockedSlots.length}`}
-body={
-<div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10">
+<div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
 <div
-className="h-full bg-white/70"
-style={{
-width: `${(orbs.length / Math.max(unlockedSlots.length, 1)) * 100}%`,
-}}
-/>
-</div>
-}
-/>
-
-<DrawerCard
-title="Stage"
-value={stage}
-body={
-<div className="mt-2">
-<div className="mb-1 flex items-center justify-between text-[11px] text-white/50">
-<span>{charge}</span>
-<span>{nextThreshold}</span>
-</div>
-<div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
-<div
-className="h-full bg-white/70"
+className="h-full bg-white/65"
 style={{ width: `${progress}%` }}
 />
 </div>
 </div>
+</div>
+</div>
+</div>
+);
 }
-/>
-</div>
-)}
-</div>
-</div>
-</div>
-</div>
+
+function SensitivityPill({
+label,
+active,
+onClick,
+}: {
+label: string;
+active: boolean;
+onClick: () => void;
+}) {
+return (
+<button
+onClick={onClick}
+className={`rounded-full border px-3 py-1.5 text-[10px] uppercase tracking-[0.2em] ${
+active
+? "border-white/15 bg-white/[0.10] text-white"
+: "border-white/10 bg-white/[0.04] text-white/50"
+}`}
+>
+{label}
+</button>
 );
 }
 
@@ -763,7 +778,7 @@ return (
 <motion.button
 className={`absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-white backdrop-blur-xl ${
 focused
-? "border-white/20 bg-white/[0.14] shadow-[0_0_50px_rgba(255,255,255,0.16)]"
+? "border-white/18 bg-white/[0.14] shadow-[0_0_50px_rgba(255,255,255,0.14)]"
 : "border-white/12 bg-white/[0.07]"
 }`}
 style={{
@@ -773,7 +788,7 @@ marginLeft: slot.x,
 marginTop: slot.y,
 }}
 animate={{
-scale: focused ? [1, 1.06, 1] : [1, 1.015, 1],
+scale: focused ? [1, 1.05, 1] : [1, 1.015, 1],
 opacity: orb.transmitting ? [0.75, 1, 0.75] : 1,
 }}
 transition={{
@@ -783,9 +798,7 @@ ease: "easeInOut",
 }}
 onClick={onClick}
 >
-<div className="flex flex-col items-center justify-center">
 <Icon className="h-4 w-4" />
-</div>
 </motion.button>
 );
 }
@@ -795,16 +808,16 @@ const slot = findSlot(orb.slotId);
 
 return (
 <motion.div
-className="absolute left-1/2 top-1/2 z-9 rounded-full border border-white/25"
+className="absolute left-1/2 top-1/2 z-9 rounded-full border border-white/22"
 style={{
-width: orb.size + 16,
-height: orb.size + 16,
-marginLeft: slot.x - (orb.size + 16) / 2,
-marginTop: slot.y - (orb.size + 16) / 2,
+width: orb.size + 18,
+height: orb.size + 18,
+marginLeft: slot.x - (orb.size + 18) / 2,
+marginTop: slot.y - (orb.size + 18) / 2,
 }}
 animate={{
 scale: [1, 1.08, 1],
-opacity: [0.28, 0.82, 0.28],
+opacity: [0.22, 0.7, 0.22],
 }}
 transition={{
 duration: 1.8,
@@ -815,7 +828,7 @@ ease: "easeInOut",
 );
 }
 
-function ActionNode({
+function ActionOrb({
 label,
 cost,
 x,
@@ -832,46 +845,26 @@ onClick: () => void;
 }) {
 return (
 <motion.button
-className={`absolute left-1/2 top-1/2 z-20 flex h-20 w-20 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border backdrop-blur-xl ${
+className={`absolute left-1/2 top-1/2 z-20 flex h-24 w-24 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border backdrop-blur-xl ${
 enabled
-? "border-white/18 bg-white/[0.08] text-white"
-: "border-white/10 bg-white/[0.03] text-white/35"
+? "border-white/14 bg-white/[0.06] text-white"
+: "border-white/8 bg-white/[0.02] text-white/30"
 }`}
 style={{ marginLeft: x, marginTop: y }}
 animate={{
-scale: enabled ? [1, 1.035, 1] : 1,
-opacity: enabled ? [0.86, 1, 0.86] : 0.62,
+scale: enabled ? [1, 1.03, 1] : 1,
+opacity: enabled ? [0.82, 1, 0.82] : 0.45,
 }}
 transition={{
-duration: 2.2,
+duration: 2.4,
 repeat: Infinity,
 ease: "easeInOut",
 }}
 onClick={onClick}
 disabled={!enabled}
 >
-<span className="text-[10px] uppercase tracking-[0.18em]">{label}</span>
-<span className="mt-1 text-sm font-semibold">{cost}</span>
+<span className="text-[11px] uppercase tracking-[0.18em]">{label}</span>
+<span className="mt-1 text-xl font-semibold">{cost}</span>
 </motion.button>
-);
-}
-
-function DrawerCard({
-title,
-value,
-body,
-}: {
-title: string;
-value: string;
-body: React.ReactNode;
-}) {
-return (
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/40">
-{title}
-</div>
-<div className="mt-1 text-base font-semibold text-white/90">{value}</div>
-{body}
-</div>
 );
 }
