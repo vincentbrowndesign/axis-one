@@ -2,7 +2,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { CircleDot, Send, Sparkles, RotateCcw, Play } from "lucide-react";
+import { CircleDot, Send, Sparkles, RotateCcw } from "lucide-react";
 
 type LiveState = "OFF" | "LIVE";
 type Sensitivity = "Low" | "Medium" | "High" | "Raw";
@@ -38,6 +38,9 @@ type: OrbType;
 level: number;
 size: number;
 transmitting: boolean;
+integrity: number;
+capacity: number;
+load: number;
 };
 
 type Pattern = {
@@ -45,17 +48,18 @@ name: string;
 bonus: number;
 };
 
-const CHARGE_KEY = "axis_pyron_charge_v5";
-const LIVE_KEY = "axis_pyron_live_v5";
-const ENERGY_KEY = "axis_pyron_energy_v5";
-const SENSITIVITY_KEY = "axis_pyron_sensitivity_v5";
-const ORBS_KEY = "axis_pyron_orbs_v5";
-const FOCUS_KEY = "axis_pyron_focus_v5";
-const MODE_KEY = "axis_pyron_mode_v5";
-const WINDOWS_KEY = "axis_pyron_windows_v5";
-const TRANSITIONS_KEY = "axis_pyron_transitions_v5";
-const SESSION_CHARGE_KEY = "axis_pyron_session_charge_v5";
-const ELAPSED_KEY = "axis_pyron_elapsed_v5";
+const CHARGE_KEY = "axis_pyron_charge_v6";
+const LIVE_KEY = "axis_pyron_live_v6";
+const ENERGY_KEY = "axis_pyron_energy_v6";
+const SENSITIVITY_KEY = "axis_pyron_sensitivity_v6";
+const ORBS_KEY = "axis_pyron_orbs_v6";
+const FOCUS_KEY = "axis_pyron_focus_v6";
+const MODE_KEY = "axis_pyron_mode_v6";
+const WINDOWS_KEY = "axis_pyron_windows_v6";
+const TRANSITIONS_KEY = "axis_pyron_transitions_v6";
+const SESSION_CHARGE_KEY = "axis_pyron_session_charge_v6";
+const ELAPSED_KEY = "axis_pyron_elapsed_v6";
+const SCORE_KEY = "axis_pyron_score_v6";
 
 const FORM_COST = 45;
 const SCALE_COST = 60;
@@ -92,6 +96,8 @@ const SLOT_ORDER: SlotId[] = [
 "sw2",
 ];
 
+const INNER_RING: SlotId[] = ["n", "ne", "se", "s", "sw", "nw"];
+
 function getStage(charge: number): Stage {
 if (charge < 50) return "Seed";
 if (charge < 150) return "Core";
@@ -124,10 +130,10 @@ return SLOT_ORDER;
 }
 
 function getEnergyMultiplier(value: Sensitivity) {
-if (value === "Low") return 0.4;
-if (value === "Medium") return 0.75;
+if (value === "Low") return 0.42;
+if (value === "Medium") return 0.76;
 if (value === "High") return 1;
-return 1.35;
+return 1.34;
 }
 
 function getOrbIcon(type: OrbType) {
@@ -151,6 +157,9 @@ type: "form",
 level: 1,
 size: 52,
 transmitting: false,
+integrity: 100,
+capacity: 120,
+load: 18,
 },
 {
 id: "orb-sw",
@@ -159,6 +168,9 @@ type: "scale",
 level: 1,
 size: 52,
 transmitting: false,
+integrity: 100,
+capacity: 120,
+load: 16,
 },
 {
 id: "orb-se",
@@ -167,6 +179,9 @@ type: "transmit",
 level: 1,
 size: 52,
 transmitting: false,
+integrity: 100,
+capacity: 120,
+load: 20,
 },
 ];
 }
@@ -221,10 +236,7 @@ return { name: "Chain", bonus: 18 };
 }
 }
 
-const hubCount = ["n", "ne", "se", "s", "sw", "nw"].filter((id) =>
-occupied.has(id as SlotId)
-).length;
-
+const hubCount = INNER_RING.filter((id) => occupied.has(id)).length;
 if (hubCount >= 4) {
 return { name: "Hub", bonus: 20 };
 }
@@ -238,9 +250,12 @@ const secs = totalSeconds % 60;
 return `${mins}m ${secs}s`;
 }
 
-function getStateRead(energy: number, transitions: number) {
+function getStateRead(energy: number, transitions: number, integrityAvg: number) {
+if (integrityAvg < 38) {
+return { form: "Breaking", signal: "Chaotic", energy: "Critical" };
+}
 if (energy < 22) {
-return { form: "In Control", signal: "Clean", energy: "Off" };
+return { form: "In Control", signal: "Clean", energy: "Low" };
 }
 if (energy < 48) {
 return { form: "Searching", signal: "Reactive", energy: "On" };
@@ -249,6 +264,71 @@ if (transitions > 18 || energy > 72) {
 return { form: "Out of Control", signal: "Chaotic", energy: "High" };
 }
 return { form: "In Rhythm", signal: "Reactive", energy: "On" };
+}
+
+function getNeighbors(slotId: SlotId): SlotId[] {
+const neighborMap: Record<SlotId, SlotId[]> = {
+n: ["ne", "nw", "n2"],
+ne: ["n", "se", "e2"],
+se: ["ne", "s", "e2"],
+s: ["se", "sw", "s2"],
+sw: ["s", "nw", "w2"],
+nw: ["n", "sw", "w2"],
+n2: ["n", "ne2", "w2"],
+e2: ["ne", "se", "n2", "s2"],
+s2: ["s", "sw2", "e2"],
+w2: ["nw", "sw", "n2", "s2"],
+ne2: ["n2", "e2", "ne"],
+sw2: ["s2", "w2", "sw"],
+};
+return neighborMap[slotId] ?? [];
+}
+
+function computeLoadDistribution(orbs: Orb[], liveEnergy: number, elapsedSeconds: number) {
+const orbMap = new Map(orbs.map((o) => [o.slotId, o]));
+const timePressure = 6 + Math.min(28, elapsedSeconds * 0.15);
+const next = orbs.map((orb) => {
+const neighbors = getNeighbors(orb.slotId)
+.map((id) => orbMap.get(id))
+.filter(Boolean) as Orb[];
+
+const neighborTransfer =
+neighbors.reduce((sum, n) => sum + n.level * 3 + n.load * 0.08, 0) /
+Math.max(1, neighbors.length);
+
+const typeBias =
+orb.type === "transmit" ? 18 : orb.type === "scale" ? 12 : 8;
+
+const liveBias = liveEnergy * 0.34;
+const load = Math.max(
+0,
+Math.round(typeBias + liveBias + neighborTransfer + timePressure)
+);
+
+return { ...orb, load };
+});
+
+return next;
+}
+
+function applyDecay(orbs: Orb[], elapsedSeconds: number, liveEnergy: number, pattern: Pattern | null) {
+const timeDecay = 0.7 + Math.min(2.4, elapsedSeconds / 90);
+const patternShield = pattern ? pattern.bonus * 0.05 : 0;
+return orbs
+.map((orb) => {
+const overload = Math.max(0, orb.load - orb.capacity);
+const overloadPenalty = overload * 0.18;
+const energyPenalty = liveEnergy > 78 ? 1.2 : 0;
+const integrityLoss = timeDecay + overloadPenalty + energyPenalty - patternShield;
+
+const nextIntegrity = Math.max(0, orb.integrity - integrityLoss);
+
+return {
+...orb,
+integrity: Number(nextIntegrity.toFixed(1)),
+};
+})
+.filter((orb) => orb.integrity > 0);
 }
 
 export default function PyronClient() {
@@ -264,6 +344,7 @@ const [windowsCount, setWindowsCount] = useState(0);
 const [transitions, setTransitions] = useState(0);
 const [sessionCharge, setSessionCharge] = useState(0);
 const [elapsedSeconds, setElapsedSeconds] = useState(0);
+const [score, setScore] = useState(0);
 
 const prevEnergyRef = useRef(18);
 
@@ -289,6 +370,7 @@ const savedSessionCharge = Number(
 window.localStorage.getItem(SESSION_CHARGE_KEY) ?? 0
 );
 const savedElapsed = Number(window.localStorage.getItem(ELAPSED_KEY) ?? 0);
+const savedScore = Number(window.localStorage.getItem(SCORE_KEY) ?? 0);
 
 if (!Number.isNaN(savedCharge)) setCharge(savedCharge);
 if (savedLive === "LIVE" || savedLive === "OFF") setLiveState(savedLive);
@@ -311,6 +393,7 @@ if (!Number.isNaN(savedWindows)) setWindowsCount(savedWindows);
 if (!Number.isNaN(savedTransitions)) setTransitions(savedTransitions);
 if (!Number.isNaN(savedSessionCharge)) setSessionCharge(savedSessionCharge);
 if (!Number.isNaN(savedElapsed)) setElapsedSeconds(savedElapsed);
+if (!Number.isNaN(savedScore)) setScore(savedScore);
 }, []);
 
 useEffect(() => {
@@ -326,6 +409,7 @@ window.localStorage.setItem(WINDOWS_KEY, String(windowsCount));
 window.localStorage.setItem(TRANSITIONS_KEY, String(transitions));
 window.localStorage.setItem(SESSION_CHARGE_KEY, String(sessionCharge));
 window.localStorage.setItem(ELAPSED_KEY, String(elapsedSeconds));
+window.localStorage.setItem(SCORE_KEY, String(score));
 }, [
 charge,
 liveState,
@@ -338,7 +422,11 @@ windowsCount,
 transitions,
 sessionCharge,
 elapsedSeconds,
+score,
 ]);
+
+const unlockedSlots = useMemo(() => getUnlockedSlotIds(charge), [charge]);
+const pattern = useMemo(() => detectPattern(orbs), [orbs]);
 
 useEffect(() => {
 if (liveState !== "LIVE") return;
@@ -366,6 +454,7 @@ Math.round((nextEnergy / 26) * getEnergyMultiplier(sensitivity))
 if (gain > 0) {
 setCharge((prev) => prev + gain);
 setSessionCharge((prev) => prev + gain);
+setScore((prev) => prev + gain);
 }
 
 if (delta > 10) {
@@ -385,10 +474,35 @@ if (liveState !== "LIVE") return;
 
 const timer = window.setInterval(() => {
 setElapsedSeconds((prev) => prev + 1);
+setScore((prev) => prev + 1);
 }, 1000);
 
 return () => window.clearInterval(timer);
 }, [liveState]);
+
+useEffect(() => {
+if (liveState !== "LIVE") return;
+
+const decayTimer = window.setInterval(() => {
+setOrbs((prev) => {
+if (prev.length === 0) return prev;
+const distributed = computeLoadDistribution(prev, liveEnergy, elapsedSeconds);
+const next = applyDecay(distributed, elapsedSeconds, liveEnergy, pattern);
+
+if (next.length < prev.length) {
+setMessage("A structure collapsed under load.");
+const remainingIds = new Set(next.map((o) => o.id));
+if (focusedOrbId && !remainingIds.has(focusedOrbId)) {
+setFocusedOrbId(next[0]?.id ?? null);
+}
+}
+
+return next;
+});
+}, 1800);
+
+return () => window.clearInterval(decayTimer);
+}, [liveState, liveEnergy, elapsedSeconds, pattern, focusedOrbId]);
 
 const stage = useMemo(() => getStage(charge), [charge]);
 const nextThreshold = useMemo(() => getNextThreshold(stage), [stage]);
@@ -399,15 +513,19 @@ if (span <= 0) return 100;
 return Math.max(0, Math.min(100, ((charge - stageMin) / span) * 100));
 }, [charge, nextThreshold, stageMin]);
 
-const unlockedSlots = useMemo(() => getUnlockedSlotIds(charge), [charge]);
 const focusedOrb = useMemo(
 () => orbs.find((orb) => orb.id === focusedOrbId) ?? null,
 [orbs, focusedOrbId]
 );
-const pattern = useMemo(() => detectPattern(orbs), [orbs]);
+
+const integrityAvg = useMemo(() => {
+if (orbs.length === 0) return 0;
+return orbs.reduce((sum, orb) => sum + orb.integrity, 0) / orbs.length;
+}, [orbs]);
+
 const stateRead = useMemo(
-() => getStateRead(liveEnergy, transitions),
-[liveEnergy, transitions]
+() => getStateRead(liveEnergy, transitions, integrityAvg),
+[liveEnergy, transitions, integrityAvg]
 );
 
 function toggleLive() {
@@ -431,6 +549,7 @@ setWindowsCount(0);
 setTransitions(0);
 setSessionCharge(0);
 setElapsedSeconds(0);
+setScore(0);
 setMessage("System reset.");
 }
 
@@ -453,6 +572,9 @@ type: "form",
 level: 1,
 size: 52,
 transmitting: false,
+integrity: 100,
+capacity: 120,
+load: 0,
 };
 
 setCharge((prev) => prev - FORM_COST);
@@ -480,12 +602,14 @@ orb.id === focusedOrb.id
 ...orb,
 type: "scale",
 level: orb.level + 1,
-size: Math.min(90, orb.size + 10),
+size: Math.min(92, orb.size + 10),
+integrity: Math.min(100, orb.integrity + 18),
+capacity: orb.capacity + 35,
 }
 : orb
 )
 );
-setMessage("Focused structure scaled.");
+setMessage("Focused structure scaled and reinforced.");
 }
 
 function runTransmit() {
@@ -502,10 +626,16 @@ setCharge((prev) => prev - TRANSMIT_COST);
 setOrbs((prev) =>
 prev.map((orb) =>
 orb.id === focusedOrb.id
-? { ...orb, type: "transmit", transmitting: true }
+? {
+...orb,
+type: "transmit",
+transmitting: true,
+integrity: Math.min(100, orb.integrity + 10),
+}
 : orb
 )
 );
+setScore((prev) => prev + 40);
 setMessage("Focused structure transmitted.");
 
 window.setTimeout(() => {
@@ -539,6 +669,14 @@ liveState === "LIVE"
 {liveState}
 </button>
 
+<button
+onClick={resetSystem}
+className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-2 text-white/70"
+aria-label="Reset"
+>
+<RotateCcw className="h-4 w-4" />
+</button>
+
 <div className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm tracking-[0.2em] text-white/60">
 {stage}
 </div>
@@ -560,13 +698,6 @@ onClick={() => setMode((m) => (m === "ambient" ? "place" : "ambient"))}
 className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
 >
 {mode === "ambient" ? "Build" : "Hide Grid"}
-</button>
-
-<button
-onClick={resetSystem}
-className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
->
-Reset
 </button>
 </div>
 
@@ -699,12 +830,18 @@ setMode("ambient");
 })}
 
 <motion.div
-className="absolute left-1/2 top-1/2 z-20 h-48 w-48 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_90px_rgba(255,255,255,0.10)] backdrop-blur-xl"
+className="absolute left-1/2 top-1/2 z-20 h-52 w-52 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_120px_rgba(255,255,255,0.12)] backdrop-blur-xl"
 animate={{
-y: liveState === "LIVE" ? [0, -8, 0, 6, 0] : [0, -2, 0],
-x: liveState === "LIVE" ? [0, 4, 0, -4, 0] : [0, 1, 0],
-scale: liveState === "LIVE" ? [1, 1.03, 1] : 1,
-opacity: liveState === "LIVE" ? [0.9, 1, 0.9] : 0.8,
+y: liveState === "LIVE" ? [0, -10, 0, 7, 0] : [0, -2, 0],
+x: liveState === "LIVE" ? [0, 5, 0, -5, 0] : [0, 1, 0],
+scale:
+liveState === "LIVE"
+? [1, 1 + Math.min(0.05, liveEnergy / 2200), 1]
+: 1,
+opacity:
+liveState === "LIVE"
+? [0.9, Math.min(1, 0.86 + liveEnergy / 180), 0.9]
+: 0.8,
 }}
 transition={{
 duration: liveState === "LIVE" ? 7.5 : 5,
@@ -712,12 +849,19 @@ repeat: Infinity,
 ease: "easeInOut",
 }}
 >
-<div className="pt-10 text-[10px] uppercase tracking-[0.3em] text-white/40">
+<div className="pt-11 text-[10px] uppercase tracking-[0.3em] text-white/40">
 Pyron
 </div>
 <div className="mt-3 text-3xl font-semibold">{liveState}</div>
 <div className="mt-1 text-base text-white/65">
 {Math.round(liveEnergy)} energy
+</div>
+
+<div className="mx-auto mt-3 h-2 w-28 overflow-hidden rounded-full bg-white/10">
+<div
+className="h-full bg-white/70"
+style={{ width: `${Math.max(0, Math.min(100, integrityAvg))}%` }}
+/>
 </div>
 
 {pattern && (
@@ -733,23 +877,23 @@ Pyron
 label="Form"
 cost={FORM_COST}
 x={0}
-y={-220}
+y={-226}
 enabled={canForm}
 onClick={runForm}
 />
 <ActionOrb
 label="Scale"
 cost={SCALE_COST}
-x={-195}
-y={160}
+x={-198}
+y={164}
 enabled={canScale}
 onClick={runScale}
 />
 <ActionOrb
 label="Transmit"
 cost={TRANSMIT_COST}
-x={195}
-y={160}
+x={198}
+y={164}
 enabled={canTransmit}
 onClick={runTransmit}
 />
@@ -758,27 +902,37 @@ onClick={runTransmit}
 <motion.div
 className="absolute left-1/2 top-1/2 z-15 rounded-full border border-white/20"
 style={{
-width: 200,
-height: 200,
+width: 220,
+height: 220,
 transform: "translate(-50%, -50%)",
 }}
-animate={{ scale: [1, 3.2, 4.1], opacity: [0.75, 0.18, 0] }}
+animate={{ scale: [1, 3.2, 4.2], opacity: [0.75, 0.18, 0] }}
 transition={{ duration: 1.1, ease: "easeOut" }}
 />
 )}
 </div>
 
 <div className="relative z-10 border-t border-white/10 px-4 py-4">
-<div className="grid gap-3 md:grid-cols-4">
+<div className="grid gap-3 md:grid-cols-5">
 <MiniStat label="Form" value={stateRead.form} />
 <MiniStat label="Signal" value={stateRead.signal} />
 <MiniStat label="Energy" value={stateRead.energy} />
 <MiniStat label="Time" value={formatTime(elapsedSeconds)} />
+<MiniStat label="Score" value={String(score)} />
 <MiniStat label="Transitions" value={String(transitions)} />
 <MiniStat label="Windows" value={String(windowsCount)} />
 <MiniStat label="Session Charge" value={`+${sessionCharge}`} />
+<MiniStat label="Integrity" value={`${Math.round(integrityAvg)}`} />
 <MiniStat label="Bank" value={`${charge}/${nextThreshold}`} />
 </div>
+
+{focusedOrb && (
+<div className="mt-4 grid gap-3 md:grid-cols-3">
+<MiniStat label="Focus" value={getOrbLabel(focusedOrb.type)} />
+<MiniStat label="Load" value={`${Math.round(focusedOrb.load)}/${focusedOrb.capacity}`} />
+<MiniStat label="Integrity" value={`${Math.round(focusedOrb.integrity)}%`} />
+</div>
+)}
 
 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
 <div className="text-sm text-white/68">{message}</div>
@@ -839,6 +993,9 @@ onClick: () => void;
 }) {
 const Icon = getOrbIcon(orb.type);
 
+const integrityOpacity =
+orb.integrity > 70 ? 1 : orb.integrity > 40 ? 0.78 : 0.5;
+
 return (
 <motion.button
 className={`absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-white backdrop-blur-xl ${
@@ -851,10 +1008,16 @@ width: orb.size,
 height: orb.size,
 marginLeft: slot.x,
 marginTop: slot.y,
+opacity: integrityOpacity,
 }}
 animate={{
 scale: focused ? [1, 1.05, 1] : [1, 1.015, 1],
-opacity: orb.transmitting ? [0.75, 1, 0.75] : 1,
+opacity:
+orb.integrity < 40
+? [integrityOpacity, integrityOpacity * 0.65, integrityOpacity]
+: orb.transmitting
+? [integrityOpacity * 0.75, integrityOpacity, integrityOpacity * 0.75]
+: integrityOpacity,
 }}
 transition={{
 duration: focused ? 1.8 : 3.6,
