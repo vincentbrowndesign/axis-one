@@ -18,7 +18,6 @@ phase: number;
 export default function PyronField() {
 const pointsRef = useRef<THREE.Points>(null);
 const energyRef = useSensor();
-
 const noise3D = useMemo(() => createNoise3D(), []);
 
 const particles = useMemo<ParticleData[]>(() => {
@@ -68,26 +67,21 @@ const centerPull = p
 .clone()
 .multiplyScalar(-1)
 .normalize()
-.multiplyScalar(0.00045);
+.multiplyScalar(0.00045 + energy * 0.00015);
 v.add(centerPull);
 
-const n = noise3D(
-p.x * 0.25 + time * 0.2,
-p.y * 0.25,
-p.z * 0.25
-);
+const n = noise3D(p.x * 0.25 + time * 0.2, p.y * 0.25, p.z * 0.25);
 
 const flow = new THREE.Vector3(
 Math.sin(n * Math.PI * 2),
 Math.cos(n * Math.PI * 2),
 Math.sin(n * Math.PI * 1.3)
 ).multiplyScalar(0.0006 + energy * 0.0005);
-
 v.add(flow);
 
 const swirl = new THREE.Vector3(-p.z, 0, p.x)
 .normalize()
-.multiplyScalar(0.0004);
+.multiplyScalar(0.0004 + energy * 0.0002);
 v.add(swirl);
 
 v.y += Math.sin(time * 0.9 + particle.phase) * 0.00025;
