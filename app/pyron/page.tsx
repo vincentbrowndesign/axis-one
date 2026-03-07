@@ -1,5 +1,11 @@
-import PyronClient from "./pyron-client";
+"use client";
 
-export default function Page() {
-return <PyronClient />;
+import PyronScene from "../../components/pyron/PyronScene";
+
+export default function PyronPage() {
+return (
+<div style={{ width: "100vw", height: "100vh", background: "black" }}>
+<PyronScene />
+</div>
+);
 }
