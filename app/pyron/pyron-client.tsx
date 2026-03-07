@@ -3,53 +3,95 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-Activity,
 CircleDot,
 Cpu,
 Orbit,
-Radio,
 Send,
 Sparkles,
-Zap,
+ChevronUp,
+ChevronDown,
 } from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 import { Button } from "@/components/ui/button";
 
-type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
 type LiveState = "OFF" | "LIVE";
+type SlotId =
+| "n"
+| "ne"
+| "e"
+| "se"
+| "s"
+| "sw"
+| "w"
+| "nw"
+| "n2"
+| "e2"
+| "s2"
+| "w2";
 type OrbType = "form" | "scale" | "transmit";
-type SensitivityLabel = "Low" | "Medium" | "High" | "Raw";
+type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
 
 type Orb = {
 id: string;
+slotId: SlotId;
 type: OrbType;
-x: number;
-y: number;
-ring: number;
-size: number;
 level: number;
+size: number;
 transmitting: boolean;
 };
 
-type GraphPattern = {
+type Slot = {
+id: SlotId;
+x: number;
+y: number;
+ring: 1 | 2;
+};
+
+type Pattern = {
 name: string;
-description: string;
 bonus: number;
 };
 
-const CHARGE_KEY = "axis_charge_v2";
-const CYCLE_KEY = "axis_cycle_v2";
-const LIVE_KEY = "axis_live_v2";
-const SENSITIVITY_KEY = "axis_sensitivity_v2";
-const ENERGY_KEY = "axis_live_energy_v2";
-const ORBS_KEY = "axis_pyron_orbs_v2";
-const FOCUSED_ORB_KEY = "axis_focused_orb_v2";
+const CHARGE_KEY = "axis_pyron_charge_v3";
+const LIVE_KEY = "axis_pyron_live_v3";
+const ENERGY_KEY = "axis_pyron_energy_v3";
+const SENSITIVITY_KEY = "axis_pyron_sensitivity_v3";
+const ORBS_KEY = "axis_pyron_orbs_v3";
+const FOCUS_KEY = "axis_pyron_focus_v3";
+const DRAWER_KEY = "axis_pyron_drawer_v3";
 
 const FORM_COST = 45;
 const SCALE_COST = 60;
 const TRANSMIT_COST = 100;
+
+const SLOTS: Slot[] = [
+{ id: "n", x: 0, y: -108, ring: 1 },
+{ id: "ne", x: 76, y: -76, ring: 1 },
+{ id: "e", x: 108, y: 0, ring: 1 },
+{ id: "se", x: 76, y: 76, ring: 1 },
+{ id: "s", x: 0, y: 108, ring: 1 },
+{ id: "sw", x: -76, y: 76, ring: 1 },
+{ id: "w", x: -108, y: 0, ring: 1 },
+{ id: "nw", x: -76, y: -76, ring: 1 },
+{ id: "n2", x: 0, y: -180, ring: 2 },
+{ id: "e2", x: 180, y: 0, ring: 2 },
+{ id: "s2", x: 0, y: 180, ring: 2 },
+{ id: "w2", x: -180, y: 0, ring: 2 },
+];
+
+const SLOT_ORDER: SlotId[] = [
+"n",
+"ne",
+"e",
+"se",
+"s",
+"sw",
+"w",
+"nw",
+"n2",
+"e2",
+"s2",
+"w2",
+];
 
 function getStage(charge: number): Stage {
 if (charge < 50) return "Seed";
@@ -75,26 +117,25 @@ if (stage === "Nova") return 400;
 return 1000;
 }
 
-function getCapacity(cycle: number): number {
-if (cycle <= 1) return 2;
-if (cycle === 2) return 4;
-if (cycle === 3) return 6;
-if (cycle === 4) return 8;
-return 12;
-}
-
-function getSensitivityLabel(value: number): SensitivityLabel {
+function getSensitivityLabel(value: number) {
 if (value <= 25) return "Low";
 if (value <= 50) return "Medium";
 if (value <= 75) return "High";
 return "Raw";
 }
 
-function getEnergyGainMultiplier(value: number): number {
+function getEnergyMultiplier(value: number) {
 if (value <= 25) return 0.35;
 if (value <= 50) return 0.7;
 if (value <= 75) return 1;
 return 1.35;
+}
+
+function getUnlockedSlotIds(charge: number): SlotId[] {
+if (charge < 50) return ["n", "e", "w"];
+if (charge < 150) return ["n", "ne", "e", "s", "sw", "w"];
+if (charge < 400) return ["n", "ne", "e", "se", "s", "sw", "w", "nw"];
+return SLOT_ORDER;
 }
 
 function getOrbIcon(type: OrbType) {
@@ -109,195 +150,164 @@ if (type === "scale") return "Scale";
 return "Transmit";
 }
 
-function getOrbClass(type: OrbType, focused: boolean, transmitting: boolean) {
-const base =
-"border-white/15 text-white backdrop-blur-xl transition duration-300";
-const focusedClass = focused
-? "bg-white/16 shadow-[0_0_50px_rgba(255,255,255,0.24)]"
-: "bg-white/8";
-
-const transmitClass = transmitting
-? "shadow-[0_0_60px_rgba(255,255,255,0.24)]"
-: "";
-
-if (type === "form") return `${base} ${focusedClass} ${transmitClass}`;
-if (type === "scale") return `${base} ${focusedClass} ${transmitClass}`;
-return `${base} ${focusedClass} ${transmitClass}`;
-}
-
-function defaultOrbs(): Orb[] {
+function getDefaultOrbs(): Orb[] {
 return [
 {
-id: "orb-1",
+id: "orb-n",
+slotId: "n",
 type: "form",
-x: 0,
-y: -118,
-ring: 1,
-size: 58,
 level: 1,
+size: 48,
 transmitting: false,
 },
 {
-id: "orb-2",
+id: "orb-e",
+slotId: "e",
 type: "scale",
-x: 102,
-y: 58,
-ring: 1,
-size: 58,
 level: 1,
+size: 48,
 transmitting: false,
 },
 {
-id: "orb-3",
+id: "orb-w",
+slotId: "w",
 type: "transmit",
-x: -102,
-y: 58,
-ring: 1,
-size: 58,
 level: 1,
+size: 48,
 transmitting: false,
 },
 ];
 }
 
 function safeParseOrbs(raw: string | null): Orb[] {
-if (!raw) return defaultOrbs();
+if (!raw) return getDefaultOrbs();
 try {
 const parsed = JSON.parse(raw) as Orb[];
-if (!Array.isArray(parsed) || parsed.length === 0) return defaultOrbs();
+if (!Array.isArray(parsed) || parsed.length === 0) return getDefaultOrbs();
 return parsed;
 } catch {
-return defaultOrbs();
+return getDefaultOrbs();
 }
 }
 
-function computeGraphPattern(orbs: Orb[]): GraphPattern | null {
-if (orbs.length < 3) return null;
-
-const levels = orbs.map((o) => o.level);
-const maxLevel = Math.max(...levels);
-
-if (orbs.length >= 3 && orbs.length <= 4) {
-return {
-name: "Triangle",
-description: "Three-point structure creates a stable geometry.",
-bonus: 12,
-};
+function getFirstEmptySlot(orbs: Orb[], unlocked: SlotId[]): SlotId | null {
+const used = new Set(orbs.map((o) => o.slotId));
+for (const slotId of SLOT_ORDER) {
+if (unlocked.includes(slotId) && !used.has(slotId)) return slotId;
+}
+return null;
 }
 
-if (orbs.length >= 5 && maxLevel >= 2) {
-return {
-name: "Hub",
-description: "Scaled center influence improves field coherence.",
-bonus: 20,
-};
+function findSlot(slotId: SlotId) {
+return SLOTS.find((s) => s.id === slotId)!;
 }
 
-if (orbs.some((o) => o.transmitting) && orbs.length >= 4) {
-return {
-name: "Chain",
-description: "Transmission path increases network output.",
-bonus: 18,
-};
+function hasOrb(orbs: Orb[], slotId: SlotId) {
+return orbs.some((o) => o.slotId === slotId);
+}
+
+function detectPattern(orbs: Orb[]): Pattern | null {
+const occupied = new Set(orbs.map((o) => o.slotId));
+
+const triangleSets: SlotId[][] = [
+["n", "e", "w"],
+["n", "se", "sw"],
+["s", "ne", "nw"],
+["e", "nw", "sw"],
+["w", "ne", "se"],
+];
+
+for (const set of triangleSets) {
+if (set.every((id) => occupied.has(id))) {
+return { name: "Triangle", bonus: 12 };
+}
+}
+
+const chainSets: SlotId[][] = [
+["n2", "n", "s", "s2"],
+["w2", "w", "e", "e2"],
+["nw", "n", "ne", "e"],
+["sw", "s", "se", "e"],
+];
+
+for (const set of chainSets) {
+if (set.every((id) => occupied.has(id))) {
+return { name: "Chain", bonus: 18 };
+}
+}
+
+const hubCount = ["n", "e", "s", "w"].filter((id) =>
+occupied.has(id as SlotId)
+).length;
+
+if (hubCount >= 3) {
+return { name: "Hub", bonus: 20 };
 }
 
 return null;
 }
 
-function computeFieldState(
-charge: number,
-cycle: number,
-liveEnergy: number,
-orbCount: number,
-focusedOrb: Orb | undefined
-) {
-const coherence = Math.min(
-100,
-Math.round(38 + cycle * 8 + orbCount * 4 + liveEnergy * 0.22)
-);
-const instability = Math.max(
-6,
-Math.round(44 - cycle * 4 + (focusedOrb ? 0 : 6) + liveEnergy * 0.08)
-);
-const resonance = Math.min(
-100,
-Math.round(30 + cycle * 10 + charge * 0.03 + liveEnergy * 0.25)
-);
+function createAxisLinePath(width: number, height: number, energy: number, live: boolean) {
+const points = 28;
+const amp = live ? 10 + energy * 0.45 : 4;
+const centerY = height / 2;
+const step = width / (points - 1);
 
-return { coherence, instability, resonance };
+let d = `M 0 ${centerY}`;
+
+for (let i = 1; i < points; i++) {
+const x = i * step;
+const y =
+centerY +
+Math.sin(i * 0.62) * amp * 0.7 +
+Math.cos(i * 0.25) * amp * 0.35 +
+Math.sin(i * 1.1) * amp * 0.18;
+d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
 }
 
-function positionForNewOrb(index: number): { x: number; y: number; ring: number } {
-const ringIndex = Math.floor(index / 4) + 1;
-const slot = index % 4;
-const radius = 118 + (ringIndex - 1) * 78;
-const angles = [-90, 0, 90, 180];
-const angle = (angles[slot] * Math.PI) / 180;
-return {
-x: Math.cos(angle) * radius,
-y: Math.sin(angle) * radius,
-ring: ringIndex,
-};
-}
-
-function makeNewOrb(index: number): Orb {
-const typeCycle: OrbType[] = ["form", "scale", "transmit"];
-const pos = positionForNewOrb(index);
-
-return {
-id: `orb-${Date.now()}-${index}`,
-type: typeCycle[index % typeCycle.length],
-x: pos.x,
-y: pos.y,
-ring: pos.ring,
-size: 54,
-level: 1,
-transmitting: false,
-};
+return d;
 }
 
 export default function PyronClient() {
-const [charge, setCharge] = useState<number>(149);
-const [cycle, setCycle] = useState<number>(2);
+const [charge, setCharge] = useState(149);
 const [liveState, setLiveState] = useState<LiveState>("OFF");
-const [sensitivity, setSensitivity] = useState<number>(50);
-const [liveEnergy, setLiveEnergy] = useState<number>(18);
-const [orbs, setOrbs] = useState<Orb[]>(defaultOrbs());
-const [focusedOrbId, setFocusedOrbId] = useState<string | null>("orb-1");
-const [message, setMessage] = useState<string>("Focus a structure and shape the field.");
+const [liveEnergy, setLiveEnergy] = useState(18);
+const [sensitivity, setSensitivity] = useState(50);
+const [orbs, setOrbs] = useState<Orb[]>(getDefaultOrbs());
+const [focusedOrbId, setFocusedOrbId] = useState<string | null>("orb-n");
+const [drawerOpen, setDrawerOpen] = useState(false);
+const [message, setMessage] = useState("Focus a structure and shape the field.");
 
 useEffect(() => {
 if (typeof window === "undefined") return;
 
 const savedCharge = Number(window.localStorage.getItem(CHARGE_KEY) ?? 149);
-const savedCycle = Number(window.localStorage.getItem(CYCLE_KEY) ?? 2);
 const savedLive = (window.localStorage.getItem(LIVE_KEY) as LiveState | null) ?? "OFF";
-const savedSensitivity = Number(window.localStorage.getItem(SENSITIVITY_KEY) ?? 50);
 const savedEnergy = Number(window.localStorage.getItem(ENERGY_KEY) ?? 18);
+const savedSensitivity = Number(window.localStorage.getItem(SENSITIVITY_KEY) ?? 50);
 const savedOrbs = safeParseOrbs(window.localStorage.getItem(ORBS_KEY));
-const savedFocused = window.localStorage.getItem(FOCUSED_ORB_KEY);
+const savedFocus = window.localStorage.getItem(FOCUS_KEY);
+const savedDrawer = window.localStorage.getItem(DRAWER_KEY) === "1";
 
 if (!Number.isNaN(savedCharge)) setCharge(savedCharge);
-if (!Number.isNaN(savedCycle) && savedCycle > 0) setCycle(savedCycle);
-if (savedLive === "OFF" || savedLive === "LIVE") setLiveState(savedLive);
-if (!Number.isNaN(savedSensitivity)) setSensitivity(savedSensitivity);
+if (savedLive === "LIVE" || savedLive === "OFF") setLiveState(savedLive);
 if (!Number.isNaN(savedEnergy)) setLiveEnergy(savedEnergy);
+if (!Number.isNaN(savedSensitivity)) setSensitivity(savedSensitivity);
 setOrbs(savedOrbs);
-setFocusedOrbId(savedFocused ?? savedOrbs[0]?.id ?? null);
+setFocusedOrbId(savedFocus ?? savedOrbs[0]?.id ?? null);
+setDrawerOpen(savedDrawer);
 }, []);
 
 useEffect(() => {
 if (typeof window === "undefined") return;
 window.localStorage.setItem(CHARGE_KEY, String(charge));
-window.localStorage.setItem(CYCLE_KEY, String(cycle));
 window.localStorage.setItem(LIVE_KEY, liveState);
-window.localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
 window.localStorage.setItem(ENERGY_KEY, String(liveEnergy));
+window.localStorage.setItem(SENSITIVITY_KEY, String(sensitivity));
 window.localStorage.setItem(ORBS_KEY, JSON.stringify(orbs));
-if (focusedOrbId) {
-window.localStorage.setItem(FOCUSED_ORB_KEY, focusedOrbId);
-}
-}, [charge, cycle, liveState, sensitivity, liveEnergy, orbs, focusedOrbId]);
+if (focusedOrbId) window.localStorage.setItem(FOCUS_KEY, focusedOrbId);
+window.localStorage.setItem(DRAWER_KEY, drawerOpen ? "1" : "0");
+}, [charge, liveState, liveEnergy, sensitivity, orbs, focusedOrbId, drawerOpen]);
 
 useEffect(() => {
 if (liveState !== "LIVE") return;
@@ -307,8 +317,7 @@ const nextEnergy = Math.max(
 8,
 Math.min(
 100,
-liveEnergy +
-(Math.random() * 16 - 6) * getEnergyGainMultiplier(sensitivity)
+liveEnergy + (Math.random() * 16 - 6) * getEnergyMultiplier(sensitivity)
 )
 );
 
@@ -316,52 +325,32 @@ setLiveEnergy(Number(nextEnergy.toFixed(1)));
 
 const gain = Math.max(
 0,
-Math.round((nextEnergy / 22) * getEnergyGainMultiplier(sensitivity))
+Math.round((nextEnergy / 25) * getEnergyMultiplier(sensitivity))
 );
 
 if (gain > 0) {
-setCharge((prev) => {
-const updated = prev + gain;
-const prevStage = getStage(prev);
-const nextStage = getStage(updated);
-
-if (prevStage !== nextStage && nextStage !== "Titan") {
-setCycle((c) => c + 1);
-}
-
-return updated;
-});
+setCharge((prev) => prev + gain);
 }
 }, 1400);
 
 return () => window.clearInterval(interval);
-}, [liveState, sensitivity, liveEnergy]);
+}, [liveState, liveEnergy, sensitivity]);
 
 const stage = useMemo(() => getStage(charge), [charge]);
 const nextThreshold = useMemo(() => getNextThreshold(stage), [stage]);
 const stageMin = useMemo(() => getStageMin(stage), [stage]);
-const capacity = useMemo(() => getCapacity(cycle), [cycle]);
-const focusedOrb = useMemo(
-() => orbs.find((orb) => orb.id === focusedOrbId),
-[orbs, focusedOrbId]
-);
-const pattern = useMemo(() => computeGraphPattern(orbs), [orbs]);
-
 const progress = useMemo(() => {
 const span = nextThreshold - stageMin;
 if (span <= 0) return 100;
 return Math.max(0, Math.min(100, ((charge - stageMin) / span) * 100));
 }, [charge, nextThreshold, stageMin]);
 
-const field = useMemo(
-() => computeFieldState(charge, cycle, liveEnergy, orbs.length, focusedOrb),
-[charge, cycle, liveEnergy, orbs.length, focusedOrb]
+const unlockedSlots = useMemo(() => getUnlockedSlotIds(charge), [charge]);
+const focusedOrb = useMemo(
+() => orbs.find((orb) => orb.id === focusedOrbId) ?? null,
+[orbs, focusedOrbId]
 );
-
-const sensitivityLabel = useMemo(
-() => getSensitivityLabel(sensitivity),
-[sensitivity]
-);
+const pattern = useMemo(() => detectPattern(orbs), [orbs]);
 
 function toggleLive() {
 setLiveState((prev) => {
@@ -377,12 +366,21 @@ setMessage("Need more bank to Form.");
 return;
 }
 
-if (orbs.length >= capacity) {
-setMessage("Capacity reached. Scale or Transmit instead.");
+const nextSlot = getFirstEmptySlot(orbs, unlockedSlots);
+if (!nextSlot) {
+setMessage("No open slot. Scale or Transmit.");
 return;
 }
 
-const nextOrb = makeNewOrb(orbs.length);
+const nextOrb: Orb = {
+id: `orb-${nextSlot}-${Date.now()}`,
+slotId: nextSlot,
+type: "form",
+level: 1,
+size: 48,
+transmitting: false,
+};
+
 setCharge((prev) => prev - FORM_COST);
 setOrbs((prev) => [...prev, nextOrb]);
 setFocusedOrbId(nextOrb.id);
@@ -391,10 +389,9 @@ setMessage("New structure formed.");
 
 function runScale() {
 if (!focusedOrb) {
-setMessage("Focus an orb to Scale.");
+setMessage("Focus a structure to Scale.");
 return;
 }
-
 if (charge < SCALE_COST) {
 setMessage("Need more bank to Scale.");
 return;
@@ -406,10 +403,9 @@ prev.map((orb) =>
 orb.id === focusedOrb.id
 ? {
 ...orb,
-size: Math.min(96, orb.size + 10),
+type: "scale",
 level: orb.level + 1,
-x: orb.x * 1.08,
-y: orb.y * 1.08,
+size: Math.min(84, orb.size + 10),
 }
 : orb
 )
@@ -419,10 +415,9 @@ setMessage("Focused structure scaled.");
 
 function runTransmit() {
 if (!focusedOrb) {
-setMessage("Focus an orb to Transmit.");
+setMessage("Focus a structure to Transmit.");
 return;
 }
-
 if (charge < TRANSMIT_COST) {
 setMessage("Need more bank to Transmit.");
 return;
@@ -432,11 +427,11 @@ setCharge((prev) => prev - TRANSMIT_COST);
 setOrbs((prev) =>
 prev.map((orb) =>
 orb.id === focusedOrb.id
-? { ...orb, transmitting: true, type: "transmit" }
+? { ...orb, type: "transmit", transmitting: true }
 : orb
 )
 );
-setMessage("Focused structure transmitted to the grid.");
+setMessage("Focused structure transmitted.");
 
 window.setTimeout(() => {
 setOrbs((prev) =>
@@ -444,154 +439,74 @@ prev.map((orb) =>
 orb.id === focusedOrb.id ? { ...orb, transmitting: false } : orb
 )
 );
-}, 1500);
+}, 1300);
 }
+
+const axisPath = useMemo(
+() => createAxisLinePath(700, 260, liveEnergy, liveState === "LIVE"),
+[liveEnergy, liveState]
+);
+
+const sensitivityLabel = getSensitivityLabel(sensitivity);
 
 return (
 <div className="min-h-screen bg-black text-white">
-<div className="mx-auto max-w-7xl px-4 py-6 md:px-6 lg:px-8">
-<div className="mb-6 grid gap-4 lg:grid-cols-[1.25fr_0.75fr]">
-<Card className="border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-3">
-<div className="flex items-center justify-between gap-4">
-<div>
-<Badge
-variant="secondary"
-className="mb-3 border-white/10 bg-white/10 text-white"
->
-Pyron Graph Engine
-</Badge>
-<CardTitle className="text-2xl md:text-3xl">
-Pyron Live Structure Field
-</CardTitle>
-<p className="mt-2 max-w-2xl text-sm text-white/70">
-Live body signal powers structures. Focus lets you shape them.
-Form creates. Scale expands. Transmit sends them into the grid.
-</p>
-</div>
+<div className="mx-auto max-w-6xl px-4 py-4">
+<div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.03]">
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.12),rgba(255,255,255,0.02)_28%,rgba(0,0,0,0.96)_72%)]" />
 
-<div className="text-right">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-State
-</div>
-<div className="mt-1 flex items-center justify-end gap-2 text-lg font-semibold">
-<span
-className={`inline-block h-2.5 w-2.5 rounded-full ${
-liveState === "LIVE" ? "bg-white" : "bg-white/35"
-}`}
-/>
+<div className="relative z-10 flex items-center justify-between px-4 py-4 sm:px-6">
+<div className="flex items-center gap-3">
+<button
+onClick={toggleLive}
+className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs uppercase tracking-[0.22em] text-white/80"
+>
 {liveState}
-</div>
-</div>
-</div>
-</CardHeader>
+</button>
 
-<CardContent>
-<div className="grid gap-4 md:grid-cols-4">
-<MetricCard
-label="Axis"
-value="Measure"
-sub={`${Math.round(liveEnergy)} live energy`}
-icon={Activity}
-/>
-<MetricCard
-label="Cycle Bank"
-value={`Cycle ${cycle}`}
-sub={`${stage} state`}
-icon={Orbit}
-/>
-<MetricCard
-label="Pyron"
-value={`${orbs.length}/${capacity}`}
-sub="active structures"
-icon={Cpu}
-/>
-<MetricCard
-label="Network"
-value={pattern?.name ?? "Open"}
-sub="graph pattern"
-icon={Radio}
-/>
+<div className="rounded-full border border-white/10 bg-white/[0.06] px-3 py-1.5 text-xs uppercase tracking-[0.22em] text-white/65">
+{stage}
 </div>
-</CardContent>
-</Card>
-
-<Card className="border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-2">
-<CardTitle className="text-lg">Live Controls</CardTitle>
-</CardHeader>
-
-<CardContent className="space-y-5">
-<div className="grid gap-3 sm:grid-cols-2">
-<Button className="rounded-2xl" onClick={toggleLive}>
-{liveState === "LIVE" ? "Set OFF" : "Start LIVE"}
-</Button>
-<Button
-className="rounded-2xl border-white/15 bg-white/10 hover:bg-white/15"
-onClick={() => {
-setCharge(149);
-setCycle(2);
-setLiveEnergy(18);
-setOrbs(defaultOrbs());
-setFocusedOrbId("orb-1");
-setLiveState("OFF");
-setMessage("System reset.");
-}}
->
-Reset System
-</Button>
-</div>
-
-<div>
-<div className="mb-2 flex items-center justify-between text-sm text-white/70">
-<span>Sensitivity</span>
-<span>{sensitivityLabel}</span>
-</div>
-<input
-type="range"
-min={0}
-max={100}
-step={1}
-value={sensitivity}
-onChange={(e) => setSensitivity(Number(e.target.value))}
-className="w-full accent-white"
-/>
-</div>
-
-<div className="grid gap-3">
-<FieldBar label="Coherence" value={field.coherence} />
-<FieldBar label="Instability" value={field.instability} />
-<FieldBar label="Resonance" value={field.resonance} />
-</div>
-</CardContent>
-</Card>
-</div>
-
-<div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-<Card className="overflow-hidden border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-3">
-<div className="flex items-center justify-between gap-4">
-<div>
-<CardTitle className="text-xl">Pyron Core</CardTitle>
-<p className="mt-2 text-sm text-white/65">
-Focus a structure, then shape it with your bank.
-</p>
 </div>
 
 <div className="text-right">
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/45">
 Bank
 </div>
-<div className="mt-1 text-xl font-semibold">{charge}</div>
-<div className="text-sm text-white/55">Next {nextThreshold}</div>
+<div className="text-xl font-semibold">{charge}</div>
 </div>
 </div>
-</CardHeader>
 
-<CardContent>
-<div className="relative mx-auto aspect-square max-w-[720px] overflow-hidden rounded-[2rem] border border-white/10 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.14),rgba(255,255,255,0.03)_28%,rgba(0,0,0,0.9)_72%)]">
-{[1, 2, 3].map((ring) => {
-const size = 250 + (ring - 1) * 150;
+<div className="relative z-10 px-2 pb-2 sm:px-4 sm:pb-4">
+<div className="relative mx-auto aspect-square max-w-[760px] overflow-hidden rounded-[1.75rem]">
+<svg
+viewBox="0 0 700 260"
+className="absolute left-1/2 top-1/2 z-0 h-[52%] w-[92%] -translate-x-1/2 -translate-y-1/2 opacity-30 blur-[0.2px]"
+aria-hidden="true"
+>
+<path
+d={axisPath}
+fill="none"
+stroke="rgba(255,255,255,0.22)"
+strokeWidth="2.2"
+strokeLinecap="round"
+strokeLinejoin="round"
+/>
+<path
+d={axisPath}
+fill="none"
+stroke="rgba(255,255,255,0.08)"
+strokeWidth="10"
+strokeLinecap="round"
+strokeLinejoin="round"
+/>
+</svg>
+
+{[1, 2].map((ring) => {
+const size = ring === 1 ? 280 : 420;
+const unlocked =
+ring === 1 ? unlockedSlots.some((id) => findSlot(id).ring === 1) : unlockedSlots.some((id) => findSlot(id).ring === 2);
+
 return (
 <motion.div
 key={ring}
@@ -602,11 +517,14 @@ height: size,
 transform: "translate(-50%, -50%)",
 }}
 animate={{
-opacity: liveState === "LIVE" ? [0.16, 0.28, 0.16] : 0.1,
+opacity:
+liveState === "LIVE" && unlocked
+? [0.1, 0.22, 0.1]
+: 0.08,
 scale: liveState === "LIVE" ? [1, 1.01, 1] : 1,
 }}
 transition={{
-duration: 3.5 + ring,
+duration: 4 + ring,
 repeat: Infinity,
 ease: "easeInOut",
 }}
@@ -614,139 +532,107 @@ ease: "easeInOut",
 );
 })}
 
-{orbs.map((orb) => {
-const focused = orb.id === focusedOrbId;
-const Icon = getOrbIcon(orb.type);
+{SLOTS.filter((slot) => unlockedSlots.includes(slot.id)).map((slot) => {
+const orb = orbs.find((o) => o.slotId === slot.id);
+const focused = orb?.id === focusedOrbId;
 
 return (
-<React.Fragment key={orb.id}>
-<motion.div
-className="absolute left-1/2 top-1/2 z-0 h-px bg-white/20"
+<React.Fragment key={slot.id}>
+{!orb && (
+<div
+className="absolute left-1/2 top-1/2 z-10 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.05]"
 style={{
-width: Math.sqrt(orb.x * orb.x + orb.y * orb.y),
-transformOrigin: "0 0",
+marginLeft: slot.x,
+marginTop: slot.y,
+}}
+/>
+)}
+
+{orb && (
+<>
+<motion.div
+className="absolute left-1/2 top-1/2 z-5 h-px origin-left bg-white/18"
+style={{
+width: Math.sqrt(slot.x * slot.x + slot.y * slot.y),
 transform: `translate(0, 0) rotate(${Math.atan2(
-orb.y,
-orb.x
+slot.y,
+slot.x
 )}rad)`,
-marginLeft: 0,
-marginTop: 0,
 }}
 animate={{
-opacity: focused ? [0.2, 0.7, 0.2] : [0.12, 0.25, 0.12],
+opacity: focused ? [0.16, 0.55, 0.16] : [0.08, 0.18, 0.08],
 }}
 transition={{
-duration: focused ? 1.6 : 3,
+duration: focused ? 1.8 : 3.2,
 repeat: Infinity,
 ease: "easeInOut",
 }}
 />
 
-<motion.button
-className={`absolute left-1/2 top-1/2 z-10 flex items-center justify-center rounded-full border ${getOrbClass(
-orb.type,
-focused,
-orb.transmitting
-)}`}
-style={{
-width: orb.size,
-height: orb.size,
-marginLeft: orb.x - orb.size / 2,
-marginTop: orb.y - orb.size / 2,
-}}
-animate={{
-scale: focused
-? [1, 1.06, 1]
-: liveState === "LIVE"
-? [1, 1.02, 1]
-: 1,
-opacity: orb.transmitting ? [0.8, 1, 0.8] : 1,
-}}
-transition={{
-duration: focused ? 1.8 : 3.8,
-repeat: Infinity,
-ease: "easeInOut",
-}}
+<OrbNode
+orb={orb}
+slot={slot}
+focused={focused}
 onClick={() => {
 setFocusedOrbId(orb.id);
 setMessage(`${getOrbLabel(orb.type)} structure focused.`);
 }}
->
-<div className="flex flex-col items-center justify-center">
-<Icon className="h-4 w-4" />
-<span className="mt-1 text-[9px] uppercase tracking-[0.16em]">
-{getOrbLabel(orb.type)}
-</span>
-</div>
-</motion.button>
+/>
+</>
+)}
 </React.Fragment>
 );
 })}
 
 <motion.div
-className="absolute left-1/2 top-1/2 z-20 h-36 w-36 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/10 text-center shadow-[0_0_90px_rgba(255,255,255,0.18)] backdrop-blur-xl"
+className="absolute left-1/2 top-1/2 z-20 h-40 w-40 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.09] text-center shadow-[0_0_90px_rgba(255,255,255,0.12)] backdrop-blur-xl"
 animate={{
-scale: liveState === "LIVE" ? [1, 1.05, 1] : 1,
-opacity: liveState === "LIVE" ? [0.95, 1, 0.95] : 0.82,
+scale: liveState === "LIVE" ? [1, 1.04, 1] : 1,
+opacity: liveState === "LIVE" ? [0.92, 1, 0.92] : 0.8,
 }}
 transition={{
-duration: 3.2,
+duration: 3,
 repeat: Infinity,
 ease: "easeInOut",
 }}
 >
-<div className="pt-5 text-[10px] uppercase tracking-[0.28em] text-white/55">
-Pyron Core
+<div className="pt-8 text-[10px] uppercase tracking-[0.3em] text-white/45">
+Pyron
 </div>
-<div className="mt-2 text-2xl font-semibold">{liveState}</div>
-<div className="text-sm text-white/70">Cycle {cycle}</div>
-<div className="mt-2 text-xs text-white/55">Bank {charge}</div>
+<div className="mt-3 text-2xl font-semibold">{liveState}</div>
+<div className="mt-1 text-sm text-white/55">{Math.round(liveEnergy)} energy</div>
+
+{pattern && (
+<div className="mx-auto mt-4 inline-flex rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-white/70">
+{pattern.name} +{pattern.bonus}
+</div>
+)}
 </motion.div>
 
 {focusedOrb && (
-<motion.div
-className="absolute left-1/2 top-1/2 z-15 rounded-full border border-white/30"
-style={{
-width: focusedOrb.size + 16,
-height: focusedOrb.size + 16,
-marginLeft: focusedOrb.x - (focusedOrb.size + 16) / 2,
-marginTop: focusedOrb.y - (focusedOrb.size + 16) / 2,
-}}
-animate={{
-scale: [1, 1.08, 1],
-opacity: [0.3, 0.8, 0.3],
-}}
-transition={{
-duration: 1.8,
-repeat: Infinity,
-ease: "easeInOut",
-}}
-/>
-)}
-
-{focusedOrb && (
 <>
+<FocusHalo orb={focusedOrb} />
 <ActionNode
 label="Form"
 cost={FORM_COST}
 x={0}
-y={-190}
-enabled={charge >= FORM_COST && orbs.length < capacity}
+y={-188}
+enabled={charge >= FORM_COST && !!getFirstEmptySlot(orbs, unlockedSlots)}
 onClick={runForm}
 />
 <ActionNode
 label="Scale"
 cost={SCALE_COST}
-x={-175}
-y={140}
+x={-170}
+y={145}
 enabled={charge >= SCALE_COST}
 onClick={runScale}
 />
 <ActionNode
 label="Transmit"
 cost={TRANSMIT_COST}
-x={175}
-y={140}
+x={170}
+y={145}
 enabled={charge >= TRANSMIT_COST}
 onClick={runTransmit}
 />
@@ -755,141 +641,177 @@ onClick={runTransmit}
 
 {focusedOrb?.transmitting && (
 <motion.div
-className="absolute left-1/2 top-1/2 rounded-full border border-white/25"
+className="absolute left-1/2 top-1/2 z-15 rounded-full border border-white/20"
 style={{
 width: 180,
 height: 180,
 transform: "translate(-50%, -50%)",
 }}
-animate={{ scale: [1, 3, 4], opacity: [0.75, 0.25, 0] }}
-transition={{ duration: 1.2, repeat: 0, ease: "easeOut" }}
+animate={{ scale: [1, 3.4, 4.2], opacity: [0.7, 0.18, 0] }}
+transition={{ duration: 1.1, ease: "easeOut" }}
 />
 )}
-
-<div className="absolute bottom-4 left-4 right-4 grid gap-3 md:grid-cols-4">
-<GlassStat title="Focus" value={focusedOrb ? getOrbLabel(focusedOrb.type) : "None"} />
-<GlassStat title="Capacity" value={`${orbs.length}/${capacity}`} />
-<GlassStat title="Sensitivity" value={sensitivityLabel} />
-<GlassStat title="Pattern" value={pattern?.name ?? "None"} />
 </div>
 </div>
-</CardContent>
-</Card>
 
-<div className="grid gap-4">
-<Card className="border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-2">
-<CardTitle className="text-lg">Cycle Bank</CardTitle>
-</CardHeader>
-
-<CardContent className="space-y-4">
-<div>
-<div className="mb-2 flex items-center justify-between text-sm text-white/70">
-<span>{stage}</span>
-<span>
-{charge} / {nextThreshold}
-</span>
-</div>
-<Progress value={progress} className="h-2 bg-white/10" />
-</div>
-
-<div className="grid grid-cols-5 gap-2 text-center text-xs">
-{(["Seed", "Core", "Pulse", "Nova", "Titan"] as Stage[]).map((s) => (
-<div
-key={s}
-className={`rounded-xl border px-2 py-3 ${
-stage === s
-? "border-white/20 bg-white/10 text-white"
-: "border-white/10 bg-white/[0.03] text-white/55"
-}`}
+<div className="relative z-10 border-t border-white/10 bg-black/20 px-4 py-3 sm:px-6">
+<button
+onClick={() => setDrawerOpen((v) => !v)}
+className="flex w-full items-center justify-between rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-left"
 >
-{s}
-</div>
-))}
-</div>
-
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-white/75">
-{message}
-</div>
-</CardContent>
-</Card>
-
-<Card className="border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-2">
-<CardTitle className="text-lg">Focused Structure</CardTitle>
-</CardHeader>
-
-<CardContent className="space-y-4">
-{focusedOrb ? (
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-<div className="flex items-center gap-3">
-<div className="rounded-2xl border border-white/10 bg-white/10 p-3">
-{(() => {
-const Icon = getOrbIcon(focusedOrb.type);
-return <Icon className="h-5 w-5" />;
-})()}
-</div>
-
 <div>
-<div className="text-lg font-semibold">
-{getOrbLabel(focusedOrb.type)}
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
+System
 </div>
-<div className="text-sm text-white/60">
-Level {focusedOrb.level} · Ring {focusedOrb.ring}
+<div className="mt-1 text-sm text-white/72">{message}</div>
 </div>
-</div>
-</div>
+{drawerOpen ? (
+<ChevronDown className="h-4 w-4 text-white/55" />
+) : (
+<ChevronUp className="h-4 w-4 text-white/55" />
+)}
+</button>
 
-<div className="mt-4 grid gap-3">
-<FieldBar
-label="Mass"
-value={Math.min(100, focusedOrb.size)}
+{drawerOpen && (
+<div className="mt-3 grid gap-3 md:grid-cols-4">
+<DrawerCard
+title="Sensitivity"
+value={sensitivityLabel}
+body={
+<input
+type="range"
+min={0}
+max={100}
+step={1}
+value={sensitivity}
+onChange={(e) => setSensitivity(Number(e.target.value))}
+className="mt-2 w-full accent-white"
 />
-<FieldBar
-label="Signal"
-value={focusedOrb.transmitting ? 100 : 35 + focusedOrb.level * 12}
+}
 />
-</div>
+
+<DrawerCard
+title="Focus"
+value={focusedOrb ? getOrbLabel(focusedOrb.type) : "None"}
+body={
+focusedOrb ? (
+<div className="mt-2 text-xs text-white/55">
+Level {focusedOrb.level} · Slot {focusedOrb.slotId.toUpperCase()}
 </div>
 ) : (
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 text-sm text-white/65">
-No structure focused.
+<div className="mt-2 text-xs text-white/55">No focused structure</div>
+)
+}
+/>
+
+<DrawerCard
+title="Slots"
+value={`${orbs.length}/${unlockedSlots.length}`}
+body={
+<div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-white/10">
+<div
+className="h-full bg-white/70"
+style={{
+width: `${(orbs.length / Math.max(unlockedSlots.length, 1)) * 100}%`,
+}}
+/>
+</div>
+}
+/>
+
+<DrawerCard
+title="Stage"
+value={stage}
+body={
+<div className="mt-2">
+<div className="mb-1 flex items-center justify-between text-[11px] text-white/50">
+<span>{charge}</span>
+<span>{nextThreshold}</span>
+</div>
+<div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+<div
+className="h-full bg-white/70"
+style={{ width: `${progress}%` }}
+/>
+</div>
+</div>
+}
+/>
 </div>
 )}
-</CardContent>
-</Card>
+</div>
+</div>
+</div>
+</div>
+);
+}
 
-<Card className="border-white/10 bg-white/5 backdrop-blur-xl">
-<CardHeader className="pb-2">
-<CardTitle className="text-lg">Graph Logic</CardTitle>
-</CardHeader>
+function OrbNode({
+orb,
+slot,
+focused,
+onClick,
+}: {
+orb: Orb;
+slot: Slot;
+focused: boolean;
+onClick: () => void;
+}) {
+const Icon = getOrbIcon(orb.type);
 
-<CardContent className="space-y-4">
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-<div className="text-sm text-white/55">Detected Pattern</div>
-<div className="mt-1 text-lg font-semibold">
-{pattern?.name ?? "None"}
+return (
+<motion.button
+className={`absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-white backdrop-blur-xl ${
+focused
+? "border-white/20 bg-white/[0.14] shadow-[0_0_50px_rgba(255,255,255,0.16)]"
+: "border-white/12 bg-white/[0.07]"
+}`}
+style={{
+width: orb.size,
+height: orb.size,
+marginLeft: slot.x,
+marginTop: slot.y,
+}}
+animate={{
+scale: focused ? [1, 1.06, 1] : [1, 1.015, 1],
+opacity: orb.transmitting ? [0.75, 1, 0.75] : 1,
+}}
+transition={{
+duration: focused ? 1.8 : 3.6,
+repeat: Infinity,
+ease: "easeInOut",
+}}
+onClick={onClick}
+>
+<div className="flex flex-col items-center justify-center">
+<Icon className="h-4 w-4" />
 </div>
-<div className="mt-2 text-sm leading-6 text-white/65">
-{pattern?.description ??
-"Build more structures and scale them to unlock graph bonuses."}
-</div>
-<div className="mt-3 text-sm text-white/80">
-Bonus: {pattern ? `+${pattern.bonus}` : "0"}
-</div>
-</div>
+</motion.button>
+);
+}
 
-<div className="grid gap-3 sm:grid-cols-3">
-<MiniRule title="Triangle" body="3-point stability geometry" />
-<MiniRule title="Hub" body="scaled center influence" />
-<MiniRule title="Chain" body="transmission path bonus" />
-</div>
-</CardContent>
-</Card>
-</div>
-</div>
-</div>
-</div>
+function FocusHalo({ orb }: { orb: Orb }) {
+const slot = findSlot(orb.slotId);
+
+return (
+<motion.div
+className="absolute left-1/2 top-1/2 z-9 rounded-full border border-white/25"
+style={{
+width: orb.size + 16,
+height: orb.size + 16,
+marginLeft: slot.x - (orb.size + 16) / 2,
+marginTop: slot.y - (orb.size + 16) / 2,
+}}
+animate={{
+scale: [1, 1.08, 1],
+opacity: [0.28, 0.82, 0.28],
+}}
+transition={{
+duration: 1.8,
+repeat: Infinity,
+ease: "easeInOut",
+}}
+/>
 );
 }
 
@@ -910,18 +832,18 @@ onClick: () => void;
 }) {
 return (
 <motion.button
-className={`absolute left-1/2 top-1/2 z-20 flex h-20 w-20 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border text-center backdrop-blur-xl ${
+className={`absolute left-1/2 top-1/2 z-20 flex h-20 w-20 -translate-x-1/2 -translate-y-1/2 flex-col items-center justify-center rounded-full border backdrop-blur-xl ${
 enabled
-? "border-white/20 bg-white/10 text-white"
+? "border-white/18 bg-white/[0.08] text-white"
 : "border-white/10 bg-white/[0.03] text-white/35"
 }`}
 style={{ marginLeft: x, marginTop: y }}
 animate={{
-scale: enabled ? [1, 1.04, 1] : 1,
-opacity: enabled ? [0.9, 1, 0.9] : 0.65,
+scale: enabled ? [1, 1.035, 1] : 1,
+opacity: enabled ? [0.86, 1, 0.86] : 0.62,
 }}
 transition={{
-duration: 2.4,
+duration: 2.2,
 repeat: Infinity,
 ease: "easeInOut",
 }}
@@ -934,64 +856,22 @@ disabled={!enabled}
 );
 }
 
-function MetricCard({
-label,
+function DrawerCard({
+title,
 value,
-sub,
-icon: Icon,
+body,
 }: {
-label: string;
+title: string;
 value: string;
-sub: string;
-icon: React.ComponentType<{ className?: string }>;
+body: React.ReactNode;
 }) {
 return (
 <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-<div className="flex items-center justify-between gap-3">
-<div>
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
-{label}
-</div>
-<div className="mt-2 text-lg font-semibold">{value}</div>
-<div className="mt-1 text-sm text-white/55">{sub}</div>
-</div>
-
-<div className="rounded-2xl border border-white/10 bg-white/10 p-3">
-<Icon className="h-5 w-5" />
-</div>
-</div>
-</div>
-);
-}
-
-function FieldBar({ label, value }: { label: string; value: number }) {
-return (
-<div>
-<div className="mb-2 flex items-center justify-between text-xs uppercase tracking-[0.18em] text-white/45">
-<span>{label}</span>
-<span>{Math.round(value)}</span>
-</div>
-<Progress value={value} className="h-2 bg-white/10" />
-</div>
-);
-}
-
-function GlassStat({ title, value }: { title: string; value: string }) {
-return (
-<div className="rounded-2xl border border-white/10 bg-black/25 p-3 backdrop-blur-xl">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/40">
 {title}
 </div>
-<div className="mt-1 text-sm font-semibold text-white/90">{value}</div>
-</div>
-);
-}
-
-function MiniRule({ title, body }: { title: string; body: string }) {
-return (
-<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-<div className="text-sm font-semibold">{title}</div>
-<div className="mt-2 text-sm leading-6 text-white/65">{body}</div>
+<div className="mt-1 text-base font-semibold text-white/90">{value}</div>
+{body}
 </div>
 );
 }
