@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { CircleDot, Send, Sparkles } from "lucide-react";
+import { CircleDot, Send, Sparkles, RotateCcw, Play } from "lucide-react";
 
 type LiveState = "OFF" | "LIVE";
 type Sensitivity = "Low" | "Medium" | "High" | "Raw";
@@ -45,13 +45,17 @@ name: string;
 bonus: number;
 };
 
-const CHARGE_KEY = "axis_pyron_charge_v4";
-const LIVE_KEY = "axis_pyron_live_v4";
-const ENERGY_KEY = "axis_pyron_energy_v4";
-const SENSITIVITY_KEY = "axis_pyron_sensitivity_v4";
-const ORBS_KEY = "axis_pyron_orbs_v4";
-const FOCUS_KEY = "axis_pyron_focus_v4";
-const MODE_KEY = "axis_pyron_mode_v4";
+const CHARGE_KEY = "axis_pyron_charge_v5";
+const LIVE_KEY = "axis_pyron_live_v5";
+const ENERGY_KEY = "axis_pyron_energy_v5";
+const SENSITIVITY_KEY = "axis_pyron_sensitivity_v5";
+const ORBS_KEY = "axis_pyron_orbs_v5";
+const FOCUS_KEY = "axis_pyron_focus_v5";
+const MODE_KEY = "axis_pyron_mode_v5";
+const WINDOWS_KEY = "axis_pyron_windows_v5";
+const TRANSITIONS_KEY = "axis_pyron_transitions_v5";
+const SESSION_CHARGE_KEY = "axis_pyron_session_charge_v5";
+const ELAPSED_KEY = "axis_pyron_elapsed_v5";
 
 const FORM_COST = 45;
 const SCALE_COST = 60;
@@ -117,10 +121,6 @@ if (charge < 50) return ["n", "sw", "se"];
 if (charge < 150) return ["n", "ne", "se", "s", "sw", "nw"];
 if (charge < 400) return ["n", "ne", "se", "s", "sw", "nw", "e2", "w2"];
 return SLOT_ORDER;
-}
-
-function getSensitivityLabel(value: Sensitivity) {
-return value;
 }
 
 function getEnergyMultiplier(value: Sensitivity) {
@@ -232,30 +232,23 @@ return { name: "Hub", bonus: 20 };
 return null;
 }
 
-function createSignalPath(
-width: number,
-height: number,
-energy: number,
-live: boolean
-) {
-const points = 34;
-const amp = live ? 10 + energy * 0.52 : 4;
-const centerY = height / 2;
-const step = width / (points - 1);
-
-let d = `M 0 ${centerY}`;
-
-for (let i = 1; i < points; i++) {
-const x = i * step;
-const y =
-centerY +
-Math.sin(i * 0.58) * amp * 0.62 +
-Math.cos(i * 0.21) * amp * 0.28 +
-Math.sin(i * 1.15) * amp * 0.18;
-d += ` L ${x.toFixed(2)} ${y.toFixed(2)}`;
+function formatTime(totalSeconds: number) {
+const mins = Math.floor(totalSeconds / 60);
+const secs = totalSeconds % 60;
+return `${mins}m ${secs}s`;
 }
 
-return d;
+function getStateRead(energy: number, transitions: number) {
+if (energy < 22) {
+return { form: "In Control", signal: "Clean", energy: "Off" };
+}
+if (energy < 48) {
+return { form: "Searching", signal: "Reactive", energy: "On" };
+}
+if (transitions > 18 || energy > 72) {
+return { form: "Out of Control", signal: "Chaotic", energy: "High" };
+}
+return { form: "In Rhythm", signal: "Reactive", energy: "On" };
 }
 
 export default function PyronClient() {
@@ -267,6 +260,12 @@ const [orbs, setOrbs] = useState<Orb[]>(getDefaultOrbs());
 const [focusedOrbId, setFocusedOrbId] = useState<string | null>("orb-n");
 const [mode, setMode] = useState<Mode>("ambient");
 const [message, setMessage] = useState("Focus a structure and shape the field.");
+const [windowsCount, setWindowsCount] = useState(0);
+const [transitions, setTransitions] = useState(0);
+const [sessionCharge, setSessionCharge] = useState(0);
+const [elapsedSeconds, setElapsedSeconds] = useState(0);
+
+const prevEnergyRef = useRef(18);
 
 useEffect(() => {
 if (typeof window === "undefined") return;
@@ -282,10 +281,21 @@ const savedOrbs = safeParseOrbs(window.localStorage.getItem(ORBS_KEY));
 const savedFocus = window.localStorage.getItem(FOCUS_KEY);
 const savedMode =
 (window.localStorage.getItem(MODE_KEY) as Mode | null) ?? "ambient";
+const savedWindows = Number(window.localStorage.getItem(WINDOWS_KEY) ?? 0);
+const savedTransitions = Number(
+window.localStorage.getItem(TRANSITIONS_KEY) ?? 0
+);
+const savedSessionCharge = Number(
+window.localStorage.getItem(SESSION_CHARGE_KEY) ?? 0
+);
+const savedElapsed = Number(window.localStorage.getItem(ELAPSED_KEY) ?? 0);
 
 if (!Number.isNaN(savedCharge)) setCharge(savedCharge);
 if (savedLive === "LIVE" || savedLive === "OFF") setLiveState(savedLive);
-if (!Number.isNaN(savedEnergy)) setLiveEnergy(savedEnergy);
+if (!Number.isNaN(savedEnergy)) {
+setLiveEnergy(savedEnergy);
+prevEnergyRef.current = savedEnergy;
+}
 if (
 savedSensitivity === "Low" ||
 savedSensitivity === "Medium" ||
@@ -297,6 +307,10 @@ setSensitivity(savedSensitivity);
 setOrbs(savedOrbs);
 setFocusedOrbId(savedFocus ?? savedOrbs[0]?.id ?? null);
 if (savedMode === "ambient" || savedMode === "place") setMode(savedMode);
+if (!Number.isNaN(savedWindows)) setWindowsCount(savedWindows);
+if (!Number.isNaN(savedTransitions)) setTransitions(savedTransitions);
+if (!Number.isNaN(savedSessionCharge)) setSessionCharge(savedSessionCharge);
+if (!Number.isNaN(savedElapsed)) setElapsedSeconds(savedElapsed);
 }, []);
 
 useEffect(() => {
@@ -308,7 +322,23 @@ window.localStorage.setItem(SENSITIVITY_KEY, sensitivity);
 window.localStorage.setItem(ORBS_KEY, JSON.stringify(orbs));
 if (focusedOrbId) window.localStorage.setItem(FOCUS_KEY, focusedOrbId);
 window.localStorage.setItem(MODE_KEY, mode);
-}, [charge, liveState, liveEnergy, sensitivity, orbs, focusedOrbId, mode]);
+window.localStorage.setItem(WINDOWS_KEY, String(windowsCount));
+window.localStorage.setItem(TRANSITIONS_KEY, String(transitions));
+window.localStorage.setItem(SESSION_CHARGE_KEY, String(sessionCharge));
+window.localStorage.setItem(ELAPSED_KEY, String(elapsedSeconds));
+}, [
+charge,
+liveState,
+liveEnergy,
+sensitivity,
+orbs,
+focusedOrbId,
+mode,
+windowsCount,
+transitions,
+sessionCharge,
+elapsedSeconds,
+]);
 
 useEffect(() => {
 if (liveState !== "LIVE") return;
@@ -322,7 +352,11 @@ liveEnergy + (Math.random() * 16 - 6) * getEnergyMultiplier(sensitivity)
 )
 );
 
+const prevEnergy = prevEnergyRef.current;
+const delta = Math.abs(nextEnergy - prevEnergy);
+
 setLiveEnergy(Number(nextEnergy.toFixed(1)));
+prevEnergyRef.current = nextEnergy;
 
 const gain = Math.max(
 0,
@@ -331,11 +365,30 @@ Math.round((nextEnergy / 26) * getEnergyMultiplier(sensitivity))
 
 if (gain > 0) {
 setCharge((prev) => prev + gain);
+setSessionCharge((prev) => prev + gain);
+}
+
+if (delta > 10) {
+setTransitions((prev) => prev + 1);
+}
+
+if (nextEnergy > 58 && prevEnergy <= 58) {
+setWindowsCount((prev) => prev + 1);
 }
 }, 1400);
 
 return () => window.clearInterval(interval);
 }, [liveState, liveEnergy, sensitivity]);
+
+useEffect(() => {
+if (liveState !== "LIVE") return;
+
+const timer = window.setInterval(() => {
+setElapsedSeconds((prev) => prev + 1);
+}, 1000);
+
+return () => window.clearInterval(timer);
+}, [liveState]);
 
 const stage = useMemo(() => getStage(charge), [charge]);
 const nextThreshold = useMemo(() => getNextThreshold(stage), [stage]);
@@ -352,10 +405,9 @@ const focusedOrb = useMemo(
 [orbs, focusedOrbId]
 );
 const pattern = useMemo(() => detectPattern(orbs), [orbs]);
-
-const axisPath = useMemo(
-() => createSignalPath(760, 300, liveEnergy, liveState === "LIVE"),
-[liveEnergy, liveState]
+const stateRead = useMemo(
+() => getStateRead(liveEnergy, transitions),
+[liveEnergy, transitions]
 );
 
 function toggleLive() {
@@ -364,6 +416,22 @@ const next = prev === "LIVE" ? "OFF" : "LIVE";
 setMessage(next === "LIVE" ? "Pyron is LIVE." : "Pyron is OFF.");
 return next;
 });
+}
+
+function resetSystem() {
+setCharge(149);
+setLiveState("OFF");
+setLiveEnergy(18);
+prevEnergyRef.current = 18;
+setSensitivity("Medium");
+setOrbs(getDefaultOrbs());
+setFocusedOrbId("orb-n");
+setMode("ambient");
+setWindowsCount(0);
+setTransitions(0);
+setSessionCharge(0);
+setElapsedSeconds(0);
+setMessage("System reset.");
 }
 
 function runForm() {
@@ -485,13 +553,22 @@ liveState === "LIVE"
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.10),rgba(255,255,255,0.02)_30%,rgba(0,0,0,0.96)_72%)]" />
 
 <div className="relative z-10 px-4 pt-4">
-<div className="mb-3 flex items-center justify-between">
+<div className="mb-3 flex items-center justify-between gap-3">
+<div className="flex items-center gap-2">
 <button
 onClick={() => setMode((m) => (m === "ambient" ? "place" : "ambient"))}
 className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
 >
 {mode === "ambient" ? "Build" : "Hide Grid"}
 </button>
+
+<button
+onClick={resetSystem}
+className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
+>
+Reset
+</button>
+</div>
 
 <div className="flex items-center gap-2">
 <SensitivityPill
@@ -519,29 +596,6 @@ label="Raw"
 </div>
 
 <div className="relative z-10 mx-auto aspect-square max-w-[760px] overflow-hidden">
-<svg
-viewBox="0 0 760 300"
-className="absolute left-1/2 top-1/2 z-0 h-[44%] w-[96%] -translate-x-1/2 -translate-y-1/2 opacity-30"
-aria-hidden="true"
->
-<path
-d={axisPath}
-fill="none"
-stroke="rgba(255,255,255,0.20)"
-strokeWidth="2.2"
-strokeLinecap="round"
-strokeLinejoin="round"
-/>
-<path
-d={axisPath}
-fill="none"
-stroke="rgba(255,255,255,0.05)"
-strokeWidth="12"
-strokeLinecap="round"
-strokeLinejoin="round"
-/>
-</svg>
-
 {[1, 2].map((ring) => {
 const size = ring === 1 ? 300 : 450;
 const show =
@@ -645,18 +699,20 @@ setMode("ambient");
 })}
 
 <motion.div
-className="absolute left-1/2 top-1/2 z-20 h-44 w-44 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_90px_rgba(255,255,255,0.10)] backdrop-blur-xl"
+className="absolute left-1/2 top-1/2 z-20 h-48 w-48 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_90px_rgba(255,255,255,0.10)] backdrop-blur-xl"
 animate={{
-scale: liveState === "LIVE" ? [1, 1.035, 1] : 1,
+y: liveState === "LIVE" ? [0, -8, 0, 6, 0] : [0, -2, 0],
+x: liveState === "LIVE" ? [0, 4, 0, -4, 0] : [0, 1, 0],
+scale: liveState === "LIVE" ? [1, 1.03, 1] : 1,
 opacity: liveState === "LIVE" ? [0.9, 1, 0.9] : 0.8,
 }}
 transition={{
-duration: 3,
+duration: liveState === "LIVE" ? 7.5 : 5,
 repeat: Infinity,
 ease: "easeInOut",
 }}
 >
-<div className="pt-9 text-[10px] uppercase tracking-[0.3em] text-white/40">
+<div className="pt-10 text-[10px] uppercase tracking-[0.3em] text-white/40">
 Pyron
 </div>
 <div className="mt-3 text-3xl font-semibold">{liveState}</div>
@@ -671,31 +727,29 @@ Pyron
 )}
 </motion.div>
 
-{focusedOrb && (
-<FocusHalo orb={focusedOrb} />
-)}
+{focusedOrb && <FocusHalo orb={focusedOrb} />}
 
 <ActionOrb
 label="Form"
 cost={FORM_COST}
 x={0}
-y={-210}
+y={-220}
 enabled={canForm}
 onClick={runForm}
 />
 <ActionOrb
 label="Scale"
 cost={SCALE_COST}
-x={-190}
-y={156}
+x={-195}
+y={160}
 enabled={canScale}
 onClick={runScale}
 />
 <ActionOrb
 label="Transmit"
 cost={TRANSMIT_COST}
-x={190}
-y={156}
+x={195}
+y={160}
 enabled={canTransmit}
 onClick={runTransmit}
 />
@@ -715,13 +769,24 @@ transition={{ duration: 1.1, ease: "easeOut" }}
 </div>
 
 <div className="relative z-10 border-t border-white/10 px-4 py-4">
-<div className="flex flex-wrap items-center justify-between gap-3">
+<div className="grid gap-3 md:grid-cols-4">
+<MiniStat label="Form" value={stateRead.form} />
+<MiniStat label="Signal" value={stateRead.signal} />
+<MiniStat label="Energy" value={stateRead.energy} />
+<MiniStat label="Time" value={formatTime(elapsedSeconds)} />
+<MiniStat label="Transitions" value={String(transitions)} />
+<MiniStat label="Windows" value={String(windowsCount)} />
+<MiniStat label="Session Charge" value={`+${sessionCharge}`} />
+<MiniStat label="Bank" value={`${charge}/${nextThreshold}`} />
+</div>
+
+<div className="mt-4 flex flex-wrap items-center justify-between gap-3">
 <div className="text-sm text-white/68">{message}</div>
 
 <div className="flex items-center gap-3 text-sm text-white/55">
-<span>{getSensitivityLabel(sensitivity)}</span>
+<span>{sensitivity}</span>
 <span>{orbs.length}/{unlockedSlots.length}</span>
-<span>{charge}/{nextThreshold}</span>
+<span>{stage}</span>
 </div>
 </div>
 
@@ -866,5 +931,16 @@ disabled={!enabled}
 <span className="text-[11px] uppercase tracking-[0.18em]">{label}</span>
 <span className="mt-1 text-xl font-semibold">{cost}</span>
 </motion.button>
+);
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
+return (
+<div className="rounded-2xl border border-white/10 bg-white/[0.04] p-3">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/40">
+{label}
+</div>
+<div className="mt-1 text-sm font-semibold text-white/85">{value}</div>
+</div>
 );
 }
