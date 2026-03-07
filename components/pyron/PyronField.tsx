@@ -64,7 +64,6 @@ const particle = particles[i];
 const p = particle.position;
 const v = particle.velocity;
 
-// attraction to core
 const centerPull = p
 .clone()
 .multiplyScalar(-1)
@@ -72,7 +71,6 @@ const centerPull = p
 .multiplyScalar(0.00045);
 v.add(centerPull);
 
-// flow field from simplex noise
 const n = noise3D(
 p.x * 0.25 + time * 0.2,
 p.y * 0.25,
@@ -87,17 +85,13 @@ Math.sin(n * Math.PI * 1.3)
 
 v.add(flow);
 
-// orbit swirl
 const swirl = new THREE.Vector3(-p.z, 0, p.x)
 .normalize()
 .multiplyScalar(0.0004);
-
 v.add(swirl);
 
-// breathing motion
 v.y += Math.sin(time * 0.9 + particle.phase) * 0.00025;
 
-// soft local alignment / repulsion
 let avgVx = 0;
 let avgVy = 0;
 let avgVz = 0;
@@ -134,9 +128,7 @@ v.y += (avgVy - v.y) * 0.01;
 v.z += (avgVz - v.z) * 0.01;
 }
 
-// damping
 v.multiplyScalar(0.986);
-
 p.add(v);
 
 const dist = p.length();
@@ -157,12 +149,7 @@ points.rotation.y = time * 0.04;
 return (
 <points ref={pointsRef}>
 <bufferGeometry>
-<bufferAttribute
-attach="attributes-position"
-count={PARTICLE_COUNT}
-array={positions}
-itemSize={3}
-/>
+<bufferAttribute attach="attributes-position" args={[positions, 3]} />
 </bufferGeometry>
 
 <pointsMaterial
