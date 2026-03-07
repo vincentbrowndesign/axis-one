@@ -8,7 +8,7 @@ type LiveState = "OFF" | "LIVE";
 type Sensitivity = "Low" | "Medium" | "High" | "Raw";
 type OrbType = "form" | "scale" | "transmit";
 type Stage = "Seed" | "Core" | "Pulse" | "Nova" | "Titan";
-type Mode = "ambient" | "place";
+type Mode = "ambient" | "build";
 
 type SlotId =
 | "n"
@@ -36,11 +36,13 @@ id: string;
 slotId: SlotId;
 type: OrbType;
 level: number;
-size: number;
+baseSize: number;
 transmitting: boolean;
 integrity: number;
 capacity: number;
 load: number;
+depth: number; // -1 to 1
+phase: number; // unique drift seed
 };
 
 type Pattern = {
@@ -48,37 +50,37 @@ name: string;
 bonus: number;
 };
 
-const CHARGE_KEY = "axis_pyron_charge_v6";
-const LIVE_KEY = "axis_pyron_live_v6";
-const ENERGY_KEY = "axis_pyron_energy_v6";
-const SENSITIVITY_KEY = "axis_pyron_sensitivity_v6";
-const ORBS_KEY = "axis_pyron_orbs_v6";
-const FOCUS_KEY = "axis_pyron_focus_v6";
-const MODE_KEY = "axis_pyron_mode_v6";
-const WINDOWS_KEY = "axis_pyron_windows_v6";
-const TRANSITIONS_KEY = "axis_pyron_transitions_v6";
-const SESSION_CHARGE_KEY = "axis_pyron_session_charge_v6";
-const ELAPSED_KEY = "axis_pyron_elapsed_v6";
-const SCORE_KEY = "axis_pyron_score_v6";
+const CHARGE_KEY = "axis_pyron_star_charge_v1";
+const LIVE_KEY = "axis_pyron_star_live_v1";
+const ENERGY_KEY = "axis_pyron_star_energy_v1";
+const SENSITIVITY_KEY = "axis_pyron_star_sensitivity_v1";
+const ORBS_KEY = "axis_pyron_star_orbs_v1";
+const FOCUS_KEY = "axis_pyron_star_focus_v1";
+const MODE_KEY = "axis_pyron_star_mode_v1";
+const WINDOWS_KEY = "axis_pyron_star_windows_v1";
+const TRANSITIONS_KEY = "axis_pyron_star_transitions_v1";
+const SESSION_CHARGE_KEY = "axis_pyron_star_session_charge_v1";
+const ELAPSED_KEY = "axis_pyron_star_elapsed_v1";
+const SCORE_KEY = "axis_pyron_star_score_v1";
 
 const FORM_COST = 45;
 const SCALE_COST = 60;
 const TRANSMIT_COST = 100;
 
 const SLOTS: Slot[] = [
-{ id: "n", x: 0, y: -120, ring: 1 },
-{ id: "ne", x: 104, y: -60, ring: 1 },
-{ id: "se", x: 104, y: 60, ring: 1 },
-{ id: "s", x: 0, y: 120, ring: 1 },
-{ id: "sw", x: -104, y: 60, ring: 1 },
-{ id: "nw", x: -104, y: -60, ring: 1 },
+{ id: "n", x: 0, y: -118, ring: 1 },
+{ id: "ne", x: 108, y: -62, ring: 1 },
+{ id: "se", x: 108, y: 62, ring: 1 },
+{ id: "s", x: 0, y: 118, ring: 1 },
+{ id: "sw", x: -108, y: 62, ring: 1 },
+{ id: "nw", x: -108, y: -62, ring: 1 },
 
 { id: "n2", x: 0, y: -198, ring: 2 },
-{ id: "e2", x: 172, y: 0, ring: 2 },
+{ id: "e2", x: 178, y: 0, ring: 2 },
 { id: "s2", x: 0, y: 198, ring: 2 },
-{ id: "w2", x: -172, y: 0, ring: 2 },
-{ id: "ne2", x: 146, y: -112, ring: 2 },
-{ id: "sw2", x: -146, y: 112, ring: 2 },
+{ id: "w2", x: -178, y: 0, ring: 2 },
+{ id: "ne2", x: 148, y: -114, ring: 2 },
+{ id: "sw2", x: -148, y: 114, ring: 2 },
 ];
 
 const SLOT_ORDER: SlotId[] = [
@@ -146,55 +148,6 @@ function getOrbLabel(type: OrbType) {
 if (type === "form") return "Form";
 if (type === "scale") return "Scale";
 return "Transmit";
-}
-
-function getDefaultOrbs(): Orb[] {
-return [
-{
-id: "orb-n",
-slotId: "n",
-type: "form",
-level: 1,
-size: 52,
-transmitting: false,
-integrity: 100,
-capacity: 120,
-load: 18,
-},
-{
-id: "orb-sw",
-slotId: "sw",
-type: "scale",
-level: 1,
-size: 52,
-transmitting: false,
-integrity: 100,
-capacity: 120,
-load: 16,
-},
-{
-id: "orb-se",
-slotId: "se",
-type: "transmit",
-level: 1,
-size: 52,
-transmitting: false,
-integrity: 100,
-capacity: 120,
-load: 20,
-},
-];
-}
-
-function safeParseOrbs(raw: string | null): Orb[] {
-if (!raw) return getDefaultOrbs();
-try {
-const parsed = JSON.parse(raw) as Orb[];
-if (!Array.isArray(parsed) || parsed.length === 0) return getDefaultOrbs();
-return parsed;
-} catch {
-return getDefaultOrbs();
-}
 }
 
 function findSlot(slotId: SlotId) {
@@ -287,7 +240,8 @@ return neighborMap[slotId] ?? [];
 function computeLoadDistribution(orbs: Orb[], liveEnergy: number, elapsedSeconds: number) {
 const orbMap = new Map(orbs.map((o) => [o.slotId, o]));
 const timePressure = 6 + Math.min(28, elapsedSeconds * 0.15);
-const next = orbs.map((orb) => {
+
+return orbs.map((orb) => {
 const neighbors = getNeighbors(orb.slotId)
 .map((id) => orbMap.get(id))
 .filter(Boolean) as Orb[];
@@ -307,13 +261,17 @@ Math.round(typeBias + liveBias + neighborTransfer + timePressure)
 
 return { ...orb, load };
 });
-
-return next;
 }
 
-function applyDecay(orbs: Orb[], elapsedSeconds: number, liveEnergy: number, pattern: Pattern | null) {
+function applyDecay(
+orbs: Orb[],
+elapsedSeconds: number,
+liveEnergy: number,
+pattern: Pattern | null
+) {
 const timeDecay = 0.7 + Math.min(2.4, elapsedSeconds / 90);
 const patternShield = pattern ? pattern.bonus * 0.05 : 0;
+
 return orbs
 .map((orb) => {
 const overload = Math.max(0, orb.load - orb.capacity);
@@ -331,20 +289,80 @@ integrity: Number(nextIntegrity.toFixed(1)),
 .filter((orb) => orb.integrity > 0);
 }
 
+function makeOrb(slotId: SlotId, type: OrbType = "form"): Orb {
+return {
+id: `orb-${slotId}-${Date.now()}`,
+slotId,
+type,
+level: 1,
+baseSize: 52,
+transmitting: false,
+integrity: 100,
+capacity: 120,
+load: 0,
+depth: Math.random() * 2 - 1,
+phase: Math.random() * Math.PI * 2,
+};
+}
+
+function getDefaultOrbs(): Orb[] {
+return [
+makeOrb("n", "form"),
+makeOrb("sw", "scale"),
+makeOrb("se", "transmit"),
+];
+}
+
+function safeParseOrbs(raw: string | null): Orb[] {
+if (!raw) return getDefaultOrbs();
+try {
+const parsed = JSON.parse(raw) as Orb[];
+if (!Array.isArray(parsed) || parsed.length === 0) return getDefaultOrbs();
+return parsed.map((o) => ({
+...o,
+depth: typeof o.depth === "number" ? o.depth : Math.random() * 2 - 1,
+phase: typeof o.phase === "number" ? o.phase : Math.random() * Math.PI * 2,
+baseSize: typeof o.baseSize === "number" ? o.baseSize : 52,
+}));
+} catch {
+return getDefaultOrbs();
+}
+}
+
+function slotRenderPosition(slot: Slot, orb: Orb, time: number) {
+const depthScale = 1 + orb.depth * 0.12;
+const driftX = Math.sin(time * 0.0008 + orb.phase) * (6 + Math.abs(orb.depth) * 8);
+const driftY = Math.cos(time * 0.001 + orb.phase * 1.37) * (4 + Math.abs(orb.depth) * 6);
+const parallaxY = orb.depth * 12;
+const x = slot.x * depthScale + driftX;
+const y = slot.y * (1 - orb.depth * 0.06) + driftY + parallaxY;
+
+return { x, y };
+}
+
+function orbVisuals(orb: Orb) {
+const size = orb.baseSize * (1 + orb.level * 0.08) * (1 + orb.depth * 0.08);
+const opacity = orb.integrity > 70 ? 1 : orb.integrity > 40 ? 0.78 : 0.52;
+const blur = orb.depth < -0.35 ? 0.8 : 0;
+const glow = 18 + orb.level * 6 + (orb.transmitting ? 24 : 0);
+return { size, opacity, blur, glow };
+}
+
 export default function PyronClient() {
 const [charge, setCharge] = useState(149);
 const [liveState, setLiveState] = useState<LiveState>("OFF");
 const [liveEnergy, setLiveEnergy] = useState(18);
 const [sensitivity, setSensitivity] = useState<Sensitivity>("Medium");
 const [orbs, setOrbs] = useState<Orb[]>(getDefaultOrbs());
-const [focusedOrbId, setFocusedOrbId] = useState<string | null>("orb-n");
+const [focusedOrbId, setFocusedOrbId] = useState<string | null>(null);
 const [mode, setMode] = useState<Mode>("ambient");
-const [message, setMessage] = useState("Focus a structure and shape the field.");
+const [message, setMessage] = useState("Goal: maintain structure under pressure.");
 const [windowsCount, setWindowsCount] = useState(0);
 const [transitions, setTransitions] = useState(0);
 const [sessionCharge, setSessionCharge] = useState(0);
 const [elapsedSeconds, setElapsedSeconds] = useState(0);
 const [score, setScore] = useState(0);
+const [tick, setTick] = useState(0);
 
 const prevEnergyRef = useRef(18);
 
@@ -356,16 +374,13 @@ const savedLive =
 (window.localStorage.getItem(LIVE_KEY) as LiveState | null) ?? "OFF";
 const savedEnergy = Number(window.localStorage.getItem(ENERGY_KEY) ?? 18);
 const savedSensitivity =
-(window.localStorage.getItem(SENSITIVITY_KEY) as Sensitivity | null) ??
-"Medium";
+(window.localStorage.getItem(SENSITIVITY_KEY) as Sensitivity | null) ?? "Medium";
 const savedOrbs = safeParseOrbs(window.localStorage.getItem(ORBS_KEY));
 const savedFocus = window.localStorage.getItem(FOCUS_KEY);
 const savedMode =
 (window.localStorage.getItem(MODE_KEY) as Mode | null) ?? "ambient";
 const savedWindows = Number(window.localStorage.getItem(WINDOWS_KEY) ?? 0);
-const savedTransitions = Number(
-window.localStorage.getItem(TRANSITIONS_KEY) ?? 0
-);
+const savedTransitions = Number(window.localStorage.getItem(TRANSITIONS_KEY) ?? 0);
 const savedSessionCharge = Number(
 window.localStorage.getItem(SESSION_CHARGE_KEY) ?? 0
 );
@@ -388,7 +403,7 @@ setSensitivity(savedSensitivity);
 }
 setOrbs(savedOrbs);
 setFocusedOrbId(savedFocus ?? savedOrbs[0]?.id ?? null);
-if (savedMode === "ambient" || savedMode === "place") setMode(savedMode);
+if (savedMode === "ambient" || savedMode === "build") setMode(savedMode);
 if (!Number.isNaN(savedWindows)) setWindowsCount(savedWindows);
 if (!Number.isNaN(savedTransitions)) setTransitions(savedTransitions);
 if (!Number.isNaN(savedSessionCharge)) setSessionCharge(savedSessionCharge);
@@ -425,6 +440,11 @@ elapsedSeconds,
 score,
 ]);
 
+useEffect(() => {
+const interval = window.setInterval(() => setTick(Date.now()), 60);
+return () => window.clearInterval(interval);
+}, []);
+
 const unlockedSlots = useMemo(() => getUnlockedSlotIds(charge), [charge]);
 const pattern = useMemo(() => detectPattern(orbs), [orbs]);
 
@@ -457,13 +477,8 @@ setSessionCharge((prev) => prev + gain);
 setScore((prev) => prev + gain);
 }
 
-if (delta > 10) {
-setTransitions((prev) => prev + 1);
-}
-
-if (nextEnergy > 58 && prevEnergy <= 58) {
-setWindowsCount((prev) => prev + 1);
-}
+if (delta > 10) setTransitions((prev) => prev + 1);
+if (nextEnergy > 58 && prevEnergy <= 58) setWindowsCount((prev) => prev + 1);
 }, 1400);
 
 return () => window.clearInterval(interval);
@@ -490,7 +505,7 @@ const distributed = computeLoadDistribution(prev, liveEnergy, elapsedSeconds);
 const next = applyDecay(distributed, elapsedSeconds, liveEnergy, pattern);
 
 if (next.length < prev.length) {
-setMessage("A structure collapsed under load.");
+setMessage("A structure collapsed under pressure.");
 const remainingIds = new Set(next.map((o) => o.id));
 if (focusedOrbId && !remainingIds.has(focusedOrbId)) {
 setFocusedOrbId(next[0]?.id ?? null);
@@ -537,13 +552,14 @@ return next;
 }
 
 function resetSystem() {
+const defaults = getDefaultOrbs();
 setCharge(149);
 setLiveState("OFF");
 setLiveEnergy(18);
 prevEnergyRef.current = 18;
 setSensitivity("Medium");
-setOrbs(getDefaultOrbs());
-setFocusedOrbId("orb-n");
+setOrbs(defaults);
+setFocusedOrbId(defaults[0]?.id ?? null);
 setMode("ambient");
 setWindowsCount(0);
 setTransitions(0);
@@ -565,18 +581,7 @@ setMessage("No open slot. Scale or Transmit.");
 return;
 }
 
-const nextOrb: Orb = {
-id: `orb-${nextSlot}-${Date.now()}`,
-slotId: nextSlot,
-type: "form",
-level: 1,
-size: 52,
-transmitting: false,
-integrity: 100,
-capacity: 120,
-load: 0,
-};
-
+const nextOrb = makeOrb(nextSlot, "form");
 setCharge((prev) => prev - FORM_COST);
 setOrbs((prev) => [...prev, nextOrb]);
 setFocusedOrbId(nextOrb.id);
@@ -602,9 +607,9 @@ orb.id === focusedOrb.id
 ...orb,
 type: "scale",
 level: orb.level + 1,
-size: Math.min(92, orb.size + 10),
 integrity: Math.min(100, orb.integrity + 18),
 capacity: orb.capacity + 35,
+baseSize: Math.min(76, orb.baseSize + 6),
 }
 : orb
 )
@@ -687,19 +692,18 @@ aria-label="Reset"
 </div>
 </div>
 
-<div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-white/[0.03]">
-<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.10),rgba(255,255,255,0.02)_30%,rgba(0,0,0,0.96)_72%)]" />
+<div className="relative overflow-hidden rounded-[2rem] border border-white/10 bg-[#03050a]">
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(101,255,237,0.10),rgba(0,0,0,0)_28%,rgba(0,0,0,0.96)_72%)]" />
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.05),rgba(0,0,0,0)_34%)]" />
 
 <div className="relative z-10 px-4 pt-4">
 <div className="mb-3 flex items-center justify-between gap-3">
-<div className="flex items-center gap-2">
 <button
-onClick={() => setMode((m) => (m === "ambient" ? "place" : "ambient"))}
+onClick={() => setMode((m) => (m === "ambient" ? "build" : "ambient"))}
 className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-white/70"
 >
 {mode === "ambient" ? "Build" : "Hide Grid"}
 </button>
-</div>
 
 <div className="flex items-center gap-2">
 <SensitivityPill
@@ -728,36 +732,27 @@ label="Raw"
 
 <div className="relative z-10 mx-auto aspect-square max-w-[760px] overflow-hidden">
 {[1, 2].map((ring) => {
-const size = ring === 1 ? 300 : 450;
-const show =
-mode === "place" ||
-SLOTS.some(
-(slot) =>
-slot.ring === ring &&
-unlockedSlots.includes(slot.id) &&
-orbs.some((o) => o.slotId === slot.id)
-);
-
+const size = ring === 1 ? 304 : 452;
+const opacity = ring === 1 ? 0.22 : 0.12;
 return (
 <motion.div
 key={ring}
-className="absolute left-1/2 top-1/2 rounded-full border border-white/10"
+className="absolute left-1/2 top-1/2 rounded-full border border-cyan-200/15"
 style={{
 width: size,
 height: size,
-transform: "translate(-50%, -50%)",
+transform: "translate(-50%, -50%) scaleY(0.82)",
+filter: `blur(${ring === 2 ? 0.6 : 0}px)`,
 }}
 animate={{
 opacity:
-liveState === "LIVE" && show
-? [0.06, 0.16, 0.06]
-: show
-? 0.08
-: 0.02,
+liveState === "LIVE"
+? [opacity * 0.7, opacity, opacity * 0.7]
+: opacity * 0.5,
 scale: liveState === "LIVE" ? [1, 1.01, 1] : 1,
 }}
 transition={{
-duration: 4.5 + ring,
+duration: 5 + ring,
 repeat: Infinity,
 ease: "easeInOut",
 }}
@@ -768,69 +763,58 @@ ease: "easeInOut",
 {SLOTS.filter((slot) => unlockedSlots.includes(slot.id)).map((slot) => {
 const orb = orbs.find((o) => o.slotId === slot.id);
 const focused = orb?.id === focusedOrbId;
-const showSlot = mode === "place" || !!orb;
+const showSlot = mode === "build" || !!orb;
 
 return (
 <React.Fragment key={slot.id}>
-{showSlot && (
-<motion.div
-className="absolute left-1/2 top-1/2 z-5 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/12"
+{showSlot && !orb && (
+<motion.button
+className="absolute left-1/2 top-1/2 z-5 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/10 bg-white/[0.03]"
 style={{
 marginLeft: slot.x,
 marginTop: slot.y,
-background: orb ? "transparent" : "rgba(255,255,255,0.03)",
+filter: "blur(0.2px)",
 }}
 animate={{
-opacity: mode === "place" && !orb ? [0.18, 0.5, 0.18] : 0.14,
-scale: mode === "place" && !orb ? [1, 1.18, 1] : 1,
+opacity: [0.16, 0.46, 0.16],
+scale: [1, 1.18, 1],
 }}
 transition={{
 duration: 2.4,
 repeat: Infinity,
 ease: "easeInOut",
 }}
+onClick={() => {
+if (mode !== "build" || !canForm) return;
+const nextOrb = makeOrb(slot.id, "form");
+setCharge((prev) => prev - FORM_COST);
+setOrbs((prev) => [...prev, nextOrb]);
+setFocusedOrbId(nextOrb.id);
+setMode("ambient");
+setMessage("New structure formed.");
+}}
 />
 )}
 
 {orb && (
-<>
-<motion.div
-className="absolute left-1/2 top-1/2 z-5 h-px origin-left bg-white/15"
-style={{
-width: Math.sqrt(slot.x * slot.x + slot.y * slot.y),
-transform: `translate(0, 0) rotate(${Math.atan2(
-slot.y,
-slot.x
-)}rad)`,
-}}
-animate={{
-opacity: focused ? [0.14, 0.48, 0.14] : [0.06, 0.14, 0.06],
-}}
-transition={{
-duration: focused ? 1.8 : 3.2,
-repeat: Infinity,
-ease: "easeInOut",
-}}
-/>
-
-<OrbNode
+<StarNode
 orb={orb}
 slot={slot}
 focused={focused}
+tick={tick}
 onClick={() => {
 setFocusedOrbId(orb.id);
-setMessage(`${getOrbLabel(orb.type)} structure focused.`);
 setMode("ambient");
+setMessage(`${getOrbLabel(orb.type)} structure focused.`);
 }}
 />
-</>
 )}
 </React.Fragment>
 );
 })}
 
 <motion.div
-className="absolute left-1/2 top-1/2 z-20 h-52 w-52 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15 bg-white/[0.08] text-center shadow-[0_0_120px_rgba(255,255,255,0.12)] backdrop-blur-xl"
+className="absolute left-1/2 top-1/2 z-20 h-56 w-56 -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-100/15 bg-[radial-gradient(circle_at_35%_30%,rgba(240,255,255,0.9),rgba(137,255,239,0.92)_28%,rgba(22,78,88,0.85)_66%,rgba(8,20,30,0.9)_100%)] shadow-[0_0_120px_rgba(89,255,233,0.20)]"
 animate={{
 y: liveState === "LIVE" ? [0, -10, 0, 7, 0] : [0, -2, 0],
 x: liveState === "LIVE" ? [0, 5, 0, -5, 0] : [0, 1, 0],
@@ -840,8 +824,8 @@ liveState === "LIVE"
 : 1,
 opacity:
 liveState === "LIVE"
-? [0.9, Math.min(1, 0.86 + liveEnergy / 180), 0.9]
-: 0.8,
+? [0.92, Math.min(1, 0.88 + liveEnergy / 180), 0.92]
+: 0.82,
 }}
 transition={{
 duration: liveState === "LIVE" ? 7.5 : 5,
@@ -849,64 +833,77 @@ repeat: Infinity,
 ease: "easeInOut",
 }}
 >
-<div className="pt-11 text-[10px] uppercase tracking-[0.3em] text-white/40">
+<motion.div
+className="absolute inset-[-16px] rounded-full border border-cyan-100/12"
+animate={{ scale: [1, 1.06, 1], opacity: [0.22, 0.08, 0.22] }}
+transition={{ duration: 4.4, repeat: Infinity, ease: "easeInOut" }}
+/>
+<motion.div
+className="absolute inset-[-34px] rounded-full border border-cyan-100/8"
+animate={{ scale: [1, 1.08, 1], opacity: [0.12, 0.04, 0.12] }}
+transition={{ duration: 5.4, repeat: Infinity, ease: "easeInOut" }}
+/>
+
+<div className="pt-12 text-center text-[10px] uppercase tracking-[0.3em] text-white/40">
 Pyron
 </div>
-<div className="mt-3 text-3xl font-semibold">{liveState}</div>
-<div className="mt-1 text-base text-white/65">
+<div className="mt-3 text-center text-4xl font-semibold text-white">
+{liveState}
+</div>
+<div className="mt-1 text-center text-lg text-white/75">
 {Math.round(liveEnergy)} energy
 </div>
 
-<div className="mx-auto mt-3 h-2 w-28 overflow-hidden rounded-full bg-white/10">
+<div className="mx-auto mt-4 h-2.5 w-32 overflow-hidden rounded-full bg-white/12">
 <div
-className="h-full bg-white/70"
+className="h-full rounded-full bg-white/80"
 style={{ width: `${Math.max(0, Math.min(100, integrityAvg))}%` }}
 />
 </div>
 
 {pattern && (
-<div className="mx-auto mt-4 inline-flex rounded-full border border-white/10 bg-white/[0.05] px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-white/70">
+<div className="mx-auto mt-4 inline-flex rounded-full border border-white/10 bg-white/10 px-3 py-1 text-[10px] uppercase tracking-[0.18em] text-white/80">
 {pattern.name} +{pattern.bonus}
 </div>
 )}
 </motion.div>
 
-{focusedOrb && <FocusHalo orb={focusedOrb} />}
+{focusedOrb && <FocusHalo orb={focusedOrb} tick={tick} />}
 
 <ActionOrb
 label="Form"
 cost={FORM_COST}
 x={0}
-y={-226}
+y={-232}
 enabled={canForm}
 onClick={runForm}
 />
 <ActionOrb
 label="Scale"
 cost={SCALE_COST}
-x={-198}
-y={164}
+x={-208}
+y={174}
 enabled={canScale}
 onClick={runScale}
 />
 <ActionOrb
 label="Transmit"
 cost={TRANSMIT_COST}
-x={198}
-y={164}
+x={208}
+y={174}
 enabled={canTransmit}
 onClick={runTransmit}
 />
 
 {focusedOrb?.transmitting && (
 <motion.div
-className="absolute left-1/2 top-1/2 z-15 rounded-full border border-white/20"
+className="absolute left-1/2 top-1/2 z-15 rounded-full border border-cyan-100/20"
 style={{
-width: 220,
-height: 220,
-transform: "translate(-50%, -50%)",
+width: 240,
+height: 240,
+transform: "translate(-50%, -50%) scaleY(0.82)",
 }}
-animate={{ scale: [1, 3.2, 4.2], opacity: [0.75, 0.18, 0] }}
+animate={{ scale: [1, 3.4, 4.4], opacity: [0.78, 0.18, 0] }}
 transition={{ duration: 1.1, ease: "easeOut" }}
 />
 )}
@@ -914,23 +911,29 @@ transition={{ duration: 1.1, ease: "easeOut" }}
 
 <div className="relative z-10 border-t border-white/10 px-4 py-4">
 <div className="grid gap-3 md:grid-cols-5">
+<MiniStat label="Goal" value="Maintain structure" />
 <MiniStat label="Form" value={stateRead.form} />
 <MiniStat label="Signal" value={stateRead.signal} />
 <MiniStat label="Energy" value={stateRead.energy} />
 <MiniStat label="Time" value={formatTime(elapsedSeconds)} />
-<MiniStat label="Score" value={String(score)} />
-<MiniStat label="Transitions" value={String(transitions)} />
 <MiniStat label="Windows" value={String(windowsCount)} />
+<MiniStat label="Transitions" value={String(transitions)} />
 <MiniStat label="Session Charge" value={`+${sessionCharge}`} />
-<MiniStat label="Integrity" value={`${Math.round(integrityAvg)}`} />
-<MiniStat label="Bank" value={`${charge}/${nextThreshold}`} />
+<MiniStat label="Integrity" value={`${Math.round(integrityAvg)}%`} />
+<MiniStat label="Score" value={String(score)} />
 </div>
 
 {focusedOrb && (
 <div className="mt-4 grid gap-3 md:grid-cols-3">
 <MiniStat label="Focus" value={getOrbLabel(focusedOrb.type)} />
-<MiniStat label="Load" value={`${Math.round(focusedOrb.load)}/${focusedOrb.capacity}`} />
-<MiniStat label="Integrity" value={`${Math.round(focusedOrb.integrity)}%`} />
+<MiniStat
+label="Load"
+value={`${Math.round(focusedOrb.load)}/${focusedOrb.capacity}`}
+/>
+<MiniStat
+label="Node Integrity"
+value={`${Math.round(focusedOrb.integrity)}%`}
+/>
 </div>
 )}
 
@@ -946,7 +949,7 @@ transition={{ duration: 1.1, ease: "easeOut" }}
 
 <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-white/10">
 <div
-className="h-full bg-white/65"
+className="h-full rounded-full bg-white/70"
 style={{ width: `${progress}%` }}
 />
 </div>
@@ -980,47 +983,68 @@ active
 );
 }
 
-function OrbNode({
+function StarNode({
 orb,
 slot,
 focused,
+tick,
 onClick,
 }: {
 orb: Orb;
 slot: Slot;
 focused: boolean;
+tick: number;
 onClick: () => void;
 }) {
 const Icon = getOrbIcon(orb.type);
-
-const integrityOpacity =
-orb.integrity > 70 ? 1 : orb.integrity > 40 ? 0.78 : 0.5;
+const pos = slotRenderPosition(slot, orb, tick);
+const visual = orbVisuals(orb);
 
 return (
+<>
+<motion.div
+className="absolute left-1/2 top-1/2 z-5 h-px origin-left bg-cyan-100/12"
+style={{
+width: Math.sqrt(pos.x * pos.x + pos.y * pos.y),
+transform: `translate(0, 0) rotate(${Math.atan2(pos.y, pos.x)}rad)`,
+filter: orb.depth < -0.25 ? "blur(0.4px)" : "none",
+}}
+animate={{
+opacity: focused ? [0.16, 0.4, 0.16] : [0.05, 0.12, 0.05],
+}}
+transition={{
+duration: focused ? 1.8 : 3.2,
+repeat: Infinity,
+ease: "easeInOut",
+}}
+/>
+
 <motion.button
-className={`absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-white backdrop-blur-xl ${
+className={`absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border text-white ${
 focused
-? "border-white/18 bg-white/[0.14] shadow-[0_0_50px_rgba(255,255,255,0.14)]"
+? "border-white/22 bg-white/[0.15]"
 : "border-white/12 bg-white/[0.07]"
 }`}
 style={{
-width: orb.size,
-height: orb.size,
-marginLeft: slot.x,
-marginTop: slot.y,
-opacity: integrityOpacity,
+width: visual.size,
+height: visual.size,
+marginLeft: pos.x,
+marginTop: pos.y,
+opacity: visual.opacity,
+filter: `blur(${visual.blur}px) drop-shadow(0 0 ${visual.glow}px rgba(125,255,240,0.28))`,
+boxShadow: `0 0 ${visual.glow}px rgba(125,255,240,0.18)`,
 }}
 animate={{
-scale: focused ? [1, 1.05, 1] : [1, 1.015, 1],
+scale: focused ? [1, 1.06, 1] : [1, 1.02, 1],
 opacity:
 orb.integrity < 40
-? [integrityOpacity, integrityOpacity * 0.65, integrityOpacity]
+? [visual.opacity, visual.opacity * 0.6, visual.opacity]
 : orb.transmitting
-? [integrityOpacity * 0.75, integrityOpacity, integrityOpacity * 0.75]
-: integrityOpacity,
+? [visual.opacity * 0.72, visual.opacity, visual.opacity * 0.72]
+: visual.opacity,
 }}
 transition={{
-duration: focused ? 1.8 : 3.6,
+duration: focused ? 1.8 : 3.8,
 repeat: Infinity,
 ease: "easeInOut",
 }}
@@ -1028,24 +1052,28 @@ onClick={onClick}
 >
 <Icon className="h-4 w-4" />
 </motion.button>
+</>
 );
 }
 
-function FocusHalo({ orb }: { orb: Orb }) {
+function FocusHalo({ orb, tick }: { orb: Orb; tick: number }) {
 const slot = findSlot(orb.slotId);
+const pos = slotRenderPosition(slot, orb, tick);
+const visual = orbVisuals(orb);
 
 return (
 <motion.div
-className="absolute left-1/2 top-1/2 z-9 rounded-full border border-white/22"
+className="absolute left-1/2 top-1/2 z-9 rounded-full border border-white/24"
 style={{
-width: orb.size + 18,
-height: orb.size + 18,
-marginLeft: slot.x - (orb.size + 18) / 2,
-marginTop: slot.y - (orb.size + 18) / 2,
+width: visual.size + 18,
+height: visual.size + 18,
+marginLeft: pos.x,
+marginTop: pos.y,
+transform: "translate(-50%, -50%)",
 }}
 animate={{
 scale: [1, 1.08, 1],
-opacity: [0.22, 0.7, 0.22],
+opacity: [0.22, 0.72, 0.22],
 }}
 transition={{
 duration: 1.8,
