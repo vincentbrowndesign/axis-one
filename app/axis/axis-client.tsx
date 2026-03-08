@@ -13,11 +13,14 @@ type PushDirection =
 | "Back Left"
 | "Back Right";
 
+type ShapeType = "Settle" | "Float" | "Drop";
+
 type LockItem = {
 id: string;
 ts: number;
 mark: number;
 push: PushDirection;
+shape: ShapeType;
 };
 
 type SensorSample = {
@@ -30,13 +33,13 @@ gy: number;
 gz: number;
 };
 
-const BUFFER_SIZE = 240;
-const LIVE_WINDOW = 22;
+const BUFFER_SIZE = 260;
+const LIVE_WINDOW = 24;
 const LOCK_THRESHOLD = 82;
 const STAY_THRESHOLD = 74;
-const FREEZE_MS = 800;
+const FREEZE_MS = 900;
 const LOCK_COOLDOWN_MS = 1800;
-const CALIBRATION_MS = 1800;
+const CALIBRATION_MS = 1500;
 
 function clamp(n: number, min: number, max: number) {
 return Math.max(min, Math.min(max, n));
@@ -114,27 +117,39 @@ function directionFromVector(x: number, y: number): PushDirection {
 const dead = 0.12;
 if (Math.abs(x) < dead && Math.abs(y) < dead) return "Centered";
 
-const horiz =
-x > 0.22 ? "Right" : x < -0.22 ? "Left" : "";
-const vert =
-y > 0.22 ? "Forward" : y < -0.22 ? "Back" : "";
+const horiz = x > 0.22 ? "Right" : x < -0.22 ? "Left" : "";
+const vert = y > 0.22 ? "Forward" : y < -0.22 ? "Back" : "";
 
 const combined = [vert, horiz].filter(Boolean).join(" ") as PushDirection;
 return (combined || "Centered") as PushDirection;
 }
 
+function detectShape(series: number[]): ShapeType {
+const recent = series.slice(-18);
+if (recent.length < 8) return "Settle";
+
+const first = recent[0];
+const mid = recent[Math.floor(recent.length / 2)];
+const last = recent[recent.length - 1];
+const r = range(recent);
+const tailStd = std(recent.slice(-6));
+
+if (mid < first - 10 && last > mid + 12) return "Drop";
+if (last > first + 8 && tailStd < 2.6 && r < 22) return "Float";
+return "Settle";
+}
+
 export default function AxisClient() {
 const [mode, setMode] = useState<"demo" | "live">("demo");
-const [running, setRunning] = useState(true);
+const [running, setRunning] = useState(false);
 const [sensorReady, setSensorReady] = useState(false);
 const [permissionNeeded, setPermissionNeeded] = useState(false);
 
 const [phase, setPhase] = useState<"idle" | "calibrating" | "live">("idle");
 const [axisMark, setAxisMark] = useState(0);
 const [axisPush, setAxisPush] = useState<PushDirection>("Centered");
-const [locked, setLocked] = useState(false);
+const [axisShape, setAxisShape] = useState<ShapeType>("Settle");
 const [lockFlash, setLockFlash] = useState(false);
-
 const [history, setHistory] = useState<LockItem[]>([]);
 
 const framesRef = useRef<SensorSample[]>([]);
@@ -167,7 +182,7 @@ latestPushVectorRef.current = { x: 0, y: 0 };
 
 setAxisMark(0);
 setAxisPush("Centered");
-setLocked(false);
+setAxisShape("Settle");
 setLockFlash(false);
 setHistory([]);
 setPhase("idle");
@@ -181,7 +196,6 @@ setSensorReady(false);
 function beginCalibration() {
 calibrationStartRef.current = Date.now();
 setPhase("calibrating");
-setLocked(false);
 setLockFlash(false);
 }
 
@@ -194,7 +208,7 @@ setLockFlash(false);
 }, FREEZE_MS);
 }
 
-function captureLock(mark: number, push: PushDirection) {
+function captureLock(mark: number, push: PushDirection, shape: ShapeType) {
 const now = Date.now();
 if (now < lockCooldownRef.current) return;
 lockCooldownRef.current = now + LOCK_COOLDOWN_MS;
@@ -202,15 +216,18 @@ lockCooldownRef.current = now + LOCK_COOLDOWN_MS;
 setLockFlash(true);
 clearLockFlash();
 
-setHistory((prev) => [
+setHistory((prev) =>
+[
 {
 id: uid(),
 ts: now,
 mark,
 push,
+shape,
 },
 ...prev,
-].slice(0, 10));
+].slice(0, 10),
+);
 }
 
 function processSample(sample: SensorSample) {
@@ -256,7 +273,11 @@ const tiltZ = mean(recent.map((s) => s.az - base.z));
 
 const tiltMagnitude = Math.sqrt(tiltX * tiltX + tiltY * tiltY);
 const motionNoise = accelNoise * 2.2 + gyroNoise * 0.12 + range(accelSmooth) * 0.22;
-const settleScore = clamp(100 - motionNoise * 11 - tiltMagnitude * 14 - Math.abs(tiltZ) * 2.5, 0, 100);
+const settleScore = clamp(
+100 - motionNoise * 11 - tiltMagnitude * 14 - Math.abs(tiltZ) * 2.5,
+0,
+100,
+);
 
 if (fastMarkRef.current === 0 && slowMarkRef.current === 0) {
 fastMarkRef.current = settleScore;
@@ -289,14 +310,14 @@ markSeriesRef.current.shift();
 
 const pushX = clamp(tiltX / 4.5, -1, 1);
 const pushY = clamp(-tiltY / 4.5, -1, 1);
-
 latestPushVectorRef.current = { x: pushX, y: pushY };
 
 const push = directionFromVector(pushX, pushY);
+const shape = detectShape(markSeriesRef.current);
 
 setAxisMark(Math.round(finalMark));
 setAxisPush(push);
-setLocked(lockedStateRef.current);
+setAxisShape(shape);
 
 const lastMarks = markSeriesRef.current.slice(-8);
 const localPeak = Math.max(...lastMarks);
@@ -307,11 +328,11 @@ Math.round(finalMark) >= LOCK_THRESHOLD &&
 Math.round(finalMark) >= localPeak - 1 &&
 sustained
 ) {
-captureLock(Math.round(finalMark), push);
+captureLock(Math.round(finalMark), push, shape);
 }
 }
 
-async function enableLiveMotion() {
+async function startLiveMotion() {
 const Motion = DeviceMotionEvent as typeof DeviceMotionEvent & {
 requestPermission?: () => Promise<"granted" | "denied">;
 };
@@ -350,6 +371,7 @@ window.addEventListener("devicemotion", handler, true);
 setSensorReady(true);
 setPermissionNeeded(false);
 setMode("live");
+setRunning(true);
 beginCalibration();
 } catch {
 setPermissionNeeded(true);
@@ -369,7 +391,7 @@ const driftX = Math.sin(t * 0.95 + 0.5) * 0.7;
 const driftY = Math.sin(t * 0.63 + 1.1) * 0.55;
 const settle = Math.max(0, Math.sin(t * 1.4 + 0.9)) * 0.38;
 
-const sample: SensorSample = {
+processSample({
 t: Date.now(),
 ax: driftX + settle * 0.12,
 ay: driftY * 0.8,
@@ -377,9 +399,7 @@ az: 9.8 - settle * 0.18,
 gx: driftX * 5.4,
 gy: driftY * 4.6,
 gz: settle * 1.8,
-};
-
-processSample(sample);
+});
 }, 50);
 }
 
@@ -403,51 +423,56 @@ if (freezeTimerRef.current) window.clearTimeout(freezeTimerRef.current);
 };
 }, []);
 
+useEffect(() => {
+if (mode === "demo") {
+startDemo();
+}
+}, [mode, running]);
+
 const lineValues = useMemo(
 () => resample(markSeriesRef.current.slice(-96), 84),
 [axisMark, history.length, lockFlash],
 );
 
-const line = useMemo(() => linePath(lineValues, 700, 220), [lineValues]);
+const line = useMemo(() => linePath(lineValues, 700, 190), [lineValues]);
 
 const pushVector = latestPushVectorRef.current;
 const scopeX = 120 + pushVector.x * 62;
 const scopeY = 120 - pushVector.y * 62;
 
-const phaseLabel =
-phase === "idle"
-? "Idle"
-: phase === "calibrating"
+const statusLabel =
+phase === "calibrating"
 ? "Align Axis"
 : lockFlash
-? "Axis Lock"
-: "Live";
+? "Axis Shape"
+: running
+? "Live"
+: "Off";
+
+const historyTop = history[0];
 
 return (
 <main className="min-h-screen bg-black text-white">
-<div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
-<section className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.07),rgba(0,0,0,0.95)_42%)] p-5 shadow-[0_0_80px_rgba(255,255,255,0.04)_inset] sm:p-8">
-<div className="text-sm uppercase tracking-[0.35em] text-lime-300/90">
-Axis
-</div>
-
-<h1 className="mt-2 max-w-3xl text-4xl font-semibold tracking-tight sm:text-6xl">
+<div className="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-5 sm:px-6 sm:py-6">
+<section className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),rgba(0,0,0,0.96)_42%)] p-4 sm:p-6">
+<div className="text-sm uppercase tracking-[0.34em] text-lime-300/90">Axis</div>
+<h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-6xl">
 Structure before action.
 </h1>
-
-<p className="mt-4 max-w-3xl text-lg leading-8 text-white/65">
+<p className="mt-3 max-w-4xl text-base leading-7 text-white/65 sm:text-lg">
 Use the phone you already have as Axis Brain. Align Axis, watch Axis Mark rise,
-and capture Axis Lock automatically.
+and capture Axis Shape automatically.
 </p>
 
-<div className="mt-8 flex flex-wrap gap-4">
+<div className="mt-5 flex flex-wrap gap-3">
 <button
 onClick={() => {
 setMode("demo");
 resetAxisSession(true);
+setRunning(true);
 beginCalibration();
 }}
-className={`rounded-full px-6 py-3 text-lg font-medium transition ${
+className={`rounded-full px-5 py-3 text-base font-medium ${
 mode === "demo"
 ? "bg-lime-400 text-black"
 : "border border-white/10 bg-black/60 text-white"
@@ -457,135 +482,134 @@ Demo
 </button>
 
 <button
-onClick={enableLiveMotion}
-className={`rounded-full px-6 py-3 text-lg font-medium transition ${
+onClick={startLiveMotion}
+className={`rounded-full px-5 py-3 text-base font-medium ${
 mode === "live"
 ? "bg-lime-400 text-black"
 : "border border-white/10 bg-black/60 text-white"
 }`}
 >
-Live Motion
+Start Axis
 </button>
 
 <button
-onClick={() => beginCalibration()}
-className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
+onClick={beginCalibration}
+className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
 >
 Align Axis
 </button>
 
+{running ? (
 <button
-onClick={() => setRunning((prev) => !prev)}
-className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
+onClick={() => setRunning(false)}
+className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
 >
-{running ? "Pause" : "Start"}
+Off
 </button>
+) : (
+<button
+onClick={() => setRunning(true)}
+className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
+>
+On
+</button>
+)}
 
 <button
 onClick={() => resetAxisSession(true)}
-className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
+className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
 >
 Reset
 </button>
 </div>
 
 {permissionNeeded && mode === "live" && !sensorReady ? (
-<div className="mt-5 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
-Motion permission is required for live phone sensing.
+<div className="mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
+Tap Start Axis once and allow motion access.
 </div>
 ) : null}
 </section>
 
-<section className="mt-7 grid grid-cols-1 gap-6 lg:grid-cols-[0.9fr_1.1fr]">
-<div className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
-<div className="flex items-end justify-between gap-4">
-<div>
-<div className="text-sm uppercase tracking-[0.28em] text-white/40">
-{phaseLabel}
-</div>
-<div className="mt-2 text-7xl font-semibold leading-none tracking-tight sm:text-[7rem]">
-{axisMark}
-</div>
-<div className="mt-3 text-lg text-white/60">Axis Mark</div>
+<section className="mt-5 grid flex-1 grid-cols-1 gap-5 lg:grid-cols-[0.95fr_1.05fr]">
+<div className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.04),rgba(0,0,0,0.97)_42%)] p-4 sm:p-6">
+<div className="grid grid-cols-2 gap-4">
+<div className="rounded-[22px] border border-white/10 bg-black/45 p-4">
+<div className="text-sm uppercase tracking-[0.24em] text-white/42">{statusLabel}</div>
+<div className="mt-3 text-6xl font-semibold leading-none">{axisMark}</div>
+<div className="mt-2 text-lg text-white/55">Axis Mark</div>
 </div>
 
-<div className="text-right">
-<div className="text-sm uppercase tracking-[0.22em] text-white/40">
-Axis Push
-</div>
-<div className="mt-2 text-2xl font-semibold">{axisPush}</div>
-<div className="mt-3 text-sm text-white/50">
-{lockFlash ? "★ Axis Lock" : locked ? "Holding lock" : "Searching"}
+<div className="rounded-[22px] border border-white/10 bg-black/45 p-4">
+<div className="text-sm uppercase tracking-[0.24em] text-white/42">Axis Push</div>
+<div className="mt-3 text-2xl font-semibold leading-tight">{axisPush}</div>
+<div className="mt-3 text-sm text-white/55">
+{lockFlash ? "Shape captured" : axisShape}
 </div>
 </div>
 </div>
 
-<div className="mt-8 rounded-[28px] border border-white/10 bg-black/50 p-5">
-<div className="mb-4 text-xl font-semibold">Axis Scope</div>
+<div className="mt-5 rounded-[26px] border border-white/10 bg-black/50 p-4 sm:p-5">
+<div className="mb-3 flex items-center justify-between">
+<div className="text-2xl font-semibold">Axis Scope</div>
+<div className="text-sm uppercase tracking-[0.24em] text-white/38">
+{lockFlash ? "Shape" : running ? "Live" : "Off"}
+</div>
+</div>
 
-<div className="mx-auto flex w-full max-w-[320px] items-center justify-center">
-<svg viewBox="0 0 240 240" className="h-[260px] w-[260px]">
+<div className="mx-auto flex w-full max-w-[360px] items-center justify-center">
+<svg viewBox="0 0 240 240" className="h-[300px] w-[300px] max-w-full">
 <circle cx="120" cy="120" r="92" fill="none" stroke="rgba(255,255,255,0.12)" />
 <circle cx="120" cy="120" r="64" fill="none" stroke="rgba(255,255,255,0.10)" />
 <circle cx="120" cy="120" r="36" fill="none" stroke="rgba(255,255,255,0.10)" />
-
 <line x1="120" y1="20" x2="120" y2="220" stroke="rgba(255,255,255,0.08)" />
 <line x1="20" y1="120" x2="220" y2="120" stroke="rgba(255,255,255,0.08)" />
 
-<circle cx="120" cy="120" r="4" fill="white" opacity="0.8" />
+<circle cx="120" cy="120" r="4" fill="white" opacity="0.7" />
 
 {lockFlash ? (
-<circle
-cx={scopeX}
-cy={scopeY}
-r="18"
-fill="rgba(154,240,75,0.25)"
-/>
-) : null}
-
-<circle
-cx={scopeX}
-cy={scopeY}
-r={lockFlash ? 10 : 8}
-fill={lockFlash ? "#9AF04B" : "white"}
-/>
-
-{lockFlash ? (
+<>
+<circle cx={scopeX} cy={scopeY} r="19" fill="rgba(154,240,75,0.22)" />
 <text
 x={scopeX}
 y={scopeY - 18}
 textAnchor="middle"
 fill="#9AF04B"
-fontSize="18"
+fontSize="16"
 fontWeight="700"
 >
-*
+{axisShape}
 </text>
+</>
 ) : null}
+
+<circle
+cx={scopeX}
+cy={scopeY}
+r={lockFlash ? 12 : 10}
+fill={lockFlash ? "#9AF04B" : "white"}
+/>
 </svg>
 </div>
 </div>
-</div>
 
-<div className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
+<div className="mt-5 rounded-[26px] border border-white/10 bg-black/50 p-4 sm:p-5">
 <div className="flex items-end justify-between gap-4">
 <div>
-<h2 className="text-4xl font-semibold tracking-tight sm:text-5xl">Axis Line</h2>
-<p className="mt-3 text-lg text-white/55">
+<h2 className="text-2xl font-semibold">Axis Line</h2>
+<p className="mt-2 text-sm text-white/55">
 Signal history of structure over time.
 </p>
 </div>
-
 <div className="text-sm uppercase tracking-[0.24em] text-white/38">
 {mode === "live" && sensorReady ? "Live" : "Demo"}
 </div>
 </div>
 
-<div className="mt-7 overflow-hidden rounded-[28px] border border-white/10 bg-black/60 p-4 sm:p-5">
-<svg viewBox="0 0 700 220" className="h-[280px] w-full" preserveAspectRatio="none">
-<line x1="0" y1="48" x2="700" y2="48" stroke="rgba(154,240,75,0.18)" strokeDasharray="4 8" />
-<line x1="0" y1="110" x2="700" y2="110" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 8" />
-<line x1="0" y1="170" x2="700" y2="170" stroke="rgba(255,255,255,0.05)" strokeDasharray="4 8" />
+<div className="mt-4 overflow-hidden rounded-[22px] border border-white/10 bg-black/60 p-3 sm:p-4">
+<svg viewBox="0 0 700 190" className="h-[210px] w-full" preserveAspectRatio="none">
+<line x1="0" y1="45" x2="700" y2="45" stroke="rgba(154,240,75,0.16)" strokeDasharray="4 8" />
+<line x1="0" y1="95" x2="700" y2="95" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 8" />
+<line x1="0" y1="145" x2="700" y2="145" stroke="rgba(255,255,255,0.05)" strokeDasharray="4 8" />
 
 {Array.from({ length: 8 }).map((_, i) => (
 <line
@@ -593,7 +617,7 @@ key={i}
 x1={i * 100}
 y1="0"
 x2={i * 100}
-y2="220"
+y2="190"
 stroke="rgba(255,255,255,0.04)"
 />
 ))}
@@ -616,54 +640,47 @@ strokeLinejoin="round"
 />
 </svg>
 </div>
-
-<div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
-<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Mark</div>
-<div className="mt-2 text-4xl font-semibold">{axisMark}</div>
-</div>
-
-<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Push</div>
-<div className="mt-2 text-2xl font-semibold">{axisPush}</div>
-</div>
-
-<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Lock</div>
-<div className="mt-2 text-2xl font-semibold">{lockFlash ? "Live" : "Waiting"}</div>
 </div>
 </div>
+
+<div className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.04),rgba(0,0,0,0.97)_42%)] p-4 sm:p-6">
+<div className="flex items-end justify-between gap-4">
+<div>
+<h2 className="text-4xl font-semibold tracking-tight">Axis History</h2>
+<p className="mt-2 text-lg text-white/55">Captured Axis Shape moments.</p>
 </div>
-</section>
 
-<section className="mt-7 rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
-<h2 className="text-4xl font-semibold tracking-tight sm:text-5xl">Axis History</h2>
-<p className="mt-3 text-lg text-white/55">
-Captured Axis Lock moments.
-</p>
+{historyTop ? (
+<div className="rounded-[20px] border border-white/10 bg-black/40 px-4 py-3 text-right">
+<div className="text-sm uppercase tracking-[0.22em] text-white/42">Latest</div>
+<div className="mt-2 text-3xl font-semibold">{historyTop.mark}</div>
+</div>
+) : null}
+</div>
 
-<div className="mt-6 space-y-4">
+<div className="mt-5 space-y-3">
 {history.length === 0 ? (
-<div className="rounded-[24px] border border-white/10 bg-black/35 p-6 text-lg text-white/55">
-No locks captured yet.
+<div className="rounded-[22px] border border-white/10 bg-black/35 p-6 text-lg text-white/55">
+No shapes captured yet.
 </div>
 ) : null}
 
 {history.map((item) => (
 <div
 key={item.id}
-className="flex items-center justify-between gap-4 rounded-[24px] border border-white/10 bg-black/35 px-6 py-5"
+className="flex items-center justify-between gap-4 rounded-[22px] border border-white/10 bg-black/35 px-5 py-4"
 >
-<div>
-<div className="text-2xl font-semibold">Axis Lock</div>
-<div className="mt-2 text-lg text-white/55">
+<div className="min-w-0">
+<div className="text-2xl font-semibold">{item.shape}</div>
+<div className="mt-1 text-base text-white/55">
 {item.push} • {formatTime(item.ts)}
 </div>
 </div>
 
-<div className="text-4xl font-semibold">{item.mark}</div>
+<div className="text-3xl font-semibold">{item.mark}</div>
 </div>
 ))}
+</div>
 </div>
 </section>
 </div>
