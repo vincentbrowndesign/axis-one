@@ -10,6 +10,14 @@ t: number;
 value: number;
 };
 
+type CapturedMoment = {
+id: number;
+score: number;
+state: AxisState;
+shape: AxisShape;
+ts: string;
+};
+
 function clamp(value: number, min: number, max: number) {
 return Math.min(max, Math.max(min, value));
 }
@@ -37,12 +45,11 @@ function detectAxisShape(points: SamplePoint[]): AxisShape {
 if (points.length < 12) return "Unknown";
 
 const values = points.map((p) => p.value);
-const first = values.slice(0, Math.floor(values.length / 3));
-const middle = values.slice(
-Math.floor(values.length / 3),
-Math.floor((values.length * 2) / 3)
-);
-const last = values.slice(Math.floor((values.length * 2) / 3));
+const third = Math.floor(values.length / 3);
+
+const first = values.slice(0, third);
+const middle = values.slice(third, third * 2);
+const last = values.slice(third * 2);
 
 const a = average(first);
 const b = average(middle);
@@ -53,11 +60,10 @@ const max = Math.max(...values);
 const range = max - min;
 
 if (range < 6) return "Float";
-
 if (a < b && b < c) return "Rise";
-if (a <= b && c < b - 6) return "Drop";
+if (a < b && Math.abs(c - b) <= 3) return "Load";
 if (a > b && c > b + 6) return "Break";
-if (a < b && c >= b - 3 && c <= b + 3) return "Load";
+if (a <= b && c < b - 6) return "Drop";
 if (Math.abs(a - b) < 4 && c > b + 6) return "Float";
 
 return "Unknown";
@@ -86,7 +92,7 @@ return "Quick instability followed by re-control.";
 case "Drop":
 return "Control dipped before recovery or rushed release.";
 case "Float":
-return "Smoother sustained control window.";
+return "Sustained control window.";
 default:
 return "Not enough signal yet.";
 }
@@ -103,12 +109,9 @@ const [mode, setMode] = useState<"live" | "demo">("live");
 const [stabilityScore, setStabilityScore] = useState(0);
 const [axisState, setAxisState] = useState<AxisState>("OFF_AXIS");
 const [axisShape, setAxisShape] = useState<AxisShape>("Unknown");
-
 const [rawMotion, setRawMotion] = useState(0);
 const [timeline, setTimeline] = useState<SamplePoint[]>([]);
-const [capturedMoments, setCapturedMoments] = useState<
-{ id: number; score: number; state: AxisState; shape: AxisShape; ts: string }[]
->([]);
+const [capturedMoments, setCapturedMoments] = useState<CapturedMoment[]>([]);
 
 const motionBufferRef = useRef<number[]>([]);
 const sampleIdRef = useRef(0);
@@ -118,11 +121,12 @@ const requestMotionPermission = async () => {
 try {
 if (typeof window === "undefined") return;
 
-const maybeIOS = (DeviceMotionEvent as unknown as { requestPermission?: () => Promise<string> })
-.requestPermission;
+const DeviceMotionEventWithPermission = DeviceMotionEvent as typeof DeviceMotionEvent & {
+requestPermission?: () => Promise<string>;
+};
 
-if (typeof maybeIOS === "function") {
-const result = await maybeIOS();
+if (typeof DeviceMotionEventWithPermission.requestPermission === "function") {
+const result = await DeviceMotionEventWithPermission.requestPermission();
 if (result === "granted") {
 setPermissionState("granted");
 } else {
@@ -167,7 +171,7 @@ window.removeEventListener("devicemotion", onMotion);
 useEffect(() => {
 if (mode !== "demo" || !isListening) return;
 
-let start = performance.now();
+const start = performance.now();
 
 const tick = (now: number) => {
 const t = (now - start) / 1000;
@@ -187,7 +191,9 @@ demoFrameRef.current = requestAnimationFrame(tick);
 demoFrameRef.current = requestAnimationFrame(tick);
 
 return () => {
-if (demoFrameRef.current) cancelAnimationFrame(demoFrameRef.current);
+if (demoFrameRef.current !== null) {
+cancelAnimationFrame(demoFrameRef.current);
+}
 };
 }, [mode, isListening]);
 
@@ -200,13 +206,17 @@ motionBufferRef.current.shift();
 }
 
 const variability = stdDev(motionBufferRef.current);
-const newScore = clamp(Math.round(100 - variability * 8 - noiseValue * 0.35), 0, 100);
+const newScore = clamp(
+Math.round(100 - variability * 8 - noiseValue * 0.35),
+0,
+100
+);
 const newState = getAxisState(newScore);
 
 setStabilityScore(newScore);
 setAxisState(newState);
 
-const nextPoint = {
+const nextPoint: SamplePoint = {
 t: sampleIdRef.current++,
 value: newScore,
 };
@@ -228,7 +238,7 @@ setIsListening(false);
 }
 
 function handleCaptureMoment() {
-const entry = {
+const entry: CapturedMoment = {
 id: Date.now(),
 score: stabilityScore,
 state: axisState,
@@ -286,6 +296,7 @@ type="button"
 >
 Live Motion
 </button>
+
 <button
 className={mode === "demo" ? "chip active" : "chip"}
 onClick={() => setMode("demo")}
@@ -296,7 +307,9 @@ Demo Signal
 </div>
 
 <div className="controls">
-{mode === "live" && permissionState !== "granted" && permissionState !== "unsupported" && (
+{mode === "live" &&
+permissionState !== "granted" &&
+permissionState !== "unsupported" && (
 <button className="primary" onClick={requestMotionPermission} type="button">
 Enable Motion
 </button>
@@ -305,12 +318,15 @@ Enable Motion
 <button className="primary" onClick={handleStart} type="button">
 Start
 </button>
+
 <button className="secondary" onClick={handleStop} type="button">
 Stop
 </button>
+
 <button className="secondary" onClick={handleCaptureMoment} type="button">
 Capture Moment
 </button>
+
 <button className="secondary" onClick={handleReset} type="button">
 Reset
 </button>
@@ -321,14 +337,17 @@ Reset
 <span className="dot" />
 {formatStateLabel(axisState)}
 </div>
+
 <div className="mini-stat">
 <span className="mini-label">Stability</span>
 <strong>{stabilityScore}</strong>
 </div>
+
 <div className="mini-stat">
 <span className="mini-label">Axis Shape</span>
 <strong>{axisShape}</strong>
 </div>
+
 <div className="mini-stat">
 <span className="mini-label">Signal Noise</span>
 <strong>{rawMotion.toFixed(1)}</strong>
@@ -374,11 +393,26 @@ Axis Shape is the body’s stability pattern before action.
 </div>
 
 <div className="shape-list">
-<div><strong>Rise</strong><span>balanced into release</span></div>
-<div><strong>Load</strong><span>stabilize then attack</span></div>
-<div><strong>Break</strong><span>shift then recover</span></div>
-<div><strong>Drop</strong><span>loss of control before action</span></div>
-<div><strong>Float</strong><span>sustained control window</span></div>
+<div>
+<strong>Rise</strong>
+<span>balanced into release</span>
+</div>
+<div>
+<strong>Load</strong>
+<span>stabilize then attack</span>
+</div>
+<div>
+<strong>Break</strong>
+<span>shift then recover</span>
+</div>
+<div>
+<strong>Drop</strong>
+<span>loss of control before action</span>
+</div>
+<div>
+<strong>Float</strong>
+<span>sustained control window</span>
+</div>
 </div>
 </div>
 
@@ -405,9 +439,7 @@ Axis Shape is the body’s stability pattern before action.
 
 <div className="moments">
 {capturedMoments.length === 0 ? (
-<div className="empty">
-No moments captured yet.
-</div>
+<div className="empty">No moments captured yet.</div>
 ) : (
 capturedMoments.map((moment) => (
 <div key={moment.id} className="moment-row">

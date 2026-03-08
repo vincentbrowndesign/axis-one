@@ -187,8 +187,11 @@ line-height: 1.5;
 margin-top: 20px;
 height: 240px;
 border: 1px solid var(--line);
-background:
-linear-gradient(to bottom, rgba(255,255,255,0.03), rgba(255,255,255,0.01));
+background: linear-gradient(
+to bottom,
+rgba(255, 255, 255, 0.03),
+rgba(255, 255, 255, 0.01)
+);
 border-radius: 20px;
 overflow: hidden;
 padding: 12px;
