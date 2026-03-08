@@ -2,9 +2,25 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type SignalType = "Clean" | "Shift" | "Drop" | "Float" | "Off Axis";
+type PushDirection =
+| "Centered"
+| "Forward"
+| "Back"
+| "Left"
+| "Right"
+| "Forward Left"
+| "Forward Right"
+| "Back Left"
+| "Back Right";
 
-type SensorFrame = {
+type LockItem = {
+id: string;
+ts: number;
+mark: number;
+push: PushDirection;
+};
+
+type SensorSample = {
 t: number;
 ax: number;
 ay: number;
@@ -14,21 +30,13 @@ gy: number;
 gz: number;
 };
 
-type HistoryItem = {
-id: string;
-score: number;
-signal: SignalType;
-time: string;
-};
-
 const BUFFER_SIZE = 240;
-const LIVE_WINDOW = 24;
-const FREEZE_MS = 1600;
-const CAPTURE_COOLDOWN_MS = 1800;
-
-const ENTER_READY_THRESHOLD = 75;
-const STAY_READY_THRESHOLD = 70;
-const OFF_AXIS_THRESHOLD = 49;
+const LIVE_WINDOW = 22;
+const LOCK_THRESHOLD = 82;
+const STAY_THRESHOLD = 74;
+const FREEZE_MS = 800;
+const LOCK_COOLDOWN_MS = 1800;
+const CALIBRATION_MS = 1800;
 
 function clamp(n: number, min: number, max: number) {
 return Math.max(min, Math.min(max, n));
@@ -55,15 +63,7 @@ return Math.max(...values) - Math.min(...values);
 }
 
 function uid() {
-return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function formatClock(ts: number) {
-return new Date(ts).toLocaleTimeString([], {
-hour: "numeric",
-minute: "2-digit",
-second: "2-digit",
-});
+return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function smoothSeries(values: number[], alpha = 0.28) {
@@ -75,7 +75,7 @@ out.push(alpha * values[i] + (1 - alpha) * out[i - 1]);
 return out;
 }
 
-function resample(values: number[], count = 84) {
+function resample(values: number[], count = 72) {
 if (!values.length) return Array.from({ length: count }, () => 0);
 if (values.length === 1) return Array.from({ length: count }, () => values[0]);
 
@@ -102,267 +102,213 @@ return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
 .join(" ");
 }
 
-function classifySignal(
-readySeries: number[],
-lateralSeries: number[],
-verticalSeries: number[],
-noiseSeries: number[],
-): SignalType {
-const ready = readySeries.slice(-16);
-const lateral = lateralSeries.slice(-16);
-const vertical = verticalSeries.slice(-16);
-const noise = noiseSeries.slice(-16);
-
-const readyMean = mean(ready);
-const readyStd = std(ready);
-const lateralMean = mean(lateral);
-const lateralRange = range(lateral);
-const verticalMean = mean(vertical);
-const verticalRange = range(vertical);
-const noiseMean = mean(noise);
-
-if (
-readyMean < 58 ||
-lateralMean > 3.9 ||
-lateralRange > 3.7 ||
-noiseMean > 5.6
-) {
-return "Off Axis";
+function formatTime(ts: number) {
+return new Date(ts).toLocaleTimeString([], {
+hour: "numeric",
+minute: "2-digit",
+second: "2-digit",
+});
 }
 
-if (
-readyMean > 84 &&
-readyStd < 2.6 &&
-lateralMean < 1.15 &&
-verticalMean < 1.05 &&
-noiseMean < 2.8
-) {
-return "Float";
-}
+function directionFromVector(x: number, y: number): PushDirection {
+const dead = 0.12;
+if (Math.abs(x) < dead && Math.abs(y) < dead) return "Centered";
 
-if (verticalMean > 1.45 || verticalRange > 4.5) {
-return "Drop";
-}
+const horiz =
+x > 0.22 ? "Right" : x < -0.22 ? "Left" : "";
+const vert =
+y > 0.22 ? "Forward" : y < -0.22 ? "Back" : "";
 
-if (lateralMean > 1.35 || lateralRange > 3.1) {
-return "Shift";
-}
-
-return "Clean";
+const combined = [vert, horiz].filter(Boolean).join(" ") as PushDirection;
+return (combined || "Centered") as PushDirection;
 }
 
 export default function AxisClient() {
+const [mode, setMode] = useState<"demo" | "live">("demo");
 const [running, setRunning] = useState(true);
-const [mode, setMode] = useState<"live" | "demo">("demo");
 const [sensorReady, setSensorReady] = useState(false);
 const [permissionNeeded, setPermissionNeeded] = useState(false);
 
-const [axisReady, setAxisReady] = useState(0);
-const [signalNoise, setSignalNoise] = useState(0);
-const [signal, setSignal] = useState<SignalType>("Clean");
+const [phase, setPhase] = useState<"idle" | "calibrating" | "live">("idle");
+const [axisMark, setAxisMark] = useState(0);
+const [axisPush, setAxisPush] = useState<PushDirection>("Centered");
+const [locked, setLocked] = useState(false);
+const [lockFlash, setLockFlash] = useState(false);
 
-const [history, setHistory] = useState<HistoryItem[]>([]);
-const [frozenScore, setFrozenScore] = useState<number | null>(null);
-const [frozenSignal, setFrozenSignal] = useState<SignalType | null>(null);
+const [history, setHistory] = useState<LockItem[]>([]);
 
-const framesRef = useRef<SensorFrame[]>([]);
-const readySeriesRef = useRef<number[]>([]);
-const lateralSeriesRef = useRef<number[]>([]);
-const verticalSeriesRef = useRef<number[]>([]);
-const noiseSeriesRef = useRef<number[]>([]);
+const framesRef = useRef<SensorSample[]>([]);
+const markSeriesRef = useRef<number[]>([]);
 
-const fastReadyRef = useRef(0);
-const slowReadyRef = useRef(0);
-const readyStateRef = useRef(false);
+const baselineTiltRef = useRef({ x: 0, y: 0, z: 9.8 });
+const calibrationStartRef = useRef<number | null>(null);
+
+const fastMarkRef = useRef(0);
+const slowMarkRef = useRef(0);
+const lockedStateRef = useRef(false);
 
 const demoTimerRef = useRef<number | null>(null);
-const freezeTimerRef = useRef<number | null>(null);
 const motionHandlerRef = useRef<((e: DeviceMotionEvent) => void) | null>(null);
-const cooldownUntilRef = useRef<number>(0);
+const freezeTimerRef = useRef<number | null>(null);
+const lockCooldownRef = useRef<number>(0);
 
-const chartValues = useMemo(
-() => resample(readySeriesRef.current.slice(-96), 84),
-[axisReady, frozenScore],
-);
+const latestPushVectorRef = useRef({ x: 0, y: 0 });
 
-const chartPath = useMemo(() => linePath(chartValues, 700, 240), [chartValues]);
+function resetAxisSession(keepMode = true) {
+framesRef.current = [];
+markSeriesRef.current = [];
+fastMarkRef.current = 0;
+slowMarkRef.current = 0;
+lockedStateRef.current = false;
+calibrationStartRef.current = null;
+baselineTiltRef.current = { x: 0, y: 0, z: 9.8 };
+lockCooldownRef.current = 0;
+latestPushVectorRef.current = { x: 0, y: 0 };
 
-function clearFreeze() {
+setAxisMark(0);
+setAxisPush("Centered");
+setLocked(false);
+setLockFlash(false);
+setHistory([]);
+setPhase("idle");
+
+if (!keepMode) {
+setMode("demo");
+setSensorReady(false);
+}
+}
+
+function beginCalibration() {
+calibrationStartRef.current = Date.now();
+setPhase("calibrating");
+setLocked(false);
+setLockFlash(false);
+}
+
+function clearLockFlash() {
 if (freezeTimerRef.current) {
 window.clearTimeout(freezeTimerRef.current);
 }
-
 freezeTimerRef.current = window.setTimeout(() => {
-setFrozenScore(null);
-setFrozenSignal(null);
+setLockFlash(false);
 }, FREEZE_MS);
 }
 
-function captureAutomatic(nextScore: number, nextSignal: SignalType) {
+function captureLock(mark: number, push: PushDirection) {
 const now = Date.now();
-if (now < cooldownUntilRef.current) return;
-if (nextSignal === "Off Axis") return;
+if (now < lockCooldownRef.current) return;
+lockCooldownRef.current = now + LOCK_COOLDOWN_MS;
 
-const threshold = nextSignal === "Float" ? 72 : ENTER_READY_THRESHOLD;
-if (nextScore < threshold) return;
+setLockFlash(true);
+clearLockFlash();
 
-const recent = readySeriesRef.current.slice(-12);
-if (recent.length < 8) return;
-
-const localPeak = Math.max(...recent);
-const recentMean4 = mean(recent.slice(-4));
-const recentMean6 = mean(recent.slice(-6));
-const recentRange = range(recent.slice(-6));
-
-const sustained = recentMean4 >= threshold - 1;
-const risingIntent = recentMean4 >= recentMean6 - 1;
-const isPeak = nextScore >= localPeak - 1;
-const notFlatNoise = recentRange > 2.5;
-
-if (!isPeak || !sustained || !risingIntent || !notFlatNoise) return;
-
-cooldownUntilRef.current = now + CAPTURE_COOLDOWN_MS;
-
-setFrozenScore(nextScore);
-setFrozenSignal(nextSignal);
-clearFreeze();
-
-setHistory((prev) =>
-[
+setHistory((prev) => [
 {
 id: uid(),
-score: nextScore,
-signal: nextSignal,
-time: formatClock(now),
+ts: now,
+mark,
+push,
 },
 ...prev,
-].slice(0, 12),
-);
+].slice(0, 10));
 }
 
-function processFrame(frame: SensorFrame) {
-framesRef.current.push(frame);
+function processSample(sample: SensorSample) {
+framesRef.current.push(sample);
 if (framesRef.current.length > BUFFER_SIZE) framesRef.current.shift();
 
 const recent = framesRef.current.slice(-LIVE_WINDOW);
-if (recent.length < 12) return;
+if (recent.length < 10) return;
 
-const accelMag = recent.map((f) =>
-Math.sqrt(f.ax * f.ax + f.ay * f.ay + f.az * f.az),
+if (phase === "calibrating") {
+const tiltX = mean(recent.map((s) => s.ax));
+const tiltY = mean(recent.map((s) => s.ay));
+const tiltZ = mean(recent.map((s) => s.az));
+
+baselineTiltRef.current = { x: tiltX, y: tiltY, z: tiltZ };
+
+const started = calibrationStartRef.current ?? Date.now();
+if (Date.now() - started >= CALIBRATION_MS) {
+setPhase("live");
+}
+return;
+}
+
+if (phase !== "live") return;
+
+const accelMag = recent.map((s) =>
+Math.sqrt(s.ax * s.ax + s.ay * s.ay + s.az * s.az),
 );
-const gyroMag = recent.map((f) =>
-Math.sqrt(f.gx * f.gx + f.gy * f.gy + f.gz * f.gz),
+const gyroMag = recent.map((s) =>
+Math.sqrt(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz),
 );
-const lateral = recent.map((f) => Math.sqrt(f.ax * f.ax + f.ay * f.ay));
-const vertical = recent.map((f) => Math.abs(f.az - 9.8));
 
 const accelSmooth = smoothSeries(accelMag, 0.24);
 const gyroSmooth = smoothSeries(gyroMag, 0.24);
 
 const accelNoise = std(accelSmooth);
 const gyroNoise = std(gyroSmooth);
-const lateralNoise = std(lateral);
-const lateralRange = range(lateral);
-const verticalMove = mean(vertical);
-const verticalRange = range(vertical);
 
-const noise =
-accelNoise * 2.05 +
-gyroNoise * 0.12 +
-lateralNoise * 0.95 +
-lateralRange * 0.18;
+const base = baselineTiltRef.current;
+const tiltX = mean(recent.map((s) => s.ax - base.x));
+const tiltY = mean(recent.map((s) => s.ay - base.y));
+const tiltZ = mean(recent.map((s) => s.az - base.z));
 
-const rawReady = clamp(
-100 -
-noise * 10.4 -
-verticalMove * 8.2 -
-verticalRange * 1.05 -
-lateralNoise * 6.1,
-0,
-100,
-);
+const tiltMagnitude = Math.sqrt(tiltX * tiltX + tiltY * tiltY);
+const motionNoise = accelNoise * 2.2 + gyroNoise * 0.12 + range(accelSmooth) * 0.22;
+const settleScore = clamp(100 - motionNoise * 11 - tiltMagnitude * 14 - Math.abs(tiltZ) * 2.5, 0, 100);
 
-if (fastReadyRef.current === 0 && slowReadyRef.current === 0) {
-fastReadyRef.current = rawReady;
-slowReadyRef.current = rawReady;
+if (fastMarkRef.current === 0 && slowMarkRef.current === 0) {
+fastMarkRef.current = settleScore;
+slowMarkRef.current = settleScore;
 } else {
-fastReadyRef.current = fastReadyRef.current * 0.55 + rawReady * 0.45;
-slowReadyRef.current = slowReadyRef.current * 0.88 + rawReady * 0.12;
+fastMarkRef.current = fastMarkRef.current * 0.56 + settleScore * 0.44;
+slowMarkRef.current = slowMarkRef.current * 0.88 + settleScore * 0.12;
 }
 
-const blendedReady = clamp(
-slowReadyRef.current + (fastReadyRef.current - slowReadyRef.current) * 0.6,
+const blended = clamp(
+slowMarkRef.current + (fastMarkRef.current - slowMarkRef.current) * 0.62,
 0,
 100,
 );
 
-if (!readyStateRef.current && blendedReady >= ENTER_READY_THRESHOLD) {
-readyStateRef.current = true;
-} else if (readyStateRef.current && blendedReady < STAY_READY_THRESHOLD) {
-readyStateRef.current = false;
+if (!lockedStateRef.current && blended >= LOCK_THRESHOLD) {
+lockedStateRef.current = true;
+} else if (lockedStateRef.current && blended < STAY_THRESHOLD) {
+lockedStateRef.current = false;
 }
 
-const finalReady = readyStateRef.current
-? Math.max(blendedReady, STAY_READY_THRESHOLD)
-: blendedReady;
+const finalMark = lockedStateRef.current
+? Math.max(blended, STAY_THRESHOLD)
+: blended;
 
-readySeriesRef.current.push(finalReady);
-lateralSeriesRef.current.push(lateralNoise + lateralRange * 0.12);
-verticalSeriesRef.current.push(verticalMove + verticalRange * 0.1);
-noiseSeriesRef.current.push(noise);
-
-if (readySeriesRef.current.length > BUFFER_SIZE) readySeriesRef.current.shift();
-if (lateralSeriesRef.current.length > BUFFER_SIZE) lateralSeriesRef.current.shift();
-if (verticalSeriesRef.current.length > BUFFER_SIZE) verticalSeriesRef.current.shift();
-if (noiseSeriesRef.current.length > BUFFER_SIZE) noiseSeriesRef.current.shift();
-
-const nextSignal = classifySignal(
-readySeriesRef.current,
-lateralSeriesRef.current,
-verticalSeriesRef.current,
-noiseSeriesRef.current,
-);
-
-setAxisReady(Math.round(finalReady));
-setSignalNoise(Number(noise.toFixed(1)));
-setSignal(nextSignal);
-
-captureAutomatic(Math.round(finalReady), nextSignal);
+markSeriesRef.current.push(finalMark);
+if (markSeriesRef.current.length > BUFFER_SIZE) {
+markSeriesRef.current.shift();
 }
 
-function startDemo() {
-if (demoTimerRef.current) {
-window.clearInterval(demoTimerRef.current);
+const pushX = clamp(tiltX / 4.5, -1, 1);
+const pushY = clamp(-tiltY / 4.5, -1, 1);
+
+latestPushVectorRef.current = { x: pushX, y: pushY };
+
+const push = directionFromVector(pushX, pushY);
+
+setAxisMark(Math.round(finalMark));
+setAxisPush(push);
+setLocked(lockedStateRef.current);
+
+const lastMarks = markSeriesRef.current.slice(-8);
+const localPeak = Math.max(...lastMarks);
+const sustained = mean(lastMarks.slice(-4)) >= LOCK_THRESHOLD - 1;
+
+if (
+Math.round(finalMark) >= LOCK_THRESHOLD &&
+Math.round(finalMark) >= localPeak - 1 &&
+sustained
+) {
+captureLock(Math.round(finalMark), push);
 }
-
-demoTimerRef.current = window.setInterval(() => {
-if (!running || mode !== "demo") return;
-
-const t = Date.now() / 1000;
-
-const drift = Math.sin(t * 0.9 + 0.6) * 0.82;
-const plate = Math.sin(t * 0.38) * 0.22;
-const dropPulse = Math.max(0, Math.sin(t * 1.65 + 0.35)) * 0.62;
-const floatPulse = Math.max(0, Math.sin(t * 0.72 + 1.4)) * 0.18;
-
-processFrame({
-t: Date.now(),
-ax: drift * 1.15 + floatPulse * 0.08,
-ay: plate * 0.5 + dropPulse * 0.28,
-az: 9.8 + plate * 0.22 - dropPulse * 0.58 + floatPulse * 0.12,
-gx: drift * 5.6 + dropPulse * 1.4,
-gy: plate * 3.1 + floatPulse * 0.8,
-gz: drift * 3.0,
-});
-}, 50);
-}
-
-function stopLiveSensor() {
-if (motionHandlerRef.current) {
-window.removeEventListener("devicemotion", motionHandlerRef.current, true);
-motionHandlerRef.current = null;
-}
-setSensorReady(false);
 }
 
 async function enableLiveMotion() {
@@ -376,15 +322,18 @@ const result = await Motion.requestPermission();
 if (result !== "granted") return;
 }
 
-stopLiveSensor();
+if (motionHandlerRef.current) {
+window.removeEventListener("devicemotion", motionHandlerRef.current, true);
+motionHandlerRef.current = null;
+}
 
 const handler = (event: DeviceMotionEvent) => {
-if (!running || mode !== "live") return;
+if (!running) return;
 
 const acc = event.accelerationIncludingGravity;
 const rot = event.rotationRate;
 
-processFrame({
+processSample({
 t: Date.now(),
 ax: acc?.x ?? 0,
 ay: acc?.y ?? 0,
@@ -401,29 +350,37 @@ window.addEventListener("devicemotion", handler, true);
 setSensorReady(true);
 setPermissionNeeded(false);
 setMode("live");
+beginCalibration();
 } catch {
 setPermissionNeeded(true);
 }
 }
 
-function resetSession() {
-framesRef.current = [];
-readySeriesRef.current = [];
-lateralSeriesRef.current = [];
-verticalSeriesRef.current = [];
-noiseSeriesRef.current = [];
+function startDemo() {
+if (demoTimerRef.current) {
+window.clearInterval(demoTimerRef.current);
+}
 
-fastReadyRef.current = 0;
-slowReadyRef.current = 0;
-readyStateRef.current = false;
-cooldownUntilRef.current = 0;
+demoTimerRef.current = window.setInterval(() => {
+if (!running || mode !== "demo") return;
 
-setAxisReady(0);
-setSignalNoise(0);
-setSignal("Clean");
-setHistory([]);
-setFrozenScore(null);
-setFrozenSignal(null);
+const t = Date.now() / 1000;
+const driftX = Math.sin(t * 0.95 + 0.5) * 0.7;
+const driftY = Math.sin(t * 0.63 + 1.1) * 0.55;
+const settle = Math.max(0, Math.sin(t * 1.4 + 0.9)) * 0.38;
+
+const sample: SensorSample = {
+t: Date.now(),
+ax: driftX + settle * 0.12,
+ay: driftY * 0.8,
+az: 9.8 - settle * 0.18,
+gx: driftX * 5.4,
+gy: driftY * 4.6,
+gz: settle * 1.8,
+};
+
+processSample(sample);
+}, 50);
 }
 
 useEffect(() => {
@@ -439,45 +396,69 @@ setPermissionNeeded(true);
 
 return () => {
 if (demoTimerRef.current) window.clearInterval(demoTimerRef.current);
+if (motionHandlerRef.current) {
+window.removeEventListener("devicemotion", motionHandlerRef.current, true);
+}
 if (freezeTimerRef.current) window.clearTimeout(freezeTimerRef.current);
-stopLiveSensor();
 };
 }, []);
 
-const readyLabel =
-axisReady >= ENTER_READY_THRESHOLD
-? "Axis Ready"
-: axisReady <= OFF_AXIS_THRESHOLD
-? "Off Axis"
-: "Axis";
+const lineValues = useMemo(
+() => resample(markSeriesRef.current.slice(-96), 84),
+[axisMark, history.length, lockFlash],
+);
 
-const displayScore = frozenScore ?? axisReady;
-const displaySignal = frozenSignal ?? signal;
+const line = useMemo(() => linePath(lineValues, 700, 220), [lineValues]);
+
+const pushVector = latestPushVectorRef.current;
+const scopeX = 120 + pushVector.x * 62;
+const scopeY = 120 - pushVector.y * 62;
+
+const phaseLabel =
+phase === "idle"
+? "Idle"
+: phase === "calibrating"
+? "Align Axis"
+: lockFlash
+? "Axis Lock"
+: "Live";
 
 return (
 <main className="min-h-screen bg-black text-white">
-<div className="mx-auto w-full max-w-5xl px-4 py-8 sm:px-6">
-<section className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),rgba(0,0,0,0.95)_42%)] p-5 shadow-[0_0_80px_rgba(255,255,255,0.04)_inset] sm:p-8">
-<div className="mb-2 text-sm uppercase tracking-[0.35em] text-lime-300/90">
+<div className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6">
+<section className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.07),rgba(0,0,0,0.95)_42%)] p-5 shadow-[0_0_80px_rgba(255,255,255,0.04)_inset] sm:p-8">
+<div className="text-sm uppercase tracking-[0.35em] text-lime-300/90">
 Axis
 </div>
 
-<h1 className="max-w-3xl text-4xl font-semibold tracking-tight sm:text-6xl">
+<h1 className="mt-2 max-w-3xl text-4xl font-semibold tracking-tight sm:text-6xl">
 Structure before action.
 </h1>
 
-<p className="mt-4 max-w-3xl text-lg leading-8 text-white/65 sm:text-[1.65rem] sm:leading-[1.5]">
-Axis detects favorable structure before force. It reads the body, freezes
-real peaks automatically, and stores them in Axis History.
+<p className="mt-4 max-w-3xl text-lg leading-8 text-white/65">
+Use the phone you already have as Axis Brain. Align Axis, watch Axis Mark rise,
+and capture Axis Lock automatically.
 </p>
 
 <div className="mt-8 flex flex-wrap gap-4">
 <button
 onClick={() => {
-setMode("live");
-enableLiveMotion();
+setMode("demo");
+resetAxisSession(true);
+beginCalibration();
 }}
-className={`rounded-full px-7 py-4 text-xl font-medium transition ${
+className={`rounded-full px-6 py-3 text-lg font-medium transition ${
+mode === "demo"
+? "bg-lime-400 text-black"
+: "border border-white/10 bg-black/60 text-white"
+}`}
+>
+Demo
+</button>
+
+<button
+onClick={enableLiveMotion}
+className={`rounded-full px-6 py-3 text-lg font-medium transition ${
 mode === "live"
 ? "bg-lime-400 text-black"
 : "border border-white/10 bg-black/60 text-white"
@@ -487,26 +468,22 @@ Live Motion
 </button>
 
 <button
-onClick={() => setMode("demo")}
-className={`rounded-full px-7 py-4 text-xl font-medium transition ${
-mode === "demo"
-? "bg-lime-400 text-black"
-: "border border-white/10 bg-black/60 text-white"
-}`}
+onClick={() => beginCalibration()}
+className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
 >
-Demo Signal
+Align Axis
 </button>
 
 <button
 onClick={() => setRunning((prev) => !prev)}
-className="rounded-full border border-white/10 bg-black/60 px-7 py-4 text-xl font-medium text-white transition"
+className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
 >
 {running ? "Pause" : "Start"}
 </button>
 
 <button
-onClick={resetSession}
-className="rounded-full border border-white/10 bg-black/60 px-7 py-4 text-xl font-medium text-white transition"
+onClick={() => resetAxisSession(true)}
+className="rounded-full border border-white/10 bg-black/60 px-6 py-3 text-lg font-medium text-white"
 >
 Reset
 </button>
@@ -514,67 +491,101 @@ Reset
 
 {permissionNeeded && mode === "live" && !sensorReady ? (
 <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
-Motion access required for Live Motion.
+Motion permission is required for live phone sensing.
 </div>
 ) : null}
-
-<div className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-[1.35fr_0.65fr]">
-<div className="rounded-[28px] border border-white/10 bg-black/55 px-6 py-6 sm:px-8 sm:py-8">
-<div className="text-lg uppercase tracking-[0.25em] text-white/42">
-{readyLabel}
-</div>
-<div className="mt-3 text-7xl font-semibold leading-none tracking-tight sm:text-[7.5rem]">
-{displayScore}%
-</div>
-</div>
-
-<div className="grid grid-cols-1 gap-4">
-<div className="rounded-[28px] border border-white/10 bg-black/55 px-6 py-5">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">
-Signal
-</div>
-<div className="mt-2 text-3xl font-semibold">{displaySignal}</div>
-</div>
-
-<div className="rounded-[28px] border border-white/10 bg-black/55 px-6 py-5">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">
-Signal Noise
-</div>
-<div className="mt-2 text-3xl font-semibold">{signalNoise}</div>
-</div>
-</div>
-</div>
 </section>
 
-<section className="mt-7 rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
+<section className="mt-7 grid grid-cols-1 gap-6 lg:grid-cols-[0.9fr_1.1fr]">
+<div className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
+<div className="flex items-end justify-between gap-4">
+<div>
+<div className="text-sm uppercase tracking-[0.28em] text-white/40">
+{phaseLabel}
+</div>
+<div className="mt-2 text-7xl font-semibold leading-none tracking-tight sm:text-[7rem]">
+{axisMark}
+</div>
+<div className="mt-3 text-lg text-white/60">Axis Mark</div>
+</div>
+
+<div className="text-right">
+<div className="text-sm uppercase tracking-[0.22em] text-white/40">
+Axis Push
+</div>
+<div className="mt-2 text-2xl font-semibold">{axisPush}</div>
+<div className="mt-3 text-sm text-white/50">
+{lockFlash ? "★ Axis Lock" : locked ? "Holding lock" : "Searching"}
+</div>
+</div>
+</div>
+
+<div className="mt-8 rounded-[28px] border border-white/10 bg-black/50 p-5">
+<div className="mb-4 text-xl font-semibold">Axis Scope</div>
+
+<div className="mx-auto flex w-full max-w-[320px] items-center justify-center">
+<svg viewBox="0 0 240 240" className="h-[260px] w-[260px]">
+<circle cx="120" cy="120" r="92" fill="none" stroke="rgba(255,255,255,0.12)" />
+<circle cx="120" cy="120" r="64" fill="none" stroke="rgba(255,255,255,0.10)" />
+<circle cx="120" cy="120" r="36" fill="none" stroke="rgba(255,255,255,0.10)" />
+
+<line x1="120" y1="20" x2="120" y2="220" stroke="rgba(255,255,255,0.08)" />
+<line x1="20" y1="120" x2="220" y2="120" stroke="rgba(255,255,255,0.08)" />
+
+<circle cx="120" cy="120" r="4" fill="white" opacity="0.8" />
+
+{lockFlash ? (
+<circle
+cx={scopeX}
+cy={scopeY}
+r="18"
+fill="rgba(154,240,75,0.25)"
+/>
+) : null}
+
+<circle
+cx={scopeX}
+cy={scopeY}
+r={lockFlash ? 10 : 8}
+fill={lockFlash ? "#9AF04B" : "white"}
+/>
+
+{lockFlash ? (
+<text
+x={scopeX}
+y={scopeY - 18}
+textAnchor="middle"
+fill="#9AF04B"
+fontSize="18"
+fontWeight="700"
+>
+*
+</text>
+) : null}
+</svg>
+</div>
+</div>
+</div>
+
+<div className="rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
 <div className="flex items-end justify-between gap-4">
 <div>
 <h2 className="text-4xl font-semibold tracking-tight sm:text-5xl">Axis Line</h2>
-<p className="mt-3 text-xl text-white/55">
-The live line of the measured axis.
+<p className="mt-3 text-lg text-white/55">
+Signal history of structure over time.
 </p>
 </div>
 
-<div className="text-right text-sm uppercase tracking-[0.22em] text-white/35">
-{frozenScore !== null ? "Frozen" : sensorReady && mode === "live" ? "Live" : "Demo"}
+<div className="text-sm uppercase tracking-[0.24em] text-white/38">
+{mode === "live" && sensorReady ? "Live" : "Demo"}
 </div>
 </div>
 
 <div className="mt-7 overflow-hidden rounded-[28px] border border-white/10 bg-black/60 p-4 sm:p-5">
-<svg viewBox="0 0 700 240" className="h-[300px] w-full" preserveAspectRatio="none">
-<defs>
-<filter id="axisGlow">
-<feGaussianBlur stdDeviation="2.4" result="blur" />
-<feMerge>
-<feMergeNode in="blur" />
-<feMergeNode in="SourceGraphic" />
-</feMerge>
-</filter>
-</defs>
-
-<line x1="0" y1="70" x2="700" y2="70" stroke="rgba(163,230,53,0.22)" strokeDasharray="4 7" />
-<line x1="0" y1="140" x2="700" y2="140" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 8" />
-<line x1="0" y1="190" x2="700" y2="190" stroke="rgba(239,68,68,0.18)" strokeDasharray="4 8" />
+<svg viewBox="0 0 700 220" className="h-[280px] w-full" preserveAspectRatio="none">
+<line x1="0" y1="48" x2="700" y2="48" stroke="rgba(154,240,75,0.18)" strokeDasharray="4 8" />
+<line x1="0" y1="110" x2="700" y2="110" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 8" />
+<line x1="0" y1="170" x2="700" y2="170" stroke="rgba(255,255,255,0.05)" strokeDasharray="4 8" />
 
 {Array.from({ length: 8 }).map((_, i) => (
 <line
@@ -582,116 +593,75 @@ key={i}
 x1={i * 100}
 y1="0"
 x2={i * 100}
-y2="240"
+y2="220"
 stroke="rgba(255,255,255,0.04)"
 />
 ))}
 
 <path
-d={chartPath}
+d={line}
 fill="none"
 stroke="rgba(154,240,75,0.28)"
-strokeWidth="9"
+strokeWidth={lockFlash ? 10 : 8}
 strokeLinecap="round"
 strokeLinejoin="round"
-filter="url(#axisGlow)"
 />
 <path
-d={chartPath}
+d={line}
 fill="none"
-stroke="#9AF04B"
-strokeWidth="3.4"
+stroke={lockFlash ? "#9AF04B" : "white"}
+strokeWidth={lockFlash ? 4 : 3}
 strokeLinecap="round"
 strokeLinejoin="round"
 />
 </svg>
 </div>
 
-<div className="mt-5 space-y-1 text-lg text-white/70 sm:text-xl">
-<div>75+ = Axis Ready</div>
-<div>50–74 = Axis</div>
-<div>0–49 = Off Axis</div>
-</div>
-</section>
-
-<section className="mt-7 rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
-<h2 className="text-4xl font-semibold tracking-tight sm:text-5xl">Signal</h2>
-<p className="mt-3 text-xl text-white/55">
-Signal is detected automatically from the Axis Line.
-</p>
-
-<div className="mt-7 rounded-[28px] border border-white/10 bg-black/45 p-6 sm:p-8">
-<div className="text-6xl font-light sm:text-7xl">{displaySignal}</div>
-<div className="mt-5 text-2xl text-white/55">
-Axis reads the current structural condition before action.
-</div>
+<div className="mt-5 grid grid-cols-1 gap-4 md:grid-cols-3">
+<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
+<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Mark</div>
+<div className="mt-2 text-4xl font-semibold">{axisMark}</div>
 </div>
 
-<div className="mt-7 divide-y divide-white/10 rounded-[28px] border border-white/10 bg-black/25 px-5">
-{[
-["Clean", "organized signal before action"],
-["Shift", "structure moves through space"],
-["Drop", "center lowers before force"],
-["Float", "sustained control window"],
-["Off Axis", "structure breaks from centerline"],
-].map(([name, desc]) => (
-<div key={name} className="flex items-center justify-between gap-4 py-5">
-<div className="text-2xl font-semibold">{name}</div>
-<div className="text-right text-lg text-white/55 sm:text-xl">{desc}</div>
+<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
+<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Push</div>
+<div className="mt-2 text-2xl font-semibold">{axisPush}</div>
 </div>
-))}
+
+<div className="rounded-[24px] border border-white/10 bg-black/40 p-5">
+<div className="text-sm uppercase tracking-[0.22em] text-white/42">Axis Lock</div>
+<div className="mt-2 text-2xl font-semibold">{lockFlash ? "Live" : "Waiting"}</div>
+</div>
+</div>
 </div>
 </section>
 
 <section className="mt-7 rounded-[34px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),rgba(0,0,0,0.96)_42%)] p-5 sm:p-8">
 <h2 className="text-4xl font-semibold tracking-tight sm:text-5xl">Axis History</h2>
-<p className="mt-3 text-xl text-white/55">
-Favorable windows captured automatically.
+<p className="mt-3 text-lg text-white/55">
+Captured Axis Lock moments.
 </p>
-
-<div className="mt-7 grid grid-cols-1 gap-4 sm:grid-cols-3">
-<div className="rounded-[28px] border border-white/10 bg-black/40 p-6">
-<div className="text-lg uppercase tracking-[0.22em] text-white/45">Ready</div>
-<div className="mt-4 text-6xl font-semibold">
-{history.filter((item) => item.score >= ENTER_READY_THRESHOLD).length}
-</div>
-</div>
-
-<div className="rounded-[28px] border border-white/10 bg-black/40 p-6">
-<div className="text-lg uppercase tracking-[0.22em] text-white/45">Float</div>
-<div className="mt-4 text-6xl font-semibold">
-{history.filter((item) => item.signal === "Float").length}
-</div>
-</div>
-
-<div className="rounded-[28px] border border-white/10 bg-black/40 p-6">
-<div className="text-lg uppercase tracking-[0.22em] text-white/45">Off Axis</div>
-<div className="mt-4 text-6xl font-semibold">
-{history.filter((item) => item.signal === "Off Axis").length}
-</div>
-</div>
-</div>
 
 <div className="mt-6 space-y-4">
 {history.length === 0 ? (
-<div className="rounded-[28px] border border-white/10 bg-black/35 p-6 text-xl text-white/55">
-Waiting for automatic capture.
+<div className="rounded-[24px] border border-white/10 bg-black/35 p-6 text-lg text-white/55">
+No locks captured yet.
 </div>
 ) : null}
 
 {history.map((item) => (
 <div
 key={item.id}
-className="flex items-center justify-between gap-4 rounded-[28px] border border-white/10 bg-black/35 px-6 py-5"
+className="flex items-center justify-between gap-4 rounded-[24px] border border-white/10 bg-black/35 px-6 py-5"
 >
 <div>
-<div className="text-3xl font-semibold">Axis Ready</div>
-<div className="mt-2 text-xl text-white/55">
-{item.signal} • {item.time}
+<div className="text-2xl font-semibold">Axis Lock</div>
+<div className="mt-2 text-lg text-white/55">
+{item.push} • {formatTime(item.ts)}
 </div>
 </div>
 
-<div className="text-5xl font-semibold">{item.score}</div>
+<div className="text-4xl font-semibold">{item.mark}</div>
 </div>
 ))}
 </div>

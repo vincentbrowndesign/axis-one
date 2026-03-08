@@ -1,5 +1,5 @@
-import { redirect } from "next/navigation";
+import AxisClient from "./axis-client";
 
-export default function HomePage() {
-redirect("/axis");
+export default function AxisPage() {
+return <AxisClient />;
 }
