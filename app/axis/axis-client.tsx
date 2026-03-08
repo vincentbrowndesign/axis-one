@@ -21,10 +21,10 @@ signal: SignalType;
 time: string;
 };
 
-const BUFFER_SIZE = 220;
+const BUFFER_SIZE = 240;
 const LIVE_WINDOW = 24;
 const FREEZE_MS = 1600;
-const CAPTURE_COOLDOWN_MS = 2600;
+const CAPTURE_COOLDOWN_MS = 1800;
 
 const ENTER_READY_THRESHOLD = 75;
 const STAY_READY_THRESHOLD = 70;
@@ -75,7 +75,7 @@ out.push(alpha * values[i] + (1 - alpha) * out[i - 1]);
 return out;
 }
 
-function resample(values: number[], count = 72) {
+function resample(values: number[], count = 84) {
 if (!values.length) return Array.from({ length: count }, () => 0);
 if (values.length === 1) return Array.from({ length: count }, () => values[0]);
 
@@ -206,17 +206,20 @@ if (nextSignal === "Off Axis") return;
 const threshold = nextSignal === "Float" ? 72 : ENTER_READY_THRESHOLD;
 if (nextScore < threshold) return;
 
-const recent = readySeriesRef.current.slice(-10);
-if (recent.length < 6) return;
+const recent = readySeriesRef.current.slice(-12);
+if (recent.length < 8) return;
 
 const localPeak = Math.max(...recent);
 const recentMean4 = mean(recent.slice(-4));
 const recentMean6 = mean(recent.slice(-6));
-const sustained = recentMean4 >= threshold;
+const recentRange = range(recent.slice(-6));
+
+const sustained = recentMean4 >= threshold - 1;
 const risingIntent = recentMean4 >= recentMean6 - 1;
 const isPeak = nextScore >= localPeak - 1;
+const notFlatNoise = recentRange > 2.5;
 
-if (!isPeak || !sustained || !risingIntent) return;
+if (!isPeak || !sustained || !risingIntent || !notFlatNoise) return;
 
 cooldownUntilRef.current = now + CAPTURE_COOLDOWN_MS;
 
@@ -413,7 +416,6 @@ noiseSeriesRef.current = [];
 fastReadyRef.current = 0;
 slowReadyRef.current = 0;
 readyStateRef.current = false;
-
 cooldownUntilRef.current = 0;
 
 setAxisReady(0);
