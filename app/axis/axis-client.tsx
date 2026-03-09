@@ -28,6 +28,8 @@ const LINE_MAX = 100;
 const MOMENT_MAX = 8;
 const ALIGN_SAMPLE_MAX = 30;
 const SAMPLE_WINDOW_MAX = 24;
+const CAPTURE_COOLDOWN_MS = 2200;
+const DUPLICATE_WINDOW_MS = 3200;
 
 export default function AxisClient() {
 const [phase, setPhase] = useState<Phase>("permission");
@@ -37,6 +39,7 @@ const [push, setPush] = useState<Push>("Center");
 const [countdown, setCountdown] = useState<number | null>(null);
 const [moments, setMoments] = useState<Moment[]>([]);
 const [dot, setDot] = useState({ x: 0, y: 0 });
+const [flash, setFlash] = useState(false);
 
 const canvasRef = useRef<HTMLCanvasElement | null>(null);
 const lineWrapRef = useRef<HTMLDivElement | null>(null);
@@ -50,6 +53,7 @@ z: [],
 const lineRef = useRef<number[]>([]);
 const sampleRef = useRef<Sample[]>([]);
 const lastCaptureRef = useRef(0);
+const flashTimeoutRef = useRef<number | null>(null);
 
 async function allowMotion() {
 try {
@@ -89,6 +93,7 @@ setAxisState("Centered");
 setPush("Center");
 setDot({ x: 0, y: 0 });
 setMoments([]);
+setFlash(false);
 lineRef.current = [];
 sampleRef.current = [];
 lastCaptureRef.current = 0;
@@ -146,8 +151,8 @@ setMark(nextMark);
 setAxisState(nextState);
 setPush(nextPush);
 setDot({
-x: clamp(dx * 14, -92, 92),
-y: clamp(dy * 14, -92, 92),
+x: clamp(dx * 13, -82, 82),
+y: clamp(dy * 13, -82, 82),
 });
 
 pushLimited(lineRef.current, nextMark, LINE_MAX);
@@ -169,7 +174,7 @@ drawLine();
 
 window.addEventListener("devicemotion", onMotion, true);
 return () => window.removeEventListener("devicemotion", onMotion, true);
-}, [phase]);
+}, [phase, moments]);
 
 useEffect(() => {
 drawLine();
@@ -184,9 +189,25 @@ window.addEventListener("resize", onResize);
 return () => window.removeEventListener("resize", onResize);
 }, []);
 
+useEffect(() => {
+return () => {
+if (flashTimeoutRef.current) {
+window.clearTimeout(flashTimeoutRef.current);
+}
+};
+}, []);
+
+function triggerFlash() {
+setFlash(true);
+if (flashTimeoutRef.current) window.clearTimeout(flashTimeoutRef.current);
+flashTimeoutRef.current = window.setTimeout(() => {
+setFlash(false);
+}, 380);
+}
+
 function maybeCapture(nextMark: number, nextState: AxisState, nextPush: Push) {
 const now = Date.now();
-if (now - lastCaptureRef.current < 1400) return;
+if (now - lastCaptureRef.current < CAPTURE_COOLDOWN_MS) return;
 if (sampleRef.current.length < 8) return;
 
 const recent = sampleRef.current.slice(-8);
@@ -201,7 +222,19 @@ else if (nextMark >= 82 && Math.abs(delta) <= 4) shape = "Float";
 
 if (!shape) return;
 
+const latest = moments[0];
+if (
+latest &&
+latest.shape === shape &&
+latest.state === nextState &&
+latest.push === nextPush &&
+now - latest.time < DUPLICATE_WINDOW_MS
+) {
+return;
+}
+
 lastCaptureRef.current = now;
+triggerFlash();
 
 const nextMoment: Moment = {
 id: `${now}-${nextMark}`,
@@ -222,7 +255,7 @@ if (!canvas || !wrap) return;
 
 const dpr = window.devicePixelRatio || 1;
 const width = wrap.clientWidth;
-const height = 132;
+const height = 124;
 
 canvas.width = Math.floor(width * dpr);
 canvas.height = Math.floor(height * dpr);
@@ -239,8 +272,8 @@ ctx.clearRect(0, 0, width, height);
 ctx.strokeStyle = "rgba(255,255,255,0.06)";
 ctx.lineWidth = 1;
 
-for (let i = 1; i <= 4; i += 1) {
-const y = (height / 5) * i;
+for (let i = 1; i <= 3; i += 1) {
+const y = (height / 4) * i;
 ctx.beginPath();
 ctx.moveTo(0, y);
 ctx.lineTo(width, y);
@@ -269,14 +302,17 @@ else ctx.lineTo(x, y);
 });
 
 ctx.lineWidth = 4;
-ctx.strokeStyle = "rgba(226,244,204,0.98)";
-ctx.shadowBlur = 10;
-ctx.shadowColor = "rgba(226,244,204,0.38)";
+ctx.lineCap = "round";
+ctx.lineJoin = "round";
+ctx.strokeStyle = "rgba(236,248,213,0.98)";
+ctx.shadowBlur = 12;
+ctx.shadowColor = "rgba(226,244,204,0.34)";
 ctx.stroke();
 ctx.shadowBlur = 0;
 }
 
 const latest = moments[0];
+const stateTitle = phase === "align" ? "Hold Still" : axisState;
 const statusText =
 phase === "permission"
 ? "Motion required"
@@ -288,12 +324,15 @@ phase === "permission"
 
 const glow =
 axisState === "Centered"
-? "rgba(255,255,255,0.08)"
+? "rgba(255,255,255,0.035)"
 : axisState === "Shift"
-? "rgba(210,255,210,0.10)"
+? "rgba(166,224,167,0.065)"
 : axisState === "Drop"
-? "rgba(255,225,160,0.10)"
-: "rgba(255,140,140,0.10)";
+? "rgba(226,185,118,0.06)"
+: "rgba(213,101,101,0.06)";
+
+const liveDotSize = phase === "align" ? 50 : clamp(34 + mark * 0.26, 42, 60);
+const scopeScale = flash ? 1.035 : 1;
 
 return (
 <main
@@ -309,17 +348,20 @@ fontFamily:
 style={{
 maxWidth: 520,
 margin: "0 auto",
-padding: "18px 18px 120px",
+paddingTop: "max(18px, env(safe-area-inset-top))",
+paddingRight: 18,
+paddingLeft: 18,
+paddingBottom: "max(140px, calc(env(safe-area-inset-bottom) + 92px))",
 }}
 >
-<header style={{ paddingTop: 6, marginBottom: 18 }}>
+<header style={{ paddingTop: 2, marginBottom: 14 }}>
 <div
 style={{
 fontSize: 12,
-letterSpacing: "0.12em",
+letterSpacing: "0.14em",
 textTransform: "uppercase",
-opacity: 0.55,
-marginBottom: 8,
+opacity: 0.5,
+marginBottom: 10,
 }}
 >
 Axis
@@ -328,32 +370,66 @@ Axis
 <div
 style={{
 display: "flex",
-alignItems: "baseline",
+alignItems: "flex-end",
 justifyContent: "space-between",
 gap: 16,
 }}
 >
+<div style={{ minWidth: 0 }}>
 <h1
 style={{
 margin: 0,
-fontSize: 42,
+fontSize: 46,
 lineHeight: 0.96,
-letterSpacing: "-0.05em",
+letterSpacing: "-0.06em",
 fontWeight: 700,
 }}
 >
-Axis Instrument
+{phase === "permission" ? "Axis Instrument" : stateTitle}
 </h1>
+
+{phase !== "permission" && (
+<div
+style={{
+marginTop: 10,
+fontSize: 17,
+opacity: 0.72,
+letterSpacing: "-0.02em",
+}}
+>
+Push {phase === "align" ? "Center" : push} • {statusText}
+</div>
+)}
+</div>
 
 <div
 style={{
 flexShrink: 0,
-fontSize: 13,
-opacity: 0.68,
 textAlign: "right",
+marginBottom: 4,
 }}
 >
-{statusText}
+<div
+style={{
+fontSize: 12,
+opacity: 0.5,
+marginBottom: 4,
+textTransform: "uppercase",
+letterSpacing: "0.12em",
+}}
+>
+Mark
+</div>
+<div
+style={{
+fontSize: 28,
+fontWeight: 700,
+letterSpacing: "-0.05em",
+opacity: phase === "permission" ? 0.42 : 1,
+}}
+>
+{phase === "permission" ? "—" : phase === "align" ? "—" : mark}
+</div>
 </div>
 </div>
 </header>
@@ -363,14 +439,14 @@ textAlign: "right",
 style={{
 border: "1px solid rgba(255,255,255,0.08)",
 background: "rgba(255,255,255,0.03)",
-borderRadius: 24,
+borderRadius: 26,
 padding: 18,
-marginBottom: 18,
+marginTop: 12,
 }}
 >
 <div
 style={{
-fontSize: 22,
+fontSize: 21,
 fontWeight: 600,
 marginBottom: 8,
 letterSpacing: "-0.03em",
@@ -382,7 +458,7 @@ Turn your phone into Axis Brain.
 <div
 style={{
 fontSize: 15,
-lineHeight: 1.45,
+lineHeight: 1.5,
 opacity: 0.7,
 marginBottom: 16,
 }}
@@ -402,75 +478,59 @@ Allow Motion
 <section
 style={{
 borderRadius: 32,
-padding: "22px 18px 18px",
+padding: "18px 16px 14px",
 background: glow,
 border: "1px solid rgba(255,255,255,0.07)",
-boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+boxShadow: flash
+? "inset 0 1px 0 rgba(255,255,255,0.05), 0 0 0 1px rgba(255,255,255,0.02), 0 0 36px rgba(220,255,220,0.05)"
+: "inset 0 1px 0 rgba(255,255,255,0.04)",
 overflow: "hidden",
+transition: "box-shadow 180ms ease, background 180ms ease",
 }}
 >
 <div
 style={{
 display: "flex",
-alignItems: "center",
+alignItems: "flex-start",
 justifyContent: "space-between",
-marginBottom: 12,
+marginBottom: 8,
+gap: 12,
 }}
 >
 <div>
-<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>
+<div style={{ fontSize: 12, opacity: 0.48, marginBottom: 6 }}>
 Axis Scope
 </div>
 
 <div
 style={{
-fontSize: 28,
-fontWeight: 700,
-letterSpacing: "-0.04em",
+fontSize: 18,
+opacity: 0.78,
+letterSpacing: "-0.02em",
 }}
 >
-{phase === "align" ? "Hold Still" : axisState}
+{phase === "align" ? "Hold Still" : `Push ${push}`}
 </div>
 </div>
 
 <div style={{ textAlign: "right" }}>
-<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>
-Axis Mark
+<div style={{ fontSize: 12, opacity: 0.48, marginBottom: 6 }}>
+{statusText}
 </div>
-
 <div
 style={{
-fontSize: 34,
-fontWeight: 700,
-letterSpacing: "-0.05em",
+fontSize: 18,
+opacity: 0.78,
+letterSpacing: "-0.02em",
 }}
 >
-{phase === "align" ? "—" : mark}
-</div>
-</div>
-</div>
-
-<div
-style={{
-fontSize: 13,
-opacity: 0.62,
-marginBottom: 14,
-display: "flex",
-justifyContent: "space-between",
-gap: 12,
-}}
->
-<span>Push {phase === "align" ? "Center" : push}</span>
-
-<span>
 {phase === "align"
 ? countdown === 0 || countdown === null
 ? "Aligned"
 : `${countdown}`
-: phase === "paused"
-? "Paused"
 : "Live"}
-</span>
+</div>
+</div>
 </div>
 
 <div
@@ -478,8 +538,10 @@ style={{
 position: "relative",
 aspectRatio: "1 / 1",
 width: "100%",
-maxWidth: 390,
-margin: "0 auto 18px",
+maxWidth: 330,
+margin: "0 auto 10px",
+transform: `scale(${scopeScale})`,
+transition: "transform 180ms ease",
 }}
 >
 <TargetRings />
@@ -489,10 +551,10 @@ style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: 18,
-height: 18,
+width: 16,
+height: 16,
 borderRadius: 999,
-background: "rgba(255,255,255,0.75)",
+background: "rgba(255,255,255,0.68)",
 transform: "translate(-50%, -50%)",
 }}
 />
@@ -502,16 +564,18 @@ style={{
 position: "absolute",
 left: "50%",
 top: "50%",
-width: 56,
-height: 56,
+width: liveDotSize,
+height: liveDotSize,
 borderRadius: 999,
 background: "#fff",
-boxShadow: "0 0 32px rgba(255,255,255,0.16)",
+boxShadow: flash
+? "0 0 46px rgba(255,255,255,0.26)"
+: "0 0 24px rgba(255,255,255,0.14)",
 transform: `translate(calc(-50% + ${dot.x}px), calc(-50% + ${dot.y}px))`,
 transition:
 phase === "live"
-? "transform 80ms linear"
-: "transform 180ms ease",
+? "transform 80ms linear, width 120ms ease, height 120ms ease, box-shadow 150ms ease"
+: "transform 180ms ease, width 120ms ease, height 120ms ease, box-shadow 150ms ease",
 }}
 />
 </div>
@@ -519,7 +583,7 @@ phase === "live"
 <div
 ref={lineWrapRef}
 style={{
-paddingTop: 6,
+paddingTop: 12,
 borderTop: "1px solid rgba(255,255,255,0.06)",
 }}
 >
@@ -529,11 +593,11 @@ display: "flex",
 alignItems: "baseline",
 justifyContent: "space-between",
 gap: 12,
-marginBottom: 10,
+marginBottom: 8,
 }}
 >
 <div>
-<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 2 }}>
+<div style={{ fontSize: 12, opacity: 0.48, marginBottom: 3 }}>
 Axis Line
 </div>
 
@@ -548,23 +612,17 @@ Signal history of structure over time.
 </div>
 </div>
 
-<div style={{ fontSize: 13, opacity: 0.6 }}>
-{phase === "live"
-? "Live"
-: phase === "paused"
-? "Paused"
-: "Aligning"}
-</div>
+<div style={{ fontSize: 13, opacity: 0.58 }}>{statusText}</div>
 </div>
 
 <canvas
 ref={canvasRef}
 style={{
 width: "100%",
-height: 132,
+height: 124,
 display: "block",
 borderRadius: 18,
-background: "rgba(255,255,255,0.01)",
+background: "rgba(255,255,255,0.012)",
 }}
 />
 </div>
@@ -572,7 +630,7 @@ background: "rgba(255,255,255,0.01)",
 
 <section
 style={{
-marginTop: 14,
+marginTop: 12,
 display: "flex",
 gap: 10,
 }}
@@ -601,38 +659,38 @@ Reset
 {latest && (
 <section
 style={{
-marginTop: 18,
+marginTop: 16,
 border: "1px solid rgba(255,255,255,0.07)",
-background: "rgba(255,255,255,0.03)",
+background: "rgba(255,255,255,0.022)",
 borderRadius: 24,
 padding: 16,
 }}
 >
-<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 8 }}>
+<div style={{ fontSize: 12, opacity: 0.48, marginBottom: 10 }}>
 Latest Capture
 </div>
 
 <div
 style={{
 display: "grid",
-gridTemplateColumns: "1.1fr 0.9fr",
-gap: 12,
+gridTemplateColumns: "1fr auto",
+gap: 14,
 alignItems: "center",
 }}
 >
 <div>
 <div
 style={{
-fontSize: 28,
+fontSize: 30,
 fontWeight: 700,
-letterSpacing: "-0.04em",
+letterSpacing: "-0.05em",
 marginBottom: 4,
 }}
 >
 {latest.shape}
 </div>
 
-<div style={{ fontSize: 14, opacity: 0.7 }}>
+<div style={{ fontSize: 15, opacity: 0.68 }}>
 {latest.state} • Push {latest.push}
 </div>
 </div>
@@ -640,15 +698,16 @@ marginBottom: 4,
 <div style={{ textAlign: "right" }}>
 <div
 style={{
-fontSize: 28,
+fontSize: 30,
 fontWeight: 700,
 letterSpacing: "-0.05em",
+lineHeight: 0.98,
 }}
 >
 {latest.mark}
 </div>
 
-<div style={{ fontSize: 13, opacity: 0.6 }}>
+<div style={{ fontSize: 12, opacity: 0.5, marginTop: 6 }}>
 {formatTime(latest.time)}
 </div>
 </div>
@@ -656,14 +715,14 @@ letterSpacing: "-0.05em",
 </section>
 )}
 
-<section style={{ marginTop: 18 }}>
+<section style={{ marginTop: 16 }}>
 <div
 style={{
 fontSize: 12,
-opacity: 0.5,
+opacity: 0.48,
 marginBottom: 10,
 textTransform: "uppercase",
-letterSpacing: "0.12em",
+letterSpacing: "0.16em",
 }}
 >
 Axis History
@@ -690,14 +749,17 @@ Captured Axis Shape moments will appear here.
 </div>
 )}
 
-{moments.map((moment) => (
+{moments.map((moment, index) => (
 <div
 key={moment.id}
 style={{
-border: "1px solid rgba(255,255,255,0.07)",
-background: "rgba(255,255,255,0.025)",
-borderRadius: 20,
-padding: 14,
+border: "1px solid rgba(255,255,255,0.065)",
+background:
+index === 0
+? "rgba(255,255,255,0.028)"
+: "rgba(255,255,255,0.02)",
+borderRadius: 22,
+padding: "13px 14px",
 display: "grid",
 gridTemplateColumns: "1fr auto",
 gap: 12,
@@ -707,16 +769,16 @@ alignItems: "center",
 <div>
 <div
 style={{
-fontSize: 18,
-fontWeight: 600,
+fontSize: 17,
+fontWeight: 650,
 letterSpacing: "-0.03em",
-marginBottom: 4,
+marginBottom: 3,
 }}
 >
 {moment.shape}
 </div>
 
-<div style={{ fontSize: 14, opacity: 0.72 }}>
+<div style={{ fontSize: 14, opacity: 0.66 }}>
 {moment.state} • Push {moment.push}
 </div>
 </div>
@@ -724,15 +786,16 @@ marginBottom: 4,
 <div style={{ textAlign: "right" }}>
 <div
 style={{
-fontSize: 22,
+fontSize: 20,
 fontWeight: 700,
 letterSpacing: "-0.05em",
+lineHeight: 1,
 }}
 >
 {moment.mark}
 </div>
 
-<div style={{ fontSize: 12, opacity: 0.56 }}>
+<div style={{ fontSize: 12, opacity: 0.46, marginTop: 5 }}>
 {formatTime(moment.time)}
 </div>
 </div>
@@ -811,12 +874,12 @@ letterSpacing: "-0.02em",
 
 const secondaryButtonStyle: React.CSSProperties = {
 border: "1px solid rgba(255,255,255,0.08)",
-borderRadius: 16,
-padding: "14px 16px",
-background: "rgba(255,255,255,0.04)",
+borderRadius: 18,
+padding: "15px 16px",
+background: "rgba(255,255,255,0.02)",
 color: "#fff",
 fontSize: 15,
-fontWeight: 600,
+fontWeight: 650,
 letterSpacing: "-0.02em",
 };
 
