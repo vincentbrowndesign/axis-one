@@ -1,5 +1,5 @@
-import AxisClient from "./axis-client";
+import AxisLiveClient from "./ui/axis-live-client";
 
 export default function AxisPage() {
-return <AxisClient />;
+return <AxisLiveClient />;
 }
