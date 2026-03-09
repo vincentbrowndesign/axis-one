@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-AxisFrame,
-AxisHistoryItem,
-AxisState,
+type AxisFrame,
+type AxisHistoryItem,
+type AxisState,
 buildHistoryLabel,
 classifyAxisState,
 computeStability,
@@ -14,7 +14,7 @@ formatTime,
 isAxisLock,
 normalizeTilt,
 smoothAxis,
-} from "@/lib/axis-core";
+} from "../../../lib/axis-core";
 
 type SignalPoint = {
 x: number;
@@ -23,12 +23,6 @@ state: AxisState;
 locked: boolean;
 time: number;
 };
-
-declare global {
-interface DeviceOrientationEvent {
-requestPermission?: () => Promise<"granted" | "denied">;
-}
-}
 
 const HISTORY_LIMIT = 10;
 const SIGNAL_LIMIT = 64;
@@ -87,7 +81,7 @@ return "text-white";
 }
 }
 
-function buildSignalPath(points: SignalPoint[], width: number, height: number) {
+function buildSignalPath(points: SignalPoint[]) {
 if (!points.length) return "";
 return points
 .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
@@ -102,10 +96,10 @@ const [isLive, setIsLive] = useState(false);
 const [history, setHistory] = useState<AxisHistoryItem[]>([]);
 const [signal, setSignal] = useState<SignalPoint[]>([]);
 const [sweepDeg, setSweepDeg] = useState(0);
+const [, forceRender] = useState(0);
 
 const rawRef = useRef({ x: 0, y: 0 });
 const smoothRef = useRef({ x: 0, y: 0 });
-const previousSmoothRef = useRef({ x: 0, y: 0 });
 const holdStartRef = useRef<number | null>(null);
 const lockCooldownRef = useRef(0);
 const frameRef = useRef<AxisFrame | null>(null);
@@ -142,7 +136,6 @@ return;
 const loop = (time: number) => {
 setSweepDeg((prev) => (prev + 1.6) % 360);
 
-// fallback simulation when orientation stream is missing or unsupported
 if (permissionState !== "granted") {
 simulationRef.current += 0.018;
 rawRef.current = {
@@ -157,7 +150,6 @@ Math.sin(simulationRef.current * 0.37) * 0.1,
 
 const previous = smoothRef.current;
 const smoothed = smoothAxis(previous, rawRef.current, 0.18);
-previousSmoothRef.current = previous;
 smoothRef.current = smoothed;
 
 const velocityX = smoothed.x - previous.x;
@@ -224,6 +216,7 @@ const item = createHistoryItem(nextFrame);
 setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
 }
 
+forceRender((v) => v + 1);
 rafRef.current = requestAnimationFrame(loop);
 };
 
@@ -237,17 +230,21 @@ async function enableMotion() {
 try {
 if (typeof window === "undefined") return;
 
+const OrientationEventWithPermission = DeviceOrientationEvent as any;
+
 if (
 typeof DeviceOrientationEvent !== "undefined" &&
-typeof DeviceOrientationEvent.requestPermission === "function"
+typeof OrientationEventWithPermission.requestPermission === "function"
 ) {
-const result = await DeviceOrientationEvent.requestPermission();
+const result = await OrientationEventWithPermission.requestPermission();
+
 if (result === "granted") {
 setPermissionState("granted");
 setIsLive(true);
 } else {
 setPermissionState("denied");
 }
+
 return;
 }
 
@@ -296,15 +293,13 @@ const circumference = 2 * Math.PI * 136;
 const fill = Math.max(0, Math.min(100, displayScore));
 const dashOffset = circumference * (1 - fill / 100);
 
-const signalPath = buildSignalPath(signal, 720, 140);
+const signalPath = buildSignalPath(signal);
 
 return (
 <div className="min-h-screen bg-[#05070a] text-white">
 <div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 md:px-6 lg:px-8">
 <div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
-{/* LEFT COLUMN */}
 <div className="flex flex-col gap-5">
-{/* STATE */}
 <section
 className={cn(
 "relative overflow-hidden rounded-[28px] border bg-white/[0.03] p-5 backdrop-blur-xl md:p-6",
@@ -351,7 +346,6 @@ textShadow: isLocked ? tone.glow : "none",
 </div>
 </section>
 
-{/* SCOPE */}
 <section className="relative overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:p-6">
 <div className="mb-4 flex items-center justify-between">
 <div>
@@ -368,10 +362,7 @@ AXIS STRUCTURE FIELD
 </div>
 
 <div className="relative mx-auto aspect-square w-full max-w-[360px]">
-<svg
-viewBox={`0 0 ${scopeSize} ${scopeSize}`}
-className="h-full w-full"
->
+<svg viewBox={`0 0 ${scopeSize} ${scopeSize}`} className="h-full w-full">
 <defs>
 <radialGradient id="scopeGlow" cx="50%" cy="50%" r="50%">
 <stop offset="0%" stopColor="rgba(255,255,255,0.10)" />
@@ -387,7 +378,6 @@ className="h-full w-full"
 
 <circle cx={center} cy={center} r="150" fill="url(#scopeGlow)" />
 
-{/* Stability ring */}
 <circle
 cx={center}
 cy={center}
@@ -414,7 +404,6 @@ transition:
 }}
 />
 
-{/* Radar rings */}
 {[108, 76, 42].map((r) => (
 <circle
 key={r}
@@ -427,7 +416,6 @@ strokeWidth="1"
 />
 ))}
 
-{/* Crosshair */}
 <line
 x1={center}
 y1={36}
@@ -445,7 +433,6 @@ stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
 />
 
-{/* Sweep */}
 <line
 x1={center}
 y1={center}
@@ -458,15 +445,8 @@ filter: "drop-shadow(0 0 14px rgba(255,255,255,0.10))",
 }}
 />
 
-{/* Center point */}
-<circle
-cx={center}
-cy={center}
-r="4.5"
-fill="rgba(255,255,255,0.85)"
-/>
+<circle cx={center} cy={center} r="4.5" fill="rgba(255,255,255,0.85)" />
 
-{/* Lock pulse */}
 {isLocked && (
 <circle
 cx={center}
@@ -476,13 +456,9 @@ fill="none"
 stroke={tone.ring}
 strokeWidth="1.4"
 opacity="0.7"
-style={{
-filter: `drop-shadow(${tone.glow})`,
-}}
 />
 )}
 
-{/* Structure dot */}
 <circle
 cx={dotX}
 cy={dotY}
@@ -508,7 +484,6 @@ Structure Field
 </div>
 </section>
 
-{/* LINE */}
 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:p-5">
 <div className="mb-4 flex items-center justify-between">
 <div>
@@ -576,9 +551,7 @@ strokeDasharray="4 5"
 </section>
 </div>
 
-{/* RIGHT COLUMN */}
 <div className="flex flex-col gap-5">
-{/* LOCK + CONTROLS */}
 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
 <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
 Axis Lock
@@ -658,7 +631,6 @@ Axis History
 </div>
 </section>
 
-{/* BRAIN */}
 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
 <div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
 Axis Brain
@@ -697,7 +669,6 @@ displayState === "CENTERED"
 </div>
 </section>
 
-{/* HISTORY */}
 <section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
 <div className="flex items-center justify-between">
 <div>
