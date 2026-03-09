@@ -38,6 +38,7 @@ ring: "rgba(76, 255, 126, 0.95)",
 glow: "0 0 22px rgba(76,255,126,0.35)",
 text: "text-emerald-300",
 border: "border-emerald-400/40",
+softBg: "bg-emerald-400/10",
 };
 }
 if (score >= 85) {
@@ -46,6 +47,7 @@ ring: "rgba(255,255,255,0.96)",
 glow: "0 0 18px rgba(255,255,255,0.18)",
 text: "text-white",
 border: "border-white/20",
+softBg: "bg-white/10",
 };
 }
 if (score >= 70) {
@@ -54,6 +56,7 @@ ring: "rgba(255, 191, 71, 0.96)",
 glow: "0 0 18px rgba(255,191,71,0.22)",
 text: "text-amber-300",
 border: "border-amber-400/35",
+softBg: "bg-amber-400/10",
 };
 }
 return {
@@ -61,6 +64,7 @@ ring: "rgba(255, 90, 90, 0.96)",
 glow: "0 0 18px rgba(255,90,90,0.22)",
 text: "text-rose-300",
 border: "border-rose-400/35",
+softBg: "bg-rose-400/10",
 };
 }
 
@@ -93,6 +97,7 @@ const [permissionState, setPermissionState] = useState<
 "idle" | "granted" | "denied" | "unsupported"
 >("idle");
 const [isLive, setIsLive] = useState(false);
+const [panel, setPanel] = useState<"brain" | "history">("brain");
 const [history, setHistory] = useState<AxisHistoryItem[]>([]);
 const [signal, setSignal] = useState<SignalPoint[]>([]);
 const [sweepDeg, setSweepDeg] = useState(0);
@@ -297,41 +302,41 @@ const signalPath = buildSignalPath(signal);
 
 return (
 <div className="min-h-screen bg-[#05070a] text-white">
-<div className="mx-auto flex w-full max-w-7xl flex-col gap-5 px-4 py-5 md:px-6 lg:px-8">
-<div className="grid gap-5 lg:grid-cols-[1.15fr_0.85fr]">
-<div className="flex flex-col gap-5">
+<div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-3 sm:px-4 md:gap-5 md:px-6 lg:px-8">
+<div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr] lg:gap-5">
+<div className="flex flex-col gap-4 md:gap-5">
 <section
 className={cn(
-"relative overflow-hidden rounded-[28px] border bg-white/[0.03] p-5 backdrop-blur-xl md:p-6",
+"relative overflow-hidden rounded-[24px] border bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-6",
 tone.border,
 )}
 >
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_55%)]" />
-<div className="relative flex items-start justify-between gap-4">
-<div>
-<div className="mb-2 text-[11px] font-medium uppercase tracking-[0.28em] text-white/45">
+<div className="relative flex items-center justify-between gap-4">
+<div className="min-w-0">
+<div className="mb-1 text-[10px] font-medium uppercase tracking-[0.26em] text-white/45 md:mb-2 md:text-[11px] md:tracking-[0.28em]">
 Axis State
 </div>
 <div
 className={cn(
-"text-4xl font-semibold tracking-tight md:text-6xl",
+"truncate text-3xl font-semibold tracking-tight md:text-5xl",
 stateAccent(displayState),
 )}
 style={{ textShadow: isLocked ? tone.glow : "none" }}
 >
 {displayState}
 </div>
-<div className="mt-2 text-sm text-white/55 md:text-base">
+<div className="mt-1 text-sm text-white/55 md:mt-2 md:text-base">
 {buildHistoryLabel(displayState, displayDirection)}
 </div>
 </div>
 
-<div className="text-right">
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/40">
+<div className="shrink-0 text-right">
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40 md:text-[11px] md:tracking-[0.28em]">
 Axis Lock
 </div>
 <div
-className="mt-2 text-4xl font-semibold md:text-6xl"
+className="mt-1 text-3xl font-semibold md:mt-2 md:text-5xl"
 style={{
 color: tone.ring,
 textShadow: isLocked ? tone.glow : "none",
@@ -339,29 +344,29 @@ textShadow: isLocked ? tone.glow : "none",
 >
 {displayScore}
 </div>
-<div className="mt-2 text-sm text-white/50">
+<div className="mt-1 text-xs text-white/50 md:mt-2 md:text-sm">
 {isLocked ? "Structure locked" : "Scanning structure"}
 </div>
 </div>
 </div>
 </section>
 
-<section className="relative overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:p-6">
-<div className="mb-4 flex items-center justify-between">
+<section className="relative overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[32px] md:p-6">
+<div className="mb-3 flex items-center justify-between md:mb-4">
 <div>
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
 Axis Scope
 </div>
 <div className="mt-1 text-sm text-white/55">
 AXIS STRUCTURE FIELD
 </div>
 </div>
-<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.24em] text-white/60">
+<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/60 md:text-xs md:tracking-[0.24em]">
 {isLive ? "Live" : "Idle"}
 </div>
 </div>
 
-<div className="relative mx-auto aspect-square w-full max-w-[360px]">
+<div className="relative mx-auto aspect-square w-full max-w-[300px] sm:max-w-[320px] md:max-w-[360px]">
 <svg viewBox={`0 0 ${scopeSize} ${scopeSize}`} className="h-full w-full">
 <defs>
 <radialGradient id="scopeGlow" cx="50%" cy="50%" r="50%">
@@ -472,22 +477,22 @@ transition:
 />
 </svg>
 
-<div className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-[11px] uppercase tracking-[0.26em] text-white/36">
+<div className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-[10px] uppercase tracking-[0.22em] text-white/36 md:text-[11px] md:tracking-[0.26em]">
 Structure Field
 </div>
 </div>
 
-<div className="mt-4 grid grid-cols-3 gap-3">
+<div className="mt-4 grid grid-cols-3 gap-2 md:gap-3">
 <StatChip label="X Axis" value={displayX.toFixed(2)} />
 <StatChip label="Y Axis" value={displayY.toFixed(2)} />
 <StatChip label="Direction" value={displayDirection} />
 </div>
 </section>
 
-<section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:p-5">
-<div className="mb-4 flex items-center justify-between">
+<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
+<div className="mb-3 flex items-center justify-between md:mb-4">
 <div>
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
 Axis Line
 </div>
 <div className="mt-1 text-sm text-white/55">
@@ -495,13 +500,13 @@ Structure over time
 </div>
 </div>
 
-<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.24em] text-white/50">
+<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/50 md:text-xs md:tracking-[0.24em]">
 {signal.length} frames
 </div>
 </div>
 
-<div className="overflow-hidden rounded-[20px] border border-white/8 bg-[#07090d] p-3">
-<svg viewBox="0 0 720 140" className="h-[160px] w-full">
+<div className="overflow-hidden rounded-[18px] border border-white/8 bg-[#07090d] p-2 md:rounded-[20px] md:p-3">
+<svg viewBox="0 0 720 140" className="h-[120px] w-full md:h-[160px]">
 <defs>
 <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
 <stop offset="0%" stopColor="rgba(255,255,255,0.20)" />
@@ -551,22 +556,22 @@ strokeDasharray="4 5"
 </section>
 </div>
 
-<div className="flex flex-col gap-5">
-<section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+<div className="flex flex-col gap-4 md:gap-5">
+<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
+<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
 Axis Lock
 </div>
-<div className="mt-2 text-sm text-white/55">
+<div className="mt-1 text-sm text-white/55 md:mt-2">
 Stability above 90 held for 420ms
 </div>
 
-<div className="mt-5 rounded-[24px] border border-white/8 bg-[#07090d] p-5">
-<div className="flex items-center justify-between">
-<div className="text-sm uppercase tracking-[0.24em] text-white/40">
+<div className="mt-4 rounded-[20px] border border-white/8 bg-[#07090d] p-4 md:mt-5 md:rounded-[24px] md:p-5">
+<div className="flex items-center justify-between gap-3">
+<div className="text-xs uppercase tracking-[0.22em] text-white/40 md:text-sm md:tracking-[0.24em]">
 Lock State
 </div>
 <div
-className="rounded-full px-3 py-1 text-xs uppercase tracking-[0.24em]"
+className="rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] md:text-xs md:tracking-[0.24em]"
 style={{
 color: tone.ring,
 border: `1px solid ${tone.ring}33`,
@@ -577,15 +582,15 @@ boxShadow: isLocked ? tone.glow : "none",
 </div>
 </div>
 
-<div className="mt-5 grid gap-3">
+<div className="mt-4 grid gap-2 md:mt-5 md:gap-3">
 <button
 onClick={enableMotion}
-className="rounded-2xl border border-white/12 bg-white/8 px-4 py-4 text-left transition hover:bg-white/12"
+className="rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-left transition hover:bg-white/12 md:py-4"
 >
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
 Motion
 </div>
-<div className="mt-1 text-lg font-medium">
+<div className="mt-1 text-base font-medium md:text-lg">
 {permissionState === "granted"
 ? "Permission granted"
 : permissionState === "denied"
@@ -596,50 +601,78 @@ Motion
 </div>
 </button>
 
-<div className="grid grid-cols-2 gap-3">
+<div className="grid grid-cols-2 gap-2 md:gap-3">
 <button
 onClick={() => setIsLive(true)}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-4 text-left transition hover:bg-white/10"
+className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
 >
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
 Live
 </div>
-<div className="mt-1 text-lg font-medium">Start</div>
+<div className="mt-1 text-base font-medium md:text-lg">Start</div>
 </button>
 
 <button
 onClick={endSession}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-4 text-left transition hover:bg-white/10"
+className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
 >
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
 Session
 </div>
-<div className="mt-1 text-lg font-medium">End</div>
+<div className="mt-1 text-base font-medium md:text-lg">End</div>
 </button>
 </div>
 
 <button
 onClick={clearSession}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-4 text-left transition hover:bg-white/10"
+className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
 >
-<div className="text-xs uppercase tracking-[0.24em] text-white/45">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
 Axis History
 </div>
-<div className="mt-1 text-lg font-medium">Clear session</div>
+<div className="mt-1 text-base font-medium md:text-lg">Clear session</div>
 </button>
 </div>
 </div>
 </section>
 
-<section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
+<div className="mb-4 flex gap-2">
+<button
+onClick={() => setPanel("brain")}
+className={cn(
+"flex-1 rounded-xl border px-4 py-2 text-sm font-medium transition",
+panel === "brain"
+? "border-white/16 bg-white/10 text-white"
+: "border-white/8 bg-white/[0.03] text-white/55",
+)}
+>
+Axis Brain
+</button>
+
+<button
+onClick={() => setPanel("history")}
+className={cn(
+"flex-1 rounded-xl border px-4 py-2 text-sm font-medium transition",
+panel === "history"
+? "border-white/16 bg-white/10 text-white"
+: "border-white/8 bg-white/[0.03] text-white/55",
+)}
+>
+Axis History
+</button>
+</div>
+
+{panel === "brain" ? (
+<div>
+<div className="mb-1 text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
 Axis Brain
 </div>
-<div className="mt-2 text-sm text-white/55">
+<div className="mb-4 text-sm text-white/55">
 Live interpretation of structure during decision
 </div>
 
-<div className="mt-5 grid gap-3">
+<div className="grid gap-2 md:gap-3">
 <InsightRow label="Primary state" value={displayState} />
 <InsightRow label="Direction" value={displayDirection} />
 <InsightRow
@@ -667,39 +700,32 @@ displayState === "CENTERED"
 }
 />
 </div>
-</section>
-
-<section className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5 backdrop-blur-xl">
-<div className="flex items-center justify-between">
+</div>
+) : (
 <div>
-<div className="text-[11px] uppercase tracking-[0.28em] text-white/45">
+<div className="mb-1 text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
 Axis History
 </div>
-<div className="mt-1 text-sm text-white/55">
+<div className="mb-4 text-sm text-white/55">
 Auto-logged on lock
 </div>
-</div>
-<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.24em] text-white/50">
-{history.length} items
-</div>
-</div>
 
-<div className="mt-4 space-y-3">
 {history.length === 0 ? (
-<div className="rounded-[22px] border border-dashed border-white/12 bg-[#07090d] px-4 py-8 text-center text-sm text-white/42">
+<div className="rounded-[20px] border border-dashed border-white/12 bg-[#07090d] px-4 py-8 text-center text-sm text-white/42">
 No locked windows yet. Start live sensing and hold structure to create Axis History.
 </div>
 ) : (
-history.map((item) => (
+<div className="space-y-2 md:space-y-3">
+{history.map((item) => (
 <div
 key={item.id}
-className="rounded-[22px] border border-white/8 bg-[#07090d] px-4 py-4"
+className="rounded-[18px] border border-white/8 bg-[#07090d] px-4 py-3 md:rounded-[22px] md:py-4"
 >
 <div className="flex items-start justify-between gap-3">
-<div>
+<div className="min-w-0">
 <div
 className={cn(
-"text-base font-semibold",
+"truncate text-base font-semibold",
 stateAccent(item.state),
 )}
 >
@@ -710,9 +736,9 @@ stateAccent(item.state),
 </div>
 </div>
 
-<div className="text-right">
+<div className="shrink-0 text-right">
 <div
-className="text-xl font-semibold"
+className="text-lg font-semibold md:text-xl"
 style={{ color: scoreTone(item.stability).ring }}
 >
 {item.stability}
@@ -723,9 +749,11 @@ style={{ color: scoreTone(item.stability).ring }}
 </div>
 </div>
 </div>
-))
+))}
+</div>
 )}
 </div>
+)}
 </section>
 </div>
 </div>
@@ -736,22 +764,24 @@ style={{ color: scoreTone(item.stability).ring }}
 
 function StatChip({ label, value }: { label: string; value: string }) {
 return (
-<div className="rounded-[18px] border border-white/8 bg-[#07090d] px-4 py-3">
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/38">
+<div className="rounded-[16px] border border-white/8 bg-[#07090d] px-3 py-3 md:rounded-[18px] md:px-4">
+<div className="text-[9px] uppercase tracking-[0.22em] text-white/38 md:text-[10px] md:tracking-[0.24em]">
 {label}
 </div>
-<div className="mt-1 truncate text-sm font-medium text-white/82">{value}</div>
+<div className="mt-1 truncate text-xs font-medium text-white/82 md:text-sm">
+{value}
+</div>
 </div>
 );
 }
 
 function InsightRow({ label, value }: { label: string; value: string }) {
 return (
-<div className="flex items-start justify-between gap-4 rounded-[18px] border border-white/8 bg-[#07090d] px-4 py-3">
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/38">
+<div className="flex items-start justify-between gap-4 rounded-[16px] border border-white/8 bg-[#07090d] px-4 py-3 md:rounded-[18px]">
+<div className="text-[9px] uppercase tracking-[0.22em] text-white/38 md:text-[10px] md:tracking-[0.24em]">
 {label}
 </div>
-<div className="max-w-[65%] text-right text-sm text-white/82">{value}</div>
+<div className="max-w-[68%] text-right text-sm text-white/82">{value}</div>
 </div>
 );
 }
