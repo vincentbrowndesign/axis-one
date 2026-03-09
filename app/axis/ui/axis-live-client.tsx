@@ -24,7 +24,7 @@ locked: boolean;
 time: number;
 };
 
-const HISTORY_LIMIT = 10;
+const HISTORY_LIMIT = 12;
 const SIGNAL_LIMIT = 64;
 
 function cn(...parts: Array<string | false | null | undefined>) {
@@ -38,7 +38,6 @@ ring: "rgba(76, 255, 126, 0.95)",
 glow: "0 0 22px rgba(76,255,126,0.35)",
 text: "text-emerald-300",
 border: "border-emerald-400/40",
-softBg: "bg-emerald-400/10",
 };
 }
 if (score >= 85) {
@@ -47,7 +46,6 @@ ring: "rgba(255,255,255,0.96)",
 glow: "0 0 18px rgba(255,255,255,0.18)",
 text: "text-white",
 border: "border-white/20",
-softBg: "bg-white/10",
 };
 }
 if (score >= 70) {
@@ -56,7 +54,6 @@ ring: "rgba(255, 191, 71, 0.96)",
 glow: "0 0 18px rgba(255,191,71,0.22)",
 text: "text-amber-300",
 border: "border-amber-400/35",
-softBg: "bg-amber-400/10",
 };
 }
 return {
@@ -64,7 +61,6 @@ ring: "rgba(255, 90, 90, 0.96)",
 glow: "0 0 18px rgba(255,90,90,0.22)",
 text: "text-rose-300",
 border: "border-rose-400/35",
-softBg: "bg-rose-400/10",
 };
 }
 
@@ -101,6 +97,7 @@ const [panel, setPanel] = useState<"brain" | "history">("brain");
 const [history, setHistory] = useState<AxisHistoryItem[]>([]);
 const [signal, setSignal] = useState<SignalPoint[]>([]);
 const [sweepDeg, setSweepDeg] = useState(0);
+const [lockPulse, setLockPulse] = useState(false);
 const [, forceRender] = useState(0);
 
 const rawRef = useRef({ x: 0, y: 0 });
@@ -110,6 +107,7 @@ const lockCooldownRef = useRef(0);
 const frameRef = useRef<AxisFrame | null>(null);
 const simulationRef = useRef(0);
 const rafRef = useRef<number | null>(null);
+const pulseTimeoutRef = useRef<number | null>(null);
 
 const current = frameRef.current;
 
@@ -130,6 +128,13 @@ if (permissionState !== "granted") return;
 window.addEventListener("deviceorientation", onOrientation, true);
 return () => window.removeEventListener("deviceorientation", onOrientation, true);
 }, [permissionState]);
+
+useEffect(() => {
+return () => {
+if (rafRef.current) cancelAnimationFrame(rafRef.current);
+if (pulseTimeoutRef.current) window.clearTimeout(pulseTimeoutRef.current);
+};
+}, []);
 
 useEffect(() => {
 if (!isLive) {
@@ -219,6 +224,12 @@ if (locked && time - lockCooldownRef.current > 950) {
 lockCooldownRef.current = time;
 const item = createHistoryItem(nextFrame);
 setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
+setLockPulse(true);
+
+if (pulseTimeoutRef.current) window.clearTimeout(pulseTimeoutRef.current);
+pulseTimeoutRef.current = window.setTimeout(() => {
+setLockPulse(false);
+}, 420);
 }
 
 forceRender((v) => v + 1);
@@ -266,6 +277,10 @@ setPermissionState("denied");
 }
 }
 
+function startLive() {
+setIsLive(true);
+}
+
 function endSession() {
 setIsLive(false);
 }
@@ -275,6 +290,7 @@ setHistory([]);
 setSignal([]);
 holdStartRef.current = null;
 lockCooldownRef.current = 0;
+setLockPulse(false);
 }
 
 const displayState = current?.state ?? "CENTERED";
@@ -403,7 +419,10 @@ strokeDasharray={circumference}
 strokeDashoffset={dashOffset}
 transform={`rotate(-90 ${center} ${center})`}
 style={{
-filter: isLocked ? `drop-shadow(${tone.glow})` : "none",
+filter:
+isLocked || lockPulse
+? `drop-shadow(${tone.glow})`
+: "none",
 transition:
 "stroke-dashoffset 160ms linear, stroke 160ms linear, filter 160ms linear",
 }}
@@ -452,25 +471,47 @@ filter: "drop-shadow(0 0 14px rgba(255,255,255,0.10))",
 
 <circle cx={center} cy={center} r="4.5" fill="rgba(255,255,255,0.85)" />
 
-{isLocked && (
+{(isLocked || lockPulse) && (
 <circle
 cx={center}
 cy={center}
-r="108"
+r={108}
 fill="none"
 stroke={tone.ring}
 strokeWidth="1.4"
-opacity="0.7"
+opacity={lockPulse ? 0.95 : 0.7}
+style={{
+filter: lockPulse ? `drop-shadow(${tone.glow})` : "none",
+transition: "opacity 140ms ease",
+}}
+/>
+)}
+
+{lockPulse && (
+<circle
+cx={center}
+cy={center}
+r={124}
+fill="none"
+stroke={tone.ring}
+strokeWidth="1.1"
+opacity="0.32"
+style={{
+filter: `drop-shadow(${tone.glow})`,
+}}
 />
 )}
 
 <circle
 cx={dotX}
 cy={dotY}
-r={isLocked ? 12 : 9}
+r={isLocked || lockPulse ? 12 : 9}
 fill={tone.ring}
 style={{
-filter: isLocked ? `drop-shadow(${tone.glow})` : "none",
+filter:
+isLocked || lockPulse
+? `drop-shadow(${tone.glow})`
+: "none",
 transition:
 "cx 90ms linear, cy 90ms linear, r 120ms ease, filter 120ms ease",
 }}
@@ -582,57 +623,52 @@ boxShadow: isLocked ? tone.glow : "none",
 </div>
 </div>
 
-<div className="mt-4 grid gap-2 md:mt-5 md:gap-3">
+<div className="mt-5 grid grid-cols-3 gap-3">
 <button
 onClick={enableMotion}
-className="rounded-2xl border border-white/12 bg-white/8 px-4 py-3 text-left transition hover:bg-white/12 md:py-4"
+className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
 >
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
-Motion
+<div className="text-[10px] tracking-[0.24em] text-white/50">
+MOTION
 </div>
-<div className="mt-1 text-base font-medium md:text-lg">
+<div className="mt-1 text-sm font-medium">
 {permissionState === "granted"
-? "Permission granted"
+? "ON"
 : permissionState === "denied"
-? "Permission denied"
+? "DENIED"
 : permissionState === "unsupported"
-? "Simulation mode"
-: "Enable motion"}
+? "SIM"
+: "ENABLE"}
 </div>
 </button>
 
-<div className="grid grid-cols-2 gap-2 md:gap-3">
 <button
-onClick={() => setIsLive(true)}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
+onClick={startLive}
+className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
 >
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
-Live
+<div className="text-[10px] tracking-[0.24em] text-white/50">
+LIVE
 </div>
-<div className="mt-1 text-base font-medium md:text-lg">Start</div>
+<div className="mt-1 text-sm font-medium">START</div>
 </button>
 
 <button
 onClick={endSession}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
+className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
 >
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
-Session
+<div className="text-[10px] tracking-[0.24em] text-white/50">
+SESSION
 </div>
-<div className="mt-1 text-base font-medium md:text-lg">End</div>
+<div className="mt-1 text-sm font-medium">END</div>
 </button>
 </div>
 
 <button
 onClick={clearSession}
-className="rounded-2xl border border-white/12 bg-white/6 px-4 py-3 text-left transition hover:bg-white/10 md:py-4"
+className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 py-2 text-xs tracking-[0.24em] text-white/60 transition hover:bg-white/10"
 >
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45 md:text-xs md:tracking-[0.24em]">
-Axis History
-</div>
-<div className="mt-1 text-base font-medium md:text-lg">Clear session</div>
+CLEAR AXIS HISTORY
 </button>
-</div>
 </div>
 </section>
 

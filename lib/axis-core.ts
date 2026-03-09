@@ -55,8 +55,6 @@ y: current.y + (target.y - current.y) * factor,
 }
 
 export function normalizeTilt(beta: number, gamma: number) {
-// beta: front/back tilt, gamma: left/right tilt
-// clamp to a sane human-movement range, then normalize to -1..1
 const x = clamp(gamma / 35, -1, 1);
 const y = clamp(beta / 35, -1, 1);
 return { x, y };
@@ -73,10 +71,14 @@ velocityX: number,
 velocityY: number,
 ) {
 const magnitude = computeMagnitude(x, y);
-const movement = clamp(Math.sqrt(velocityX * velocityX + velocityY * velocityY), 0, 1);
+const movement = clamp(
+Math.sqrt(velocityX * velocityX + velocityY * velocityY),
+0,
+1,
+);
 const centeredScore = 1 - clamp(magnitude, 0, 1);
 const movementPenalty = movement * 0.65;
-const score = clamp((centeredScore * 100) - movementPenalty * 35, 0, 100);
+const score = clamp(centeredScore * 100 - movementPenalty * 35, 0, 100);
 return round(score);
 }
 
