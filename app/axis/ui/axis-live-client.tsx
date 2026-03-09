@@ -12,7 +12,6 @@ detectPushDirection,
 formatTime,
 isAxisLock,
 normalizeTilt,
-smoothAxis,
 } from "../../../lib/axis-core";
 
 type SignalPoint = {
@@ -36,6 +35,10 @@ const PEAK_HOLD_MS = 1100;
 
 function cn(...parts: Array<string | false | null | undefined>) {
 return parts.filter(Boolean).join(" ");
+}
+
+function clamp(value: number, min: number, max: number) {
+return Math.min(max, Math.max(min, value));
 }
 
 function scoreTone(score: number) {
@@ -115,6 +118,17 @@ if (state === "DROP") return "Forward load increasing";
 return "Structure breaking";
 }
 
+function smoothVisual(
+current: { x: number; y: number },
+target: { x: number; y: number },
+factor: number,
+) {
+return {
+x: current.x + (target.x - current.x) * factor,
+y: current.y + (target.y - current.y) * factor,
+};
+}
+
 export default function AxisLiveClient() {
 const [permissionState, setPermissionState] = useState<
 "idle" | "granted" | "denied" | "unsupported"
@@ -134,7 +148,8 @@ visible: false,
 const [, forceRender] = useState(0);
 
 const rawRef = useRef({ x: 0, y: 0 });
-const smoothRef = useRef({ x: 0, y: 0 });
+const sensorSmoothRef = useRef({ x: 0, y: 0 });
+const visualRef = useRef({ x: 0, y: 0 });
 const holdStartRef = useRef<number | null>(null);
 const lockCooldownRef = useRef(0);
 const frameRef = useRef<AxisFrame | null>(null);
@@ -187,7 +202,7 @@ return;
 }
 
 const loop = (time: number) => {
-setSweepDeg((prev) => (prev + 1.45) % 360);
+setSweepDeg((prev) => (prev + 1.35) % 360);
 
 if (permissionState !== "granted") {
 simulationRef.current += 0.018;
@@ -201,20 +216,20 @@ Math.sin(simulationRef.current * 0.37) * 0.1,
 };
 }
 
-const previous = smoothRef.current;
-const smoothed = smoothAxis(previous, rawRef.current, 0.18);
-smoothRef.current = smoothed;
+const prevSensor = sensorSmoothRef.current;
+const nextSensor = smoothVisual(prevSensor, rawRef.current, 0.18);
+sensorSmoothRef.current = nextSensor;
 
-const velocityX = smoothed.x - previous.x;
-const velocityY = smoothed.y - previous.y;
+const velocityX = nextSensor.x - prevSensor.x;
+const velocityY = nextSensor.y - prevSensor.y;
 const stability = computeStability(
-smoothed.x,
-smoothed.y,
+nextSensor.x,
+nextSensor.y,
 velocityX,
 velocityY,
 );
-const state = classifyAxisState(smoothed.x, smoothed.y, stability);
-const direction = detectPushDirection(smoothed.x, smoothed.y);
+const state = classifyAxisState(nextSensor.x, nextSensor.y, stability);
+const direction = detectPushDirection(nextSensor.x, nextSensor.y);
 
 if (stability >= 90) {
 if (holdStartRef.current === null) holdStartRef.current = time;
@@ -225,13 +240,34 @@ holdStartRef.current = null;
 const holdMs = holdStartRef.current ? time - holdStartRef.current : 0;
 const locked = isAxisLock(stability, holdMs);
 
+let visualTarget = nextSensor;
+
+if (locked) {
+visualTarget = {
+x: nextSensor.x * 0.2,
+y: nextSensor.y * 0.2,
+};
+}
+
+const visualFactor = locked ? 0.34 : 0.12;
+let nextVisual = smoothVisual(visualRef.current, visualTarget, visualFactor);
+
+if (locked) {
+nextVisual = {
+x: Math.abs(nextVisual.x) < 0.015 ? 0 : nextVisual.x,
+y: Math.abs(nextVisual.y) < 0.015 ? 0 : nextVisual.y,
+};
+}
+
+visualRef.current = nextVisual;
+
 const nextFrame: AxisFrame = {
 time: Date.now(),
 rawX: rawRef.current.x,
 rawY: rawRef.current.y,
-smoothX: smoothed.x,
-smoothY: smoothed.y,
-magnitude: Math.sqrt(smoothed.x * smoothed.x + smoothed.y * smoothed.y),
+smoothX: nextVisual.x,
+smoothY: nextVisual.y,
+magnitude: Math.sqrt(nextSensor.x * nextSensor.x + nextSensor.y * nextSensor.y),
 stability,
 state,
 direction,
@@ -345,6 +381,8 @@ setSignal([]);
 holdStartRef.current = null;
 lockCooldownRef.current = 0;
 setLockPulse(false);
+sensorSmoothRef.current = { x: 0, y: 0 };
+visualRef.current = { x: 0, y: 0 };
 setPeakHold({
 score: 0,
 state: "CENTERED",
@@ -356,8 +394,8 @@ visible: false,
 const scopeSize = 360;
 const center = scopeSize / 2;
 const maxRadius = 118;
-const dotX = center + displayX * maxRadius;
-const dotY = center + displayY * maxRadius;
+const dotX = center + clamp(displayX, -1, 1) * maxRadius;
+const dotY = center + clamp(displayY, -1, 1) * maxRadius;
 const sweepAngle = sweepDeg - 90;
 const sweepRadians = (sweepAngle * Math.PI) / 180;
 const sweepX = center + Math.cos(sweepRadians) * 136;
@@ -559,7 +597,7 @@ isLocked || lockPulse
 ? `drop-shadow(${tone.glow})`
 : "none",
 transition:
-"cx 90ms linear, cy 90ms linear, r 120ms ease, filter 120ms ease",
+"cx 75ms linear, cy 75ms linear, r 120ms ease, filter 120ms ease",
 }}
 />
 </svg>
@@ -584,7 +622,7 @@ Axis Line
 <svg viewBox="0 0 720 140" className="h-[120px] w-full md:h-[160px]">
 <defs>
 <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-<stop offset="0%" stopColor="rgba(255,255,255,0.20)" />
+<stop offset="0%" stopColor="rgba(255,255,255,0.18)" />
 <stop offset="100%" stopColor={tone.ring} />
 </linearGradient>
 </defs>
@@ -596,7 +634,7 @@ x1="0"
 y1={y}
 x2="720"
 y2={y}
-stroke="rgba(255,255,255,0.05)"
+stroke="rgba(255,255,255,0.04)"
 strokeWidth="1"
 />
 ))}
@@ -619,7 +657,7 @@ x1={p.x}
 y1={130}
 x2={p.x}
 y2={18}
-stroke="rgba(255,255,255,0.14)"
+stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
 strokeDasharray="4 5"
 />
