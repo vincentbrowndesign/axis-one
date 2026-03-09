@@ -5,7 +5,6 @@ import {
 type AxisFrame,
 type AxisHistoryItem,
 type AxisState,
-buildHistoryLabel,
 classifyAxisState,
 computeStability,
 createHistoryItem,
@@ -47,8 +46,6 @@ glow: "0 0 28px rgba(76,255,126,0.32)",
 text: "text-emerald-300",
 border: "border-emerald-400/35",
 bg: "from-emerald-500/12 to-transparent",
-key: "text-emerald-300",
-bar: "bg-emerald-400/70",
 };
 }
 if (score >= 85) {
@@ -58,8 +55,6 @@ glow: "0 0 24px rgba(255,255,255,0.14)",
 text: "text-white",
 border: "border-white/18",
 bg: "from-white/10 to-transparent",
-key: "text-white",
-bar: "bg-white/25",
 };
 }
 if (score >= 70) {
@@ -69,8 +64,6 @@ glow: "0 0 22px rgba(255,191,71,0.20)",
 text: "text-amber-300",
 border: "border-amber-400/30",
 bg: "from-amber-500/12 to-transparent",
-key: "text-amber-300",
-bar: "bg-amber-400/65",
 };
 }
 return {
@@ -79,8 +72,6 @@ glow: "0 0 22px rgba(255,90,90,0.22)",
 text: "text-rose-300",
 border: "border-rose-400/30",
 bg: "from-rose-500/12 to-transparent",
-key: "text-rose-300",
-bar: "bg-rose-400/65",
 };
 }
 
@@ -362,17 +353,17 @@ visible: false,
 });
 }
 
-const scopeSize = 320;
+const scopeSize = 360;
 const center = scopeSize / 2;
-const maxRadius = 108;
+const maxRadius = 118;
 const dotX = center + displayX * maxRadius;
 const dotY = center + displayY * maxRadius;
 const sweepAngle = sweepDeg - 90;
 const sweepRadians = (sweepAngle * Math.PI) / 180;
-const sweepX = center + Math.cos(sweepRadians) * 124;
-const sweepY = center + Math.sin(sweepRadians) * 124;
+const sweepX = center + Math.cos(sweepRadians) * 136;
+const sweepY = center + Math.sin(sweepRadians) * 136;
 
-const circumference = 2 * Math.PI * 136;
+const circumference = 2 * Math.PI * 148;
 const fill = Math.max(0, Math.min(100, displayScore));
 const dashOffset = circumference * (1 - fill / 100);
 const signalPath = buildSignalPath(signal);
@@ -384,104 +375,53 @@ return (
 <div className="space-y-4 md:space-y-5">
 <section
 className={cn(
-"relative overflow-hidden rounded-[26px] border bg-white/[0.035] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl md:p-6",
+"relative overflow-hidden rounded-[30px] border bg-white/[0.035] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.46)] backdrop-blur-xl md:p-6",
 tone.border,
 )}
 >
 <div className={cn("absolute inset-0 bg-gradient-to-b", tone.bg)} />
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_55%)]" />
-<div className="relative flex items-center justify-between gap-4">
-<div className="min-w-0">
-<div className="mb-1 text-[10px] uppercase tracking-[0.28em] text-white/42">
-State
-</div>
-<div
-className={cn(
-"truncate text-3xl font-semibold tracking-tight md:text-5xl",
-stateAccent(displayState),
-)}
-style={{ textShadow: isLocked ? tone.glow : "none" }}
->
-{displayState}
-</div>
-<div className="mt-1 text-sm text-white/55 md:text-base">
-{buildHistoryLabel(displayState, displayDirection)}
-</div>
+
+<div className="relative">
+<div className="grid grid-cols-2 gap-3 border-b border-white/8 pb-4">
+<DisplayCell label="State" value={displayState} accent={stateAccent(displayState)} />
+<DisplayCell
+label="Axis Lock"
+value={peakHold.visible ? String(peakHold.score) : String(displayScore)}
+accent={peakHold.visible ? peakTone.text : tone.text}
+mono
+/>
+<DisplayCell label="Direction" value={displayDirection} />
+<DisplayCell label="Reading" value={peakHold.visible ? "PEAK" : reading} />
 </div>
 
-<div className="shrink-0 text-right">
-{peakHold.visible ? (
-<>
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
-Peak
-</div>
-<div
-className="mt-1 font-mono text-3xl font-semibold md:text-5xl"
-style={{
-color: peakTone.ring,
-textShadow: peakTone.glow,
-}}
->
-{peakHold.score}
-</div>
-<div className="mt-1 text-xs text-white/50 md:text-sm">
-{peakHold.state} · {peakHold.direction}
-</div>
-</>
-) : (
-<>
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
-Axis Lock
-</div>
-<div
-className="mt-1 font-mono text-3xl font-semibold md:text-5xl"
-style={{
-color: tone.ring,
-textShadow: isLocked ? tone.glow : "none",
-}}
->
-{displayScore}
-</div>
-<div className="mt-1 text-xs text-white/50 md:text-sm">
-{isLocked ? "Locked" : "Scanning"}
-</div>
-</>
-)}
-</div>
-</div>
-</section>
-
-<section className="relative overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.46)] backdrop-blur-xl md:p-6">
-<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.03),transparent_60%)]" />
-<div className="mb-4 flex items-center justify-between">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
-Axis Scope
-</div>
-<div className="rounded-full border border-white/12 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-white/62">
-{isLive ? "Live" : "Idle"}
-</div>
-</div>
-
-<div className="relative mx-auto aspect-square w-full max-w-[300px] sm:max-w-[340px] md:max-w-[380px]">
+<div className="relative mx-auto mt-5 aspect-square w-full max-w-[320px] sm:max-w-[360px] md:max-w-[430px]">
 <div className="absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.04),transparent_58%)] blur-2xl" />
+
 <svg viewBox={`0 0 ${scopeSize} ${scopeSize}`} className="relative h-full w-full">
 <defs>
 <radialGradient id="scopeGlow" cx="50%" cy="50%" r="50%">
-<stop offset="0%" stopColor="rgba(255,255,255,0.12)" />
+<stop offset="0%" stopColor="rgba(255,255,255,0.10)" />
 <stop offset="72%" stopColor="rgba(255,255,255,0.02)" />
 <stop offset="100%" stopColor="rgba(255,255,255,0)" />
 </radialGradient>
+
 <linearGradient id="sweepGradient" x1="0%" y1="0%" x2="100%" y2="0%">
 <stop offset="0%" stopColor="rgba(255,255,255,0)" />
 <stop offset="100%" stopColor="rgba(255,255,255,0.20)" />
 </linearGradient>
+
+<clipPath id="scopeClip">
+<circle cx={center} cy={center} r="132" />
+</clipPath>
 </defs>
 
-<circle cx={center} cy={center} r="150" fill="url(#scopeGlow)" />
+<circle cx={center} cy={center} r="164" fill="url(#scopeGlow)" />
+
 <circle
 cx={center}
 cy={center}
-r="136"
+r="148"
 fill="none"
 stroke="rgba(255,255,255,0.08)"
 strokeWidth="14"
@@ -489,7 +429,7 @@ strokeWidth="14"
 <circle
 cx={center}
 cy={center}
-r="136"
+r="148"
 fill="none"
 stroke={tone.ring}
 strokeWidth="14"
@@ -507,7 +447,38 @@ transition:
 }}
 />
 
-{[108, 76, 42].map((r) => (
+<g clipPath="url(#scopeClip)">
+{[0, 1, 2, 3, 4, 5, 6].map((i) => {
+const x = 60 + i * 40;
+return (
+<line
+key={`v-${i}`}
+x1={x}
+y1={48}
+x2={x}
+y2={312}
+stroke="rgba(255,255,255,0.045)"
+strokeWidth="1"
+/>
+);
+})}
+{[0, 1, 2, 3, 4, 5, 6].map((i) => {
+const y = 60 + i * 40;
+return (
+<line
+key={`h-${i}`}
+x1={48}
+y1={y}
+x2={312}
+y2={y}
+stroke="rgba(255,255,255,0.045)"
+strokeWidth="1"
+/>
+);
+})}
+</g>
+
+{[116, 82, 46].map((r) => (
 <circle
 key={r}
 cx={center}
@@ -521,16 +492,16 @@ strokeWidth="1.2"
 
 <line
 x1={center}
-y1={34}
+y1={40}
 x2={center}
-y2={scopeSize - 34}
+y2={scopeSize - 40}
 stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
 />
 <line
-x1={34}
+x1={40}
 y1={center}
-x2={scopeSize - 34}
+x2={scopeSize - 40}
 y2={center}
 stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
@@ -552,7 +523,7 @@ style={{ filter: "drop-shadow(0 0 12px rgba(255,255,255,0.08))" }}
 <circle
 cx={center}
 cy={center}
-r={108}
+r={116}
 fill="none"
 stroke={tone.ring}
 strokeWidth="1.5"
@@ -568,7 +539,7 @@ transition: "opacity 140ms ease",
 <circle
 cx={center}
 cy={center}
-r={123}
+r={132}
 fill="none"
 stroke={tone.ring}
 strokeWidth="1.2"
@@ -593,11 +564,6 @@ transition:
 />
 </svg>
 </div>
-
-<div className="mt-4 grid grid-cols-3 gap-2 md:gap-3">
-<StatChip label="State" value={displayState} />
-<StatChip label="Direction" value={displayDirection} />
-<StatChip label="Axis Lock" value={isLocked ? "LOCKED" : displayScore.toString()} />
 </div>
 </section>
 
@@ -686,23 +652,15 @@ boxShadow: isLocked ? tone.glow : "none",
 <div className="mt-4 rounded-[22px] border border-white/10 bg-[#0a0d14] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_40px_rgba(0,0,0,0.35)]">
 <div className="grid grid-cols-3 gap-2">
 <InstrumentKey
-label="Motion"
-value={
-permissionState === "granted"
-? "ON"
-: permissionState === "denied"
-? "DENIED"
-: permissionState === "unsupported"
-? "SIM"
-: "ENABLE"
-}
+label="Session"
+value="START"
 onClick={enableMotion}
 active={permissionState === "granted"}
 />
 
 <InstrumentKey
 label="Live"
-value="START"
+value="LIVE"
 onClick={startLive}
 accent="cyan"
 />
@@ -822,13 +780,29 @@ style={{ color: scoreTone(item.stability).ring }}
 );
 }
 
-function StatChip({ label, value }: { label: string; value: string }) {
+function DisplayCell({
+label,
+value,
+accent,
+mono = false,
+}: {
+label: string;
+value: string;
+accent?: string;
+mono?: boolean;
+}) {
 return (
-<div className="rounded-[18px] border border-white/8 bg-[#07090d] px-3 py-3 md:px-4">
-<div className="text-[9px] uppercase tracking-[0.22em] text-white/38 md:text-[10px] md:tracking-[0.24em]">
+<div className="rounded-[16px] border border-white/7 bg-[#070a10]/70 px-3 py-3">
+<div className="text-[9px] uppercase tracking-[0.24em] text-white/38">
 {label}
 </div>
-<div className="mt-1 truncate text-xs font-medium text-white/86 md:text-sm">
+<div
+className={cn(
+"mt-1 truncate text-sm font-medium text-white/88 md:text-base",
+accent,
+mono && "font-mono",
+)}
+>
 {value}
 </div>
 </div>
