@@ -283,7 +283,7 @@ const shifted = prev
 .map((p) => ({ ...p, x: p.x - width / SIGNAL_LIMIT }))
 .filter((p) => p.x > 0);
 
-const y = height - (stability / 100) * (height - 16) - 8;
+const y = height - (stability / 100) * (height - 18) - 9;
 
 const appended = [
 ...shifted,
@@ -418,19 +418,25 @@ tone.border,
 )}
 >
 <div className={cn("absolute inset-0 bg-gradient-to-b", tone.bg)} />
-<div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_55%)]" />
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.05),transparent_55%)]" />
 
 <div className="relative">
-<div className="grid grid-cols-2 gap-3 border-b border-white/8 pb-4">
-<DisplayCell label="State" value={displayState} accent={stateAccent(displayState)} />
-<DisplayCell
-label="Axis Lock"
-value={peakHold.visible ? String(peakHold.score) : String(displayScore)}
+<div className="rounded-[20px] border border-white/8 bg-[#070a10]/70 px-4 py-3">
+<div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 md:grid-cols-[auto_1fr_auto_1fr] md:gap-x-6">
+<DisplayLabel text="State" />
+<DisplayValue text={displayState} accent={stateAccent(displayState)} />
+<DisplayLabel text="Axis Lock" />
+<DisplayValue
+text={peakHold.visible ? String(peakHold.score) : String(displayScore)}
 accent={peakHold.visible ? peakTone.text : tone.text}
 mono
 />
-<DisplayCell label="Direction" value={displayDirection} />
-<DisplayCell label="Reading" value={peakHold.visible ? "PEAK" : reading} />
+
+<DisplayLabel text="Direction" />
+<DisplayValue text={displayDirection} />
+<DisplayLabel text="Reading" />
+<DisplayValue text={peakHold.visible ? "PEAK" : reading} />
+</div>
 </div>
 
 <div className="relative mx-auto mt-5 aspect-square w-full max-w-[320px] sm:max-w-[360px] md:max-w-[430px]">
@@ -622,7 +628,7 @@ Axis Line
 <svg viewBox="0 0 720 140" className="h-[120px] w-full md:h-[160px]">
 <defs>
 <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-<stop offset="0%" stopColor="rgba(255,255,255,0.18)" />
+<stop offset="0%" stopColor="rgba(255,255,255,0.32)" />
 <stop offset="100%" stopColor={tone.ring} />
 </linearGradient>
 </defs>
@@ -634,7 +640,7 @@ x1="0"
 y1={y}
 x2="720"
 y2={y}
-stroke="rgba(255,255,255,0.04)"
+stroke="rgba(255,255,255,0.055)"
 strokeWidth="1"
 />
 ))}
@@ -643,7 +649,7 @@ strokeWidth="1"
 d={signalPath}
 fill="none"
 stroke="url(#lineGradient)"
-strokeWidth="3"
+strokeWidth="3.5"
 strokeLinecap="round"
 strokeLinejoin="round"
 />
@@ -657,11 +663,11 @@ x1={p.x}
 y1={130}
 x2={p.x}
 y2={18}
-stroke="rgba(255,255,255,0.12)"
+stroke="rgba(255,255,255,0.14)"
 strokeWidth="1"
 strokeDasharray="4 5"
 />
-<circle cx={p.x} cy={p.y} r="4" fill={tone.ring} />
+<circle cx={p.x} cy={p.y} r="4.2" fill={tone.ring} />
 </g>
 ))}
 </svg>
@@ -818,31 +824,32 @@ style={{ color: scoreTone(item.stability).ring }}
 );
 }
 
-function DisplayCell({
-label,
-value,
+function DisplayLabel({ text }: { text: string }) {
+return (
+<div className="text-[9px] uppercase tracking-[0.24em] text-white/38">
+{text}
+</div>
+);
+}
+
+function DisplayValue({
+text,
 accent,
 mono = false,
 }: {
-label: string;
-value: string;
+text: string;
 accent?: string;
 mono?: boolean;
 }) {
 return (
-<div className="rounded-[16px] border border-white/7 bg-[#070a10]/70 px-3 py-3">
-<div className="text-[9px] uppercase tracking-[0.24em] text-white/38">
-{label}
-</div>
 <div
 className={cn(
-"mt-1 truncate text-sm font-medium text-white/88 md:text-base",
+"truncate text-sm font-medium text-white/90 md:text-base",
 accent,
 mono && "font-mono",
 )}
 >
-{value}
-</div>
+{text}
 </div>
 );
 }
