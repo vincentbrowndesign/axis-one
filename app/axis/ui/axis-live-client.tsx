@@ -47,6 +47,8 @@ glow: "0 0 28px rgba(76,255,126,0.32)",
 text: "text-emerald-300",
 border: "border-emerald-400/35",
 bg: "from-emerald-500/12 to-transparent",
+key: "text-emerald-300",
+bar: "bg-emerald-400/70",
 };
 }
 if (score >= 85) {
@@ -56,6 +58,8 @@ glow: "0 0 24px rgba(255,255,255,0.14)",
 text: "text-white",
 border: "border-white/18",
 bg: "from-white/10 to-transparent",
+key: "text-white",
+bar: "bg-white/25",
 };
 }
 if (score >= 70) {
@@ -65,6 +69,8 @@ glow: "0 0 22px rgba(255,191,71,0.20)",
 text: "text-amber-300",
 border: "border-amber-400/30",
 bg: "from-amber-500/12 to-transparent",
+key: "text-amber-300",
+bar: "bg-amber-400/65",
 };
 }
 return {
@@ -73,6 +79,8 @@ glow: "0 0 22px rgba(255,90,90,0.22)",
 text: "text-rose-300",
 border: "border-rose-400/30",
 bg: "from-rose-500/12 to-transparent",
+key: "text-rose-300",
+bar: "bg-rose-400/65",
 };
 }
 
@@ -408,7 +416,7 @@ style={{ textShadow: isLocked ? tone.glow : "none" }}
 Peak
 </div>
 <div
-className="mt-1 text-3xl font-semibold md:text-5xl"
+className="mt-1 font-mono text-3xl font-semibold md:text-5xl"
 style={{
 color: peakTone.ring,
 textShadow: peakTone.glow,
@@ -426,7 +434,7 @@ textShadow: peakTone.glow,
 Axis Lock
 </div>
 <div
-className="mt-1 text-3xl font-semibold md:text-5xl"
+className="mt-1 font-mono text-3xl font-semibold md:text-5xl"
 style={{
 color: tone.ring,
 textShadow: isLocked ? tone.glow : "none",
@@ -446,11 +454,8 @@ textShadow: isLocked ? tone.glow : "none",
 <section className="relative overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.46)] backdrop-blur-xl md:p-6">
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.03),transparent_60%)]" />
 <div className="mb-4 flex items-center justify-between">
-<div>
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
 Axis Scope
-</div>
-<div className="mt-1 text-sm text-white/55">Live structure instrument</div>
 </div>
 <div className="rounded-full border border-white/12 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-white/62">
 {isLive ? "Live" : "Idle"}
@@ -663,11 +668,8 @@ strokeDasharray="4 5"
 <div className="space-y-4 md:space-y-5">
 <section className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.40)] backdrop-blur-xl md:p-5">
 <div className="flex items-center justify-between">
-<div>
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
 Axis Lock
-</div>
-<div className="mt-1 text-sm text-white/55">Live control cluster</div>
 </div>
 <div
 className="rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.24em]"
@@ -681,8 +683,9 @@ boxShadow: isLocked ? tone.glow : "none",
 </div>
 </div>
 
-<div className="mt-4 grid grid-cols-3 gap-2">
-<ControlButton
+<div className="mt-4 rounded-[22px] border border-white/10 bg-[#0a0d14] p-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_16px_40px_rgba(0,0,0,0.35)]">
+<div className="grid grid-cols-3 gap-2">
+<InstrumentKey
 label="Motion"
 value={
 permissionState === "granted"
@@ -694,17 +697,31 @@ permissionState === "granted"
 : "ENABLE"
 }
 onClick={enableMotion}
+active={permissionState === "granted"}
 />
-<ControlButton label="Live" value="START" onClick={startLive} />
-<ControlButton label="Session" value="END" onClick={endSession} />
+
+<InstrumentKey
+label="Live"
+value="START"
+onClick={startLive}
+accent="cyan"
+/>
+
+<InstrumentKey
+label="Session"
+value="END"
+onClick={endSession}
+accent="neutral"
+/>
 </div>
 
 <button
 onClick={clearSession}
-className="mt-2 w-full rounded-2xl border border-white/10 bg-white/[0.04] py-3 text-sm tracking-[0.24em] text-sky-400 transition hover:bg-white/[0.07]"
+className="mt-2 flex h-[52px] w-full items-center justify-center rounded-[16px] border border-white/10 bg-[#111520] px-4 text-[13px] font-medium uppercase tracking-[0.26em] text-sky-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] transition active:translate-y-[1px]"
 >
-CLEAR AXIS HISTORY
+Clear Axis History
 </button>
+</div>
 </section>
 
 <section className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.40)] backdrop-blur-xl md:p-5">
@@ -739,10 +756,6 @@ Axis History
 <div className="mb-1 text-[10px] uppercase tracking-[0.28em] text-white/42">
 Reading
 </div>
-<div className="mb-4 text-sm text-white/55">
-Live structure interpretation
-</div>
-
 <div className="grid gap-2.5">
 <InsightRow label="State" value={displayState} />
 <InsightRow label="Direction" value={displayDirection} />
@@ -785,7 +798,7 @@ stateAccent(item.state),
 
 <div className="shrink-0 text-right">
 <div
-className="text-lg font-semibold"
+className="font-mono text-lg font-semibold"
 style={{ color: scoreTone(item.stability).ring }}
 >
 {item.stability}
@@ -833,26 +846,69 @@ return (
 );
 }
 
-function ControlButton({
+function InstrumentKey({
 label,
 value,
 onClick,
+active = false,
+accent = "cyan",
 }: {
 label: string;
 value: string;
 onClick: () => void;
+active?: boolean;
+accent?: "cyan" | "neutral" | "amber" | "red";
 }) {
+const accentClass =
+accent === "amber"
+? "text-amber-300"
+: accent === "red"
+? "text-rose-300"
+: accent === "neutral"
+? "text-white"
+: "text-sky-400";
+
 return (
 <button
 onClick={onClick}
-className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3 transition hover:bg-white/[0.07]"
+className={cn(
+"group relative flex h-[84px] flex-col items-center justify-center overflow-hidden rounded-[16px] border bg-[#111520] px-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),inset_0_-10px_18px_rgba(0,0,0,0.22)] transition active:translate-y-[1px]",
+active ? "border-emerald-400/30" : "border-white/10",
+)}
 >
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/42">
+<div className="absolute inset-x-0 top-0 h-[1px] bg-white/10" />
+<div
+className={cn(
+"text-[10px] uppercase tracking-[0.28em]",
+active ? "text-emerald-300/80" : "text-white/38",
+)}
+>
 {label}
 </div>
-<div className="mt-1 text-xl font-medium tracking-tight text-sky-400">
+
+<div
+className={cn(
+"mt-2 text-[14px] font-semibold uppercase tracking-[0.12em] md:text-[16px]",
+active ? "text-emerald-300" : accentClass,
+)}
+>
 {value}
 </div>
+
+<div
+className={cn(
+"absolute bottom-0 left-0 right-0 h-[3px]",
+active
+? "bg-emerald-400/70"
+: accent === "amber"
+? "bg-amber-400/60"
+: accent === "red"
+? "bg-rose-400/60"
+: accent === "neutral"
+? "bg-white/18"
+: "bg-sky-400/60",
+)}
+/>
 </button>
 );
 }
