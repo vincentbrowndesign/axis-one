@@ -1,689 +1,859 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 
-type PushDirection =
-| "Centered"
-| "Forward"
-| "Back"
-| "Left"
-| "Right"
-| "Forward Left"
-| "Forward Right"
-| "Back Left"
-| "Back Right";
+type Phase = "permission" | "align" | "live" | "paused";
+type AxisState = "Centered" | "Shift" | "Drop" | "Off Axis";
+type Push = "Center" | "Forward" | "Back" | "Left" | "Right";
+type Shape = "Settle" | "Float";
 
-type ShapeType = "Settle" | "Float" | "Drop";
-
-type LockItem = {
+type Moment = {
 id: string;
-ts: number;
 mark: number;
-push: PushDirection;
-shape: ShapeType;
+shape: Shape;
+state: AxisState;
+push: Push;
+time: number;
 };
 
-type SensorSample = {
+type Sample = {
+mark: number;
+dx: number;
+dy: number;
+dz: number;
 t: number;
-ax: number;
-ay: number;
-az: number;
-gx: number;
-gy: number;
-gz: number;
 };
 
-const BUFFER_SIZE = 260;
-const LIVE_WINDOW = 24;
-const LOCK_THRESHOLD = 82;
-const STAY_THRESHOLD = 74;
-const FREEZE_MS = 900;
-const LOCK_COOLDOWN_MS = 1800;
-const CALIBRATION_MS = 1500;
-
-function clamp(n: number, min: number, max: number) {
-return Math.max(min, Math.min(max, n));
-}
-
-function mean(values: number[]) {
-if (!values.length) return 0;
-return values.reduce((sum, v) => sum + v, 0) / values.length;
-}
-
-function variance(values: number[]) {
-if (values.length < 2) return 0;
-const m = mean(values);
-return mean(values.map((v) => (v - m) ** 2));
-}
-
-function std(values: number[]) {
-return Math.sqrt(variance(values));
-}
-
-function range(values: number[]) {
-if (!values.length) return 0;
-return Math.max(...values) - Math.min(...values);
-}
-
-function uid() {
-return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function smoothSeries(values: number[], alpha = 0.28) {
-if (!values.length) return [];
-const out = [values[0]];
-for (let i = 1; i < values.length; i += 1) {
-out.push(alpha * values[i] + (1 - alpha) * out[i - 1]);
-}
-return out;
-}
-
-function resample(values: number[], count = 72) {
-if (!values.length) return Array.from({ length: count }, () => 0);
-if (values.length === 1) return Array.from({ length: count }, () => values[0]);
-
-const out: number[] = [];
-for (let i = 0; i < count; i += 1) {
-const idx = Math.floor((i / (count - 1)) * (values.length - 1));
-out.push(values[idx]);
-}
-return out;
-}
-
-function linePath(values: number[], width: number, height: number) {
-if (!values.length) return "";
-const min = Math.min(...values);
-const max = Math.max(...values);
-const span = Math.max(max - min, 1);
-
-return values
-.map((v, i) => {
-const x = (i / Math.max(values.length - 1, 1)) * width;
-const y = height - ((v - min) / span) * height;
-return `${i === 0 ? "M" : "L"} ${x.toFixed(2)} ${y.toFixed(2)}`;
-})
-.join(" ");
-}
-
-function formatTime(ts: number) {
-return new Date(ts).toLocaleTimeString([], {
-hour: "numeric",
-minute: "2-digit",
-second: "2-digit",
-});
-}
-
-function directionFromVector(x: number, y: number): PushDirection {
-const dead = 0.12;
-if (Math.abs(x) < dead && Math.abs(y) < dead) return "Centered";
-
-const horiz = x > 0.22 ? "Right" : x < -0.22 ? "Left" : "";
-const vert = y > 0.22 ? "Forward" : y < -0.22 ? "Back" : "";
-
-const combined = [vert, horiz].filter(Boolean).join(" ") as PushDirection;
-return (combined || "Centered") as PushDirection;
-}
-
-function detectShape(series: number[]): ShapeType {
-const recent = series.slice(-18);
-if (recent.length < 8) return "Settle";
-
-const first = recent[0];
-const mid = recent[Math.floor(recent.length / 2)];
-const last = recent[recent.length - 1];
-const r = range(recent);
-const tailStd = std(recent.slice(-6));
-
-if (mid < first - 10 && last > mid + 12) return "Drop";
-if (last > first + 8 && tailStd < 2.6 && r < 22) return "Float";
-return "Settle";
-}
+const LINE_MAX = 100;
+const MOMENT_MAX = 8;
+const ALIGN_SAMPLE_MAX = 30;
+const SAMPLE_WINDOW_MAX = 24;
 
 export default function AxisClient() {
-const [mode, setMode] = useState<"demo" | "live">("demo");
-const [running, setRunning] = useState(false);
-const [sensorReady, setSensorReady] = useState(false);
-const [permissionNeeded, setPermissionNeeded] = useState(false);
+const [phase, setPhase] = useState<Phase>("permission");
+const [mark, setMark] = useState(0);
+const [axisState, setAxisState] = useState<AxisState>("Centered");
+const [push, setPush] = useState<Push>("Center");
+const [countdown, setCountdown] = useState<number | null>(null);
+const [moments, setMoments] = useState<Moment[]>([]);
+const [dot, setDot] = useState({ x: 0, y: 0 });
 
-const [phase, setPhase] = useState<"idle" | "calibrating" | "live">("idle");
-const [axisMark, setAxisMark] = useState(0);
-const [axisPush, setAxisPush] = useState<PushDirection>("Centered");
-const [axisShape, setAxisShape] = useState<ShapeType>("Settle");
-const [lockFlash, setLockFlash] = useState(false);
-const [history, setHistory] = useState<LockItem[]>([]);
+const canvasRef = useRef<HTMLCanvasElement | null>(null);
+const lineWrapRef = useRef<HTMLDivElement | null>(null);
 
-const framesRef = useRef<SensorSample[]>([]);
-const markSeriesRef = useRef<number[]>([]);
+const baselineRef = useRef({ x: 0, y: 0, z: 0 });
+const alignSamplesRef = useRef<{ x: number[]; y: number[]; z: number[] }>({
+x: [],
+y: [],
+z: [],
+});
+const lineRef = useRef<number[]>([]);
+const sampleRef = useRef<Sample[]>([]);
+const lastCaptureRef = useRef(0);
 
-const baselineTiltRef = useRef({ x: 0, y: 0, z: 9.8 });
-const calibrationStartRef = useRef<number | null>(null);
+async function allowMotion() {
+try {
+const DME =
+typeof window !== "undefined"
+? (window as Window & {
+DeviceMotionEvent?: {
+requestPermission?: () => Promise<"granted" | "denied">;
+};
+}).DeviceMotionEvent
+: undefined;
 
-const fastMarkRef = useRef(0);
-const slowMarkRef = useRef(0);
-const lockedStateRef = useRef(false);
+if (DME && typeof DME.requestPermission === "function") {
+const result = await DME.requestPermission();
+if (result !== "granted") return;
+}
 
-const demoTimerRef = useRef<number | null>(null);
-const motionHandlerRef = useRef<((e: DeviceMotionEvent) => void) | null>(null);
-const freezeTimerRef = useRef<number | null>(null);
-const lockCooldownRef = useRef<number>(0);
-
-const latestPushVectorRef = useRef({ x: 0, y: 0 });
-
-function resetAxisSession(keepMode = true) {
-framesRef.current = [];
-markSeriesRef.current = [];
-fastMarkRef.current = 0;
-slowMarkRef.current = 0;
-lockedStateRef.current = false;
-calibrationStartRef.current = null;
-baselineTiltRef.current = { x: 0, y: 0, z: 9.8 };
-lockCooldownRef.current = 0;
-latestPushVectorRef.current = { x: 0, y: 0 };
-
-setAxisMark(0);
-setAxisPush("Centered");
-setAxisShape("Settle");
-setLockFlash(false);
-setHistory([]);
-setPhase("idle");
-
-if (!keepMode) {
-setMode("demo");
-setSensorReady(false);
+beginAlign();
+} catch (error) {
+console.error("Motion permission failed:", error);
 }
 }
 
-function beginCalibration() {
-calibrationStartRef.current = Date.now();
-setPhase("calibrating");
-setLockFlash(false);
+function beginAlign() {
+alignSamplesRef.current = { x: [], y: [], z: [] };
+setCountdown(3);
+setPhase("align");
 }
 
-function clearLockFlash() {
-if (freezeTimerRef.current) {
-window.clearTimeout(freezeTimerRef.current);
-}
-freezeTimerRef.current = window.setTimeout(() => {
-setLockFlash(false);
-}, FREEZE_MS);
+function togglePause() {
+setPhase((prev) => (prev === "paused" ? "live" : "paused"));
 }
 
-function captureLock(mark: number, push: PushDirection, shape: ShapeType) {
-const now = Date.now();
-if (now < lockCooldownRef.current) return;
-lockCooldownRef.current = now + LOCK_COOLDOWN_MS;
-
-setLockFlash(true);
-clearLockFlash();
-
-setHistory((prev) =>
-[
-{
-id: uid(),
-ts: now,
-mark,
-push,
-shape,
-},
-...prev,
-].slice(0, 10),
-);
+function resetSession() {
+setMark(0);
+setAxisState("Centered");
+setPush("Center");
+setDot({ x: 0, y: 0 });
+setMoments([]);
+lineRef.current = [];
+sampleRef.current = [];
+lastCaptureRef.current = 0;
+beginAlign();
 }
 
-function processSample(sample: SensorSample) {
-framesRef.current.push(sample);
-if (framesRef.current.length > BUFFER_SIZE) framesRef.current.shift();
+useEffect(() => {
+if (phase !== "align" || countdown === null) return;
 
-const recent = framesRef.current.slice(-LIVE_WINDOW);
-if (recent.length < 10) return;
-
-if (phase === "calibrating") {
-const tiltX = mean(recent.map((s) => s.ax));
-const tiltY = mean(recent.map((s) => s.ay));
-const tiltZ = mean(recent.map((s) => s.az));
-
-baselineTiltRef.current = { x: tiltX, y: tiltY, z: tiltZ };
-
-const started = calibrationStartRef.current ?? Date.now();
-if (Date.now() - started >= CALIBRATION_MS) {
+if (countdown === 0) {
+baselineRef.current = {
+x: avg(alignSamplesRef.current.x),
+y: avg(alignSamplesRef.current.y),
+z: avg(alignSamplesRef.current.z),
+};
+setCountdown(null);
 setPhase("live");
+return;
 }
+
+const timer = window.setTimeout(() => {
+setCountdown((prev) => (prev === null ? null : prev - 1));
+}, 700);
+
+return () => window.clearTimeout(timer);
+}, [phase, countdown]);
+
+useEffect(() => {
+function onMotion(event: DeviceMotionEvent) {
+const gx = event.accelerationIncludingGravity?.x ?? 0;
+const gy = event.accelerationIncludingGravity?.y ?? 0;
+const gz = event.accelerationIncludingGravity?.z ?? 0;
+
+if (phase === "align") {
+pushLimited(alignSamplesRef.current.x, gx, ALIGN_SAMPLE_MAX);
+pushLimited(alignSamplesRef.current.y, gy, ALIGN_SAMPLE_MAX);
+pushLimited(alignSamplesRef.current.z, gz, ALIGN_SAMPLE_MAX);
 return;
 }
 
 if (phase !== "live") return;
 
-const accelMag = recent.map((s) =>
-Math.sqrt(s.ax * s.ax + s.ay * s.ay + s.az * s.az),
-);
-const gyroMag = recent.map((s) =>
-Math.sqrt(s.gx * s.gx + s.gy * s.gy + s.gz * s.gz),
-);
+const dx = gx - baselineRef.current.x;
+const dy = gy - baselineRef.current.y;
+const dz = gz - baselineRef.current.z;
 
-const accelSmooth = smoothSeries(accelMag, 0.24);
-const gyroSmooth = smoothSeries(gyroMag, 0.24);
+const planar = Math.sqrt(dx * dx + dy * dy);
+const total = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
-const accelNoise = std(accelSmooth);
-const gyroNoise = std(gyroSmooth);
+const nextMark = clamp(Math.round(100 - total * 8.5), 0, 100);
+const nextState = classifyState(nextMark, planar, dz);
+const nextPush = classifyPush(dx, dy);
 
-const base = baselineTiltRef.current;
-const tiltX = mean(recent.map((s) => s.ax - base.x));
-const tiltY = mean(recent.map((s) => s.ay - base.y));
-const tiltZ = mean(recent.map((s) => s.az - base.z));
-
-const tiltMagnitude = Math.sqrt(tiltX * tiltX + tiltY * tiltY);
-const motionNoise = accelNoise * 2.2 + gyroNoise * 0.12 + range(accelSmooth) * 0.22;
-const settleScore = clamp(
-100 - motionNoise * 11 - tiltMagnitude * 14 - Math.abs(tiltZ) * 2.5,
-0,
-100,
-);
-
-if (fastMarkRef.current === 0 && slowMarkRef.current === 0) {
-fastMarkRef.current = settleScore;
-slowMarkRef.current = settleScore;
-} else {
-fastMarkRef.current = fastMarkRef.current * 0.56 + settleScore * 0.44;
-slowMarkRef.current = slowMarkRef.current * 0.88 + settleScore * 0.12;
-}
-
-const blended = clamp(
-slowMarkRef.current + (fastMarkRef.current - slowMarkRef.current) * 0.62,
-0,
-100,
-);
-
-if (!lockedStateRef.current && blended >= LOCK_THRESHOLD) {
-lockedStateRef.current = true;
-} else if (lockedStateRef.current && blended < STAY_THRESHOLD) {
-lockedStateRef.current = false;
-}
-
-const finalMark = lockedStateRef.current
-? Math.max(blended, STAY_THRESHOLD)
-: blended;
-
-markSeriesRef.current.push(finalMark);
-if (markSeriesRef.current.length > BUFFER_SIZE) {
-markSeriesRef.current.shift();
-}
-
-const pushX = clamp(tiltX / 4.5, -1, 1);
-const pushY = clamp(-tiltY / 4.5, -1, 1);
-latestPushVectorRef.current = { x: pushX, y: pushY };
-
-const push = directionFromVector(pushX, pushY);
-const shape = detectShape(markSeriesRef.current);
-
-setAxisMark(Math.round(finalMark));
-setAxisPush(push);
-setAxisShape(shape);
-
-const lastMarks = markSeriesRef.current.slice(-8);
-const localPeak = Math.max(...lastMarks);
-const sustained = mean(lastMarks.slice(-4)) >= LOCK_THRESHOLD - 1;
-
-if (
-Math.round(finalMark) >= LOCK_THRESHOLD &&
-Math.round(finalMark) >= localPeak - 1 &&
-sustained
-) {
-captureLock(Math.round(finalMark), push, shape);
-}
-}
-
-async function startLiveMotion() {
-const Motion = DeviceMotionEvent as typeof DeviceMotionEvent & {
-requestPermission?: () => Promise<"granted" | "denied">;
-};
-
-try {
-if (typeof Motion.requestPermission === "function") {
-const result = await Motion.requestPermission();
-if (result !== "granted") return;
-}
-
-if (motionHandlerRef.current) {
-window.removeEventListener("devicemotion", motionHandlerRef.current, true);
-motionHandlerRef.current = null;
-}
-
-const handler = (event: DeviceMotionEvent) => {
-if (!running) return;
-
-const acc = event.accelerationIncludingGravity;
-const rot = event.rotationRate;
-
-processSample({
-t: Date.now(),
-ax: acc?.x ?? 0,
-ay: acc?.y ?? 0,
-az: acc?.z ?? 0,
-gx: rot?.alpha ?? 0,
-gy: rot?.beta ?? 0,
-gz: rot?.gamma ?? 0,
+setMark(nextMark);
+setAxisState(nextState);
+setPush(nextPush);
+setDot({
+x: clamp(dx * 14, -92, 92),
+y: clamp(dy * 14, -92, 92),
 });
-};
 
-motionHandlerRef.current = handler;
-window.addEventListener("devicemotion", handler, true);
-
-setSensorReady(true);
-setPermissionNeeded(false);
-setMode("live");
-setRunning(true);
-beginCalibration();
-} catch {
-setPermissionNeeded(true);
-}
-}
-
-function startDemo() {
-if (demoTimerRef.current) {
-window.clearInterval(demoTimerRef.current);
-}
-
-demoTimerRef.current = window.setInterval(() => {
-if (!running || mode !== "demo") return;
-
-const t = Date.now() / 1000;
-const driftX = Math.sin(t * 0.95 + 0.5) * 0.7;
-const driftY = Math.sin(t * 0.63 + 1.1) * 0.55;
-const settle = Math.max(0, Math.sin(t * 1.4 + 0.9)) * 0.38;
-
-processSample({
+pushLimited(lineRef.current, nextMark, LINE_MAX);
+pushLimited(
+sampleRef.current,
+{
+mark: nextMark,
+dx,
+dy,
+dz,
 t: Date.now(),
-ax: driftX + settle * 0.12,
-ay: driftY * 0.8,
-az: 9.8 - settle * 0.18,
-gx: driftX * 5.4,
-gy: driftY * 4.6,
-gz: settle * 1.8,
-});
-}, 50);
+},
+SAMPLE_WINDOW_MAX
+);
+
+maybeCapture(nextMark, nextState, nextPush);
+drawLine();
 }
+
+window.addEventListener("devicemotion", onMotion, true);
+return () => window.removeEventListener("devicemotion", onMotion, true);
+}, [phase]);
 
 useEffect(() => {
-startDemo();
-
-const Motion = DeviceMotionEvent as typeof DeviceMotionEvent & {
-requestPermission?: () => Promise<"granted" | "denied">;
-};
-
-if (typeof Motion !== "undefined" && typeof Motion.requestPermission === "function") {
-setPermissionNeeded(true);
-}
-
-return () => {
-if (demoTimerRef.current) window.clearInterval(demoTimerRef.current);
-if (motionHandlerRef.current) {
-window.removeEventListener("devicemotion", motionHandlerRef.current, true);
-}
-if (freezeTimerRef.current) window.clearTimeout(freezeTimerRef.current);
-};
+drawLine();
 }, []);
 
 useEffect(() => {
-if (mode === "demo") {
-startDemo();
+function onResize() {
+drawLine();
 }
-}, [mode, running]);
 
-const lineValues = useMemo(
-() => resample(markSeriesRef.current.slice(-96), 84),
-[axisMark, history.length, lockFlash],
-);
+window.addEventListener("resize", onResize);
+return () => window.removeEventListener("resize", onResize);
+}, []);
 
-const line = useMemo(() => linePath(lineValues, 700, 190), [lineValues]);
+function maybeCapture(nextMark: number, nextState: AxisState, nextPush: Push) {
+const now = Date.now();
+if (now - lastCaptureRef.current < 1400) return;
+if (sampleRef.current.length < 8) return;
 
-const pushVector = latestPushVectorRef.current;
-const scopeX = 120 + pushVector.x * 62;
-const scopeY = 120 - pushVector.y * 62;
+const recent = sampleRef.current.slice(-8);
+const first = recent[0];
+const last = recent[recent.length - 1];
+const delta = last.mark - first.mark;
 
-const statusLabel =
-phase === "calibrating"
-? "Align Axis"
-: lockFlash
-? "Axis Shape"
-: running
-? "Live"
-: "Off";
+let shape: Shape | null = null;
 
-const historyTop = history[0];
+if (nextMark >= 88 && delta >= 8) shape = "Settle";
+else if (nextMark >= 82 && Math.abs(delta) <= 4) shape = "Float";
+
+if (!shape) return;
+
+lastCaptureRef.current = now;
+
+const nextMoment: Moment = {
+id: `${now}-${nextMark}`,
+mark: nextMark,
+shape,
+state: nextState,
+push: nextPush,
+time: now,
+};
+
+setMoments((prev) => [nextMoment, ...prev].slice(0, MOMENT_MAX));
+}
+
+function drawLine() {
+const canvas = canvasRef.current;
+const wrap = lineWrapRef.current;
+if (!canvas || !wrap) return;
+
+const dpr = window.devicePixelRatio || 1;
+const width = wrap.clientWidth;
+const height = 132;
+
+canvas.width = Math.floor(width * dpr);
+canvas.height = Math.floor(height * dpr);
+canvas.style.width = `${width}px`;
+canvas.style.height = `${height}px`;
+
+const ctx = canvas.getContext("2d");
+if (!ctx) return;
+
+ctx.setTransform(1, 0, 0, 1, 0, 0);
+ctx.scale(dpr, dpr);
+ctx.clearRect(0, 0, width, height);
+
+ctx.strokeStyle = "rgba(255,255,255,0.06)";
+ctx.lineWidth = 1;
+
+for (let i = 1; i <= 4; i += 1) {
+const y = (height / 5) * i;
+ctx.beginPath();
+ctx.moveTo(0, y);
+ctx.lineTo(width, y);
+ctx.stroke();
+}
+
+for (let i = 1; i <= 5; i += 1) {
+const x = (width / 6) * i;
+ctx.beginPath();
+ctx.moveTo(x, 0);
+ctx.lineTo(x, height);
+ctx.stroke();
+}
+
+const values = lineRef.current;
+if (values.length === 0) return;
+
+ctx.beginPath();
+values.forEach((value, index) => {
+const x =
+values.length === 1 ? 0 : (index / (values.length - 1)) * width;
+const y = height - (value / 100) * height;
+
+if (index === 0) ctx.moveTo(x, y);
+else ctx.lineTo(x, y);
+});
+
+ctx.lineWidth = 4;
+ctx.strokeStyle = "rgba(226,244,204,0.98)";
+ctx.shadowBlur = 10;
+ctx.shadowColor = "rgba(226,244,204,0.38)";
+ctx.stroke();
+ctx.shadowBlur = 0;
+}
+
+const latest = moments[0];
+const statusText =
+phase === "permission"
+? "Motion required"
+: phase === "align"
+? "Aligning"
+: phase === "paused"
+? "Paused"
+: "Live";
+
+const glow =
+axisState === "Centered"
+? "rgba(255,255,255,0.08)"
+: axisState === "Shift"
+? "rgba(210,255,210,0.10)"
+: axisState === "Drop"
+? "rgba(255,225,160,0.10)"
+: "rgba(255,140,140,0.10)";
 
 return (
-<main className="min-h-screen bg-black text-white">
-<div className="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-5 sm:px-6 sm:py-6">
-<section className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),rgba(0,0,0,0.96)_42%)] p-4 sm:p-6">
-<div className="text-sm uppercase tracking-[0.34em] text-lime-300/90">Axis</div>
-<h1 className="mt-2 text-4xl font-semibold tracking-tight sm:text-6xl">
-Structure before action.
-</h1>
-<p className="mt-3 max-w-4xl text-base leading-7 text-white/65 sm:text-lg">
-Use the phone you already have as Axis Brain. Align Axis, watch Axis Mark rise,
-and capture Axis Shape automatically.
-</p>
-
-<div className="mt-5 flex flex-wrap gap-3">
-<button
-onClick={() => {
-setMode("demo");
-resetAxisSession(true);
-setRunning(true);
-beginCalibration();
+<main
+style={{
+minHeight: "100vh",
+background: "#000",
+color: "#fff",
+fontFamily:
+"Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
 }}
-className={`rounded-full px-5 py-3 text-base font-medium ${
-mode === "demo"
-? "bg-lime-400 text-black"
-: "border border-white/10 bg-black/60 text-white"
-}`}
 >
-Demo
-</button>
+<div
+style={{
+maxWidth: 520,
+margin: "0 auto",
+padding: "18px 18px 120px",
+}}
+>
+<header style={{ paddingTop: 6, marginBottom: 18 }}>
+<div
+style={{
+fontSize: 12,
+letterSpacing: "0.12em",
+textTransform: "uppercase",
+opacity: 0.55,
+marginBottom: 8,
+}}
+>
+Axis
+</div>
 
-<button
-onClick={startLiveMotion}
-className={`rounded-full px-5 py-3 text-base font-medium ${
-mode === "live"
-? "bg-lime-400 text-black"
-: "border border-white/10 bg-black/60 text-white"
-}`}
+<div
+style={{
+display: "flex",
+alignItems: "baseline",
+justifyContent: "space-between",
+gap: 16,
+}}
 >
-Start Axis
-</button>
+<h1
+style={{
+margin: 0,
+fontSize: 42,
+lineHeight: 0.96,
+letterSpacing: "-0.05em",
+fontWeight: 700,
+}}
+>
+Axis Instrument
+</h1>
 
-<button
-onClick={beginCalibration}
-className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
+<div
+style={{
+flexShrink: 0,
+fontSize: 13,
+opacity: 0.68,
+textAlign: "right",
+}}
 >
-Align Axis
-</button>
+{statusText}
+</div>
+</div>
+</header>
 
-{running ? (
-<button
-onClick={() => setRunning(false)}
-className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
+{phase === "permission" && (
+<section
+style={{
+border: "1px solid rgba(255,255,255,0.08)",
+background: "rgba(255,255,255,0.03)",
+borderRadius: 24,
+padding: 18,
+marginBottom: 18,
+}}
 >
-Off
-</button>
-) : (
-<button
-onClick={() => setRunning(true)}
-className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
+<div
+style={{
+fontSize: 22,
+fontWeight: 600,
+marginBottom: 8,
+letterSpacing: "-0.03em",
+}}
 >
-On
+Turn your phone into Axis Brain.
+</div>
+
+<div
+style={{
+fontSize: 15,
+lineHeight: 1.45,
+opacity: 0.7,
+marginBottom: 16,
+}}
+>
+Allow motion once. Then Axis aligns, goes live, and begins
+capturing structure moments automatically.
+</div>
+
+<button onClick={allowMotion} style={primaryButtonStyle}>
+Allow Motion
 </button>
+</section>
 )}
 
+{phase !== "permission" && (
+<>
+<section
+style={{
+borderRadius: 32,
+padding: "22px 18px 18px",
+background: glow,
+border: "1px solid rgba(255,255,255,0.07)",
+boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)",
+overflow: "hidden",
+}}
+>
+<div
+style={{
+display: "flex",
+alignItems: "center",
+justifyContent: "space-between",
+marginBottom: 12,
+}}
+>
+<div>
+<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>
+Axis Scope
+</div>
+
+<div
+style={{
+fontSize: 28,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+}}
+>
+{phase === "align" ? "Hold Still" : axisState}
+</div>
+</div>
+
+<div style={{ textAlign: "right" }}>
+<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 4 }}>
+Axis Mark
+</div>
+
+<div
+style={{
+fontSize: 34,
+fontWeight: 700,
+letterSpacing: "-0.05em",
+}}
+>
+{phase === "align" ? "—" : mark}
+</div>
+</div>
+</div>
+
+<div
+style={{
+fontSize: 13,
+opacity: 0.62,
+marginBottom: 14,
+display: "flex",
+justifyContent: "space-between",
+gap: 12,
+}}
+>
+<span>Push {phase === "align" ? "Center" : push}</span>
+
+<span>
+{phase === "align"
+? countdown === 0 || countdown === null
+? "Aligned"
+: `${countdown}`
+: phase === "paused"
+? "Paused"
+: "Live"}
+</span>
+</div>
+
+<div
+style={{
+position: "relative",
+aspectRatio: "1 / 1",
+width: "100%",
+maxWidth: 390,
+margin: "0 auto 18px",
+}}
+>
+<TargetRings />
+
+<div
+style={{
+position: "absolute",
+left: "50%",
+top: "50%",
+width: 18,
+height: 18,
+borderRadius: 999,
+background: "rgba(255,255,255,0.75)",
+transform: "translate(-50%, -50%)",
+}}
+/>
+
+<div
+style={{
+position: "absolute",
+left: "50%",
+top: "50%",
+width: 56,
+height: 56,
+borderRadius: 999,
+background: "#fff",
+boxShadow: "0 0 32px rgba(255,255,255,0.16)",
+transform: `translate(calc(-50% + ${dot.x}px), calc(-50% + ${dot.y}px))`,
+transition:
+phase === "live"
+? "transform 80ms linear"
+: "transform 180ms ease",
+}}
+/>
+</div>
+
+<div
+ref={lineWrapRef}
+style={{
+paddingTop: 6,
+borderTop: "1px solid rgba(255,255,255,0.06)",
+}}
+>
+<div
+style={{
+display: "flex",
+alignItems: "baseline",
+justifyContent: "space-between",
+gap: 12,
+marginBottom: 10,
+}}
+>
+<div>
+<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 2 }}>
+Axis Line
+</div>
+
+<div
+style={{
+fontSize: 15,
+fontWeight: 600,
+letterSpacing: "-0.02em",
+}}
+>
+Signal history of structure over time.
+</div>
+</div>
+
+<div style={{ fontSize: 13, opacity: 0.6 }}>
+{phase === "live"
+? "Live"
+: phase === "paused"
+? "Paused"
+: "Aligning"}
+</div>
+</div>
+
+<canvas
+ref={canvasRef}
+style={{
+width: "100%",
+height: 132,
+display: "block",
+borderRadius: 18,
+background: "rgba(255,255,255,0.01)",
+}}
+/>
+</div>
+</section>
+
+<section
+style={{
+marginTop: 14,
+display: "flex",
+gap: 10,
+}}
+>
 <button
-onClick={() => resetAxisSession(true)}
-className="rounded-full border border-white/10 bg-black/60 px-5 py-3 text-base font-medium text-white"
+onClick={togglePause}
+style={{
+...secondaryButtonStyle,
+flex: 1,
+}}
+>
+{phase === "paused" ? "Resume" : "Pause"}
+</button>
+
+<button
+onClick={resetSession}
+style={{
+...secondaryButtonStyle,
+flex: 1,
+}}
 >
 Reset
 </button>
-</div>
-
-{permissionNeeded && mode === "live" && !sensorReady ? (
-<div className="mt-4 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70">
-Tap Start Axis once and allow motion access.
-</div>
-) : null}
 </section>
 
-<section className="mt-5 grid flex-1 grid-cols-1 gap-5 lg:grid-cols-[0.95fr_1.05fr]">
-<div className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.04),rgba(0,0,0,0.97)_42%)] p-4 sm:p-6">
-<div className="grid grid-cols-2 gap-4">
-<div className="rounded-[22px] border border-white/10 bg-black/45 p-4">
-<div className="text-sm uppercase tracking-[0.24em] text-white/42">{statusLabel}</div>
-<div className="mt-3 text-6xl font-semibold leading-none">{axisMark}</div>
-<div className="mt-2 text-lg text-white/55">Axis Mark</div>
-</div>
-
-<div className="rounded-[22px] border border-white/10 bg-black/45 p-4">
-<div className="text-sm uppercase tracking-[0.24em] text-white/42">Axis Push</div>
-<div className="mt-3 text-2xl font-semibold leading-tight">{axisPush}</div>
-<div className="mt-3 text-sm text-white/55">
-{lockFlash ? "Shape captured" : axisShape}
-</div>
-</div>
-</div>
-
-<div className="mt-5 rounded-[26px] border border-white/10 bg-black/50 p-4 sm:p-5">
-<div className="mb-3 flex items-center justify-between">
-<div className="text-2xl font-semibold">Axis Scope</div>
-<div className="text-sm uppercase tracking-[0.24em] text-white/38">
-{lockFlash ? "Shape" : running ? "Live" : "Off"}
-</div>
-</div>
-
-<div className="mx-auto flex w-full max-w-[360px] items-center justify-center">
-<svg viewBox="0 0 240 240" className="h-[300px] w-[300px] max-w-full">
-<circle cx="120" cy="120" r="92" fill="none" stroke="rgba(255,255,255,0.12)" />
-<circle cx="120" cy="120" r="64" fill="none" stroke="rgba(255,255,255,0.10)" />
-<circle cx="120" cy="120" r="36" fill="none" stroke="rgba(255,255,255,0.10)" />
-<line x1="120" y1="20" x2="120" y2="220" stroke="rgba(255,255,255,0.08)" />
-<line x1="20" y1="120" x2="220" y2="120" stroke="rgba(255,255,255,0.08)" />
-
-<circle cx="120" cy="120" r="4" fill="white" opacity="0.7" />
-
-{lockFlash ? (
-<>
-<circle cx={scopeX} cy={scopeY} r="19" fill="rgba(154,240,75,0.22)" />
-<text
-x={scopeX}
-y={scopeY - 18}
-textAnchor="middle"
-fill="#9AF04B"
-fontSize="16"
-fontWeight="700"
+{latest && (
+<section
+style={{
+marginTop: 18,
+border: "1px solid rgba(255,255,255,0.07)",
+background: "rgba(255,255,255,0.03)",
+borderRadius: 24,
+padding: 16,
+}}
 >
-{axisShape}
-</text>
-</>
-) : null}
-
-<circle
-cx={scopeX}
-cy={scopeY}
-r={lockFlash ? 12 : 10}
-fill={lockFlash ? "#9AF04B" : "white"}
-/>
-</svg>
-</div>
+<div style={{ fontSize: 12, opacity: 0.5, marginBottom: 8 }}>
+Latest Capture
 </div>
 
-<div className="mt-5 rounded-[26px] border border-white/10 bg-black/50 p-4 sm:p-5">
-<div className="flex items-end justify-between gap-4">
-<div>
-<h2 className="text-2xl font-semibold">Axis Line</h2>
-<p className="mt-2 text-sm text-white/55">
-Signal history of structure over time.
-</p>
-</div>
-<div className="text-sm uppercase tracking-[0.24em] text-white/38">
-{mode === "live" && sensorReady ? "Live" : "Demo"}
-</div>
-</div>
-
-<div className="mt-4 overflow-hidden rounded-[22px] border border-white/10 bg-black/60 p-3 sm:p-4">
-<svg viewBox="0 0 700 190" className="h-[210px] w-full" preserveAspectRatio="none">
-<line x1="0" y1="45" x2="700" y2="45" stroke="rgba(154,240,75,0.16)" strokeDasharray="4 8" />
-<line x1="0" y1="95" x2="700" y2="95" stroke="rgba(255,255,255,0.08)" strokeDasharray="4 8" />
-<line x1="0" y1="145" x2="700" y2="145" stroke="rgba(255,255,255,0.05)" strokeDasharray="4 8" />
-
-{Array.from({ length: 8 }).map((_, i) => (
-<line
-key={i}
-x1={i * 100}
-y1="0"
-x2={i * 100}
-y2="190"
-stroke="rgba(255,255,255,0.04)"
-/>
-))}
-
-<path
-d={line}
-fill="none"
-stroke="rgba(154,240,75,0.28)"
-strokeWidth={lockFlash ? 10 : 8}
-strokeLinecap="round"
-strokeLinejoin="round"
-/>
-<path
-d={line}
-fill="none"
-stroke={lockFlash ? "#9AF04B" : "white"}
-strokeWidth={lockFlash ? 4 : 3}
-strokeLinecap="round"
-strokeLinejoin="round"
-/>
-</svg>
-</div>
-</div>
-</div>
-
-<div className="rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.04),rgba(0,0,0,0.97)_42%)] p-4 sm:p-6">
-<div className="flex items-end justify-between gap-4">
-<div>
-<h2 className="text-4xl font-semibold tracking-tight">Axis History</h2>
-<p className="mt-2 text-lg text-white/55">Captured Axis Shape moments.</p>
-</div>
-
-{historyTop ? (
-<div className="rounded-[20px] border border-white/10 bg-black/40 px-4 py-3 text-right">
-<div className="text-sm uppercase tracking-[0.22em] text-white/42">Latest</div>
-<div className="mt-2 text-3xl font-semibold">{historyTop.mark}</div>
-</div>
-) : null}
-</div>
-
-<div className="mt-5 space-y-3">
-{history.length === 0 ? (
-<div className="rounded-[22px] border border-white/10 bg-black/35 p-6 text-lg text-white/55">
-No shapes captured yet.
-</div>
-) : null}
-
-{history.map((item) => (
 <div
-key={item.id}
-className="flex items-center justify-between gap-4 rounded-[22px] border border-white/10 bg-black/35 px-5 py-4"
+style={{
+display: "grid",
+gridTemplateColumns: "1.1fr 0.9fr",
+gap: 12,
+alignItems: "center",
+}}
 >
-<div className="min-w-0">
-<div className="text-2xl font-semibold">{item.shape}</div>
-<div className="mt-1 text-base text-white/55">
-{item.push} • {formatTime(item.ts)}
+<div>
+<div
+style={{
+fontSize: 28,
+fontWeight: 700,
+letterSpacing: "-0.04em",
+marginBottom: 4,
+}}
+>
+{latest.shape}
+</div>
+
+<div style={{ fontSize: 14, opacity: 0.7 }}>
+{latest.state} • Push {latest.push}
 </div>
 </div>
 
-<div className="text-3xl font-semibold">{item.mark}</div>
+<div style={{ textAlign: "right" }}>
+<div
+style={{
+fontSize: 28,
+fontWeight: 700,
+letterSpacing: "-0.05em",
+}}
+>
+{latest.mark}
 </div>
-))}
+
+<div style={{ fontSize: 13, opacity: 0.6 }}>
+{formatTime(latest.time)}
+</div>
 </div>
 </div>
 </section>
+)}
+
+<section style={{ marginTop: 18 }}>
+<div
+style={{
+fontSize: 12,
+opacity: 0.5,
+marginBottom: 10,
+textTransform: "uppercase",
+letterSpacing: "0.12em",
+}}
+>
+Axis History
+</div>
+
+<div
+style={{
+display: "grid",
+gap: 10,
+}}
+>
+{moments.length === 0 && (
+<div
+style={{
+border: "1px solid rgba(255,255,255,0.07)",
+background: "rgba(255,255,255,0.02)",
+borderRadius: 20,
+padding: 16,
+fontSize: 14,
+opacity: 0.62,
+}}
+>
+Captured Axis Shape moments will appear here.
+</div>
+)}
+
+{moments.map((moment) => (
+<div
+key={moment.id}
+style={{
+border: "1px solid rgba(255,255,255,0.07)",
+background: "rgba(255,255,255,0.025)",
+borderRadius: 20,
+padding: 14,
+display: "grid",
+gridTemplateColumns: "1fr auto",
+gap: 12,
+alignItems: "center",
+}}
+>
+<div>
+<div
+style={{
+fontSize: 18,
+fontWeight: 600,
+letterSpacing: "-0.03em",
+marginBottom: 4,
+}}
+>
+{moment.shape}
+</div>
+
+<div style={{ fontSize: 14, opacity: 0.72 }}>
+{moment.state} • Push {moment.push}
+</div>
+</div>
+
+<div style={{ textAlign: "right" }}>
+<div
+style={{
+fontSize: 22,
+fontWeight: 700,
+letterSpacing: "-0.05em",
+}}
+>
+{moment.mark}
+</div>
+
+<div style={{ fontSize: 12, opacity: 0.56 }}>
+{formatTime(moment.time)}
+</div>
+</div>
+</div>
+))}
+</div>
+</section>
+</>
+)}
 </div>
 </main>
 );
+}
+
+function TargetRings() {
+return (
+<svg
+viewBox="0 0 400 400"
+style={{ width: "100%", height: "100%", display: "block" }}
+>
+<circle
+cx="200"
+cy="200"
+r="154"
+fill="none"
+stroke="rgba(255,255,255,0.09)"
+strokeWidth="3"
+/>
+<circle
+cx="200"
+cy="200"
+r="104"
+fill="none"
+stroke="rgba(255,255,255,0.09)"
+strokeWidth="3"
+/>
+<circle
+cx="200"
+cy="200"
+r="58"
+fill="none"
+stroke="rgba(255,255,255,0.09)"
+strokeWidth="3"
+/>
+<line
+x1="200"
+y1="18"
+x2="200"
+y2="382"
+stroke="rgba(255,255,255,0.08)"
+strokeWidth="2"
+/>
+<line
+x1="18"
+y1="200"
+x2="382"
+y2="200"
+stroke="rgba(255,255,255,0.08)"
+strokeWidth="2"
+/>
+</svg>
+);
+}
+
+const primaryButtonStyle: React.CSSProperties = {
+width: "100%",
+border: "none",
+borderRadius: 18,
+padding: "16px 18px",
+background: "#fff",
+color: "#000",
+fontSize: 16,
+fontWeight: 700,
+letterSpacing: "-0.02em",
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+border: "1px solid rgba(255,255,255,0.08)",
+borderRadius: 16,
+padding: "14px 16px",
+background: "rgba(255,255,255,0.04)",
+color: "#fff",
+fontSize: 15,
+fontWeight: 600,
+letterSpacing: "-0.02em",
+};
+
+function classifyState(mark: number, planar: number, dz: number): AxisState {
+if (mark >= 90 && planar <= 1.4) return "Centered";
+if (mark >= 80 && planar <= 2.6) return "Shift";
+if (mark >= 68 || dz < -1.2) return "Drop";
+return "Off Axis";
+}
+
+function classifyPush(dx: number, dy: number): Push {
+const absX = Math.abs(dx);
+const absY = Math.abs(dy);
+
+if (absX < 0.45 && absY < 0.45) return "Center";
+if (absY >= absX) return dy > 0 ? "Forward" : "Back";
+return dx > 0 ? "Right" : "Left";
+}
+
+function clamp(value: number, min: number, max: number) {
+return Math.min(max, Math.max(min, value));
+}
+
+function avg(values: number[]) {
+if (values.length === 0) return 0;
+return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function pushLimited<T>(arr: T[], value: T, max: number) {
+arr.push(value);
+if (arr.length > max) arr.shift();
+}
+
+function formatTime(time: number) {
+return new Date(time).toLocaleTimeString([], {
+hour: "numeric",
+minute: "2-digit",
+second: "2-digit",
+});
 }
