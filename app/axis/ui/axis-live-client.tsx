@@ -42,33 +42,37 @@ return parts.filter(Boolean).join(" ");
 function scoreTone(score: number) {
 if (score >= 95) {
 return {
-ring: "rgba(76, 255, 126, 0.95)",
-glow: "0 0 22px rgba(76,255,126,0.35)",
+ring: "rgba(76,255,126,0.95)",
+glow: "0 0 28px rgba(76,255,126,0.32)",
 text: "text-emerald-300",
-border: "border-emerald-400/40",
+border: "border-emerald-400/35",
+bg: "from-emerald-500/12 to-transparent",
 };
 }
 if (score >= 85) {
 return {
-ring: "rgba(255,255,255,0.96)",
-glow: "0 0 18px rgba(255,255,255,0.18)",
+ring: "rgba(255,255,255,0.95)",
+glow: "0 0 24px rgba(255,255,255,0.14)",
 text: "text-white",
-border: "border-white/20",
+border: "border-white/18",
+bg: "from-white/10 to-transparent",
 };
 }
 if (score >= 70) {
 return {
-ring: "rgba(255, 191, 71, 0.96)",
-glow: "0 0 18px rgba(255,191,71,0.22)",
+ring: "rgba(255,191,71,0.96)",
+glow: "0 0 22px rgba(255,191,71,0.20)",
 text: "text-amber-300",
-border: "border-amber-400/35",
+border: "border-amber-400/30",
+bg: "from-amber-500/12 to-transparent",
 };
 }
 return {
-ring: "rgba(255, 90, 90, 0.96)",
-glow: "0 0 18px rgba(255,90,90,0.22)",
+ring: "rgba(255,90,90,0.96)",
+glow: "0 0 22px rgba(255,90,90,0.22)",
 text: "text-rose-300",
-border: "border-rose-400/35",
+border: "border-rose-400/30",
+bg: "from-rose-500/12 to-transparent",
 };
 }
 
@@ -94,6 +98,22 @@ if (!points.length) return "";
 return points
 .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`)
 .join(" ");
+}
+
+function buildReading(score: number, state: AxisState, locked: boolean) {
+if (locked) return "CLEAR";
+if (state === "SHIFT") return "SHIFT";
+if (state === "OFF AXIS") return "Breaking";
+if (score >= 80) return "CLEAR";
+return "SEARCHING";
+}
+
+function buildSignalText(state: AxisState, locked: boolean) {
+if (locked || state === "CENTERED") return "Balanced and organized";
+if (state === "FLOAT") return "Stable with controlled drift";
+if (state === "SHIFT") return "Lateral transfer active";
+if (state === "DROP") return "Forward load increasing";
+return "Structure breaking";
 }
 
 export default function AxisLiveClient() {
@@ -126,15 +146,18 @@ const peakTimeoutRef = useRef<number | null>(null);
 
 const current = frameRef.current;
 
-const tone = useMemo(
-() => scoreTone(current?.stability ?? 0),
-[current?.stability],
-);
+const displayState = current?.state ?? "CENTERED";
+const displayScore = current?.stability ?? 0;
+const displayDirection = current?.direction ?? "CENTER";
+const displayX = current?.smoothX ?? 0;
+const displayY = current?.smoothY ?? 0;
+const isLocked = current?.locked ?? false;
 
-const peakTone = useMemo(
-() => scoreTone(peakHold.score),
-[peakHold.score],
-);
+const reading = buildReading(displayScore, displayState, isLocked);
+const signalText = buildSignalText(displayState, isLocked);
+
+const tone = useMemo(() => scoreTone(displayScore), [displayScore]);
+const peakTone = useMemo(() => scoreTone(peakHold.score), [peakHold.score]);
 
 useEffect(() => {
 const onOrientation = (event: DeviceOrientationEvent) => {
@@ -165,7 +188,7 @@ return;
 }
 
 const loop = (time: number) => {
-setSweepDeg((prev) => (prev + 1.6) % 360);
+setSweepDeg((prev) => (prev + 1.45) % 360);
 
 if (permissionState !== "granted") {
 simulationRef.current += 0.018;
@@ -293,7 +316,6 @@ setIsLive(true);
 } else {
 setPermissionState("denied");
 }
-
 return;
 }
 
@@ -332,13 +354,6 @@ visible: false,
 });
 }
 
-const displayState = current?.state ?? "CENTERED";
-const displayScore = current?.stability ?? 0;
-const displayDirection = current?.direction ?? "CENTER";
-const displayX = current?.smoothX ?? 0;
-const displayY = current?.smoothY ?? 0;
-const isLocked = current?.locked ?? false;
-
 const scopeSize = 320;
 const center = scopeSize / 2;
 const maxRadius = 108;
@@ -352,24 +367,24 @@ const sweepY = center + Math.sin(sweepRadians) * 124;
 const circumference = 2 * Math.PI * 136;
 const fill = Math.max(0, Math.min(100, displayScore));
 const dashOffset = circumference * (1 - fill / 100);
-
 const signalPath = buildSignalPath(signal);
 
 return (
-<div className="min-h-screen bg-[#05070a] text-white">
-<div className="mx-auto flex w-full max-w-7xl flex-col gap-4 px-3 py-3 sm:px-4 md:gap-5 md:px-6 lg:px-8">
-<div className="grid gap-4 lg:grid-cols-[1.15fr_0.85fr] lg:gap-5">
-<div className="flex flex-col gap-4 md:gap-5">
+<div className="min-h-screen bg-[#04070c] text-white">
+<div className="mx-auto max-w-7xl px-3 py-3 sm:px-4 md:px-6 lg:px-8">
+<div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr] lg:gap-5">
+<div className="space-y-4 md:space-y-5">
 <section
 className={cn(
-"relative overflow-hidden rounded-[24px] border bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-6",
+"relative overflow-hidden rounded-[26px] border bg-white/[0.035] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl md:p-6",
 tone.border,
 )}
 >
+<div className={cn("absolute inset-0 bg-gradient-to-b", tone.bg)} />
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.06),transparent_55%)]" />
 <div className="relative flex items-center justify-between gap-4">
 <div className="min-w-0">
-<div className="mb-1 text-[10px] font-medium uppercase tracking-[0.26em] text-white/45 md:mb-2 md:text-[11px] md:tracking-[0.28em]">
+<div className="mb-1 text-[10px] uppercase tracking-[0.28em] text-white/42">
 State
 </div>
 <div
@@ -381,7 +396,7 @@ style={{ textShadow: isLocked ? tone.glow : "none" }}
 >
 {displayState}
 </div>
-<div className="mt-1 text-sm text-white/55 md:mt-2 md:text-base">
+<div className="mt-1 text-sm text-white/55 md:text-base">
 {buildHistoryLabel(displayState, displayDirection)}
 </div>
 </div>
@@ -389,11 +404,11 @@ style={{ textShadow: isLocked ? tone.glow : "none" }}
 <div className="shrink-0 text-right">
 {peakHold.visible ? (
 <>
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40 md:text-[11px] md:tracking-[0.28em]">
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
 Peak
 </div>
 <div
-className="mt-1 text-3xl font-semibold md:mt-2 md:text-5xl"
+className="mt-1 text-3xl font-semibold md:text-5xl"
 style={{
 color: peakTone.ring,
 textShadow: peakTone.glow,
@@ -401,17 +416,17 @@ textShadow: peakTone.glow,
 >
 {peakHold.score}
 </div>
-<div className="mt-1 text-xs text-white/50 md:mt-2 md:text-sm">
+<div className="mt-1 text-xs text-white/50 md:text-sm">
 {peakHold.state} · {peakHold.direction}
 </div>
 </>
 ) : (
 <>
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40 md:text-[11px] md:tracking-[0.28em]">
-Lock
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
+Axis Lock
 </div>
 <div
-className="mt-1 text-3xl font-semibold md:mt-2 md:text-5xl"
+className="mt-1 text-3xl font-semibold md:text-5xl"
 style={{
 color: tone.ring,
 textShadow: isLocked ? tone.glow : "none",
@@ -419,8 +434,8 @@ textShadow: isLocked ? tone.glow : "none",
 >
 {displayScore}
 </div>
-<div className="mt-1 text-xs text-white/50 md:mt-2 md:text-sm">
-{isLocked ? "Structure locked" : "Scanning structure"}
+<div className="mt-1 text-xs text-white/50 md:text-sm">
+{isLocked ? "Locked" : "Scanning"}
 </div>
 </>
 )}
@@ -428,45 +443,43 @@ textShadow: isLocked ? tone.glow : "none",
 </div>
 </section>
 
-<section className="relative overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[32px] md:p-6">
-<div className="mb-3 flex items-center justify-between md:mb-4">
+<section className="relative overflow-hidden rounded-[30px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_24px_90px_rgba(0,0,0,0.46)] backdrop-blur-xl md:p-6">
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(255,255,255,0.03),transparent_60%)]" />
+<div className="mb-4 flex items-center justify-between">
 <div>
-<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Scope
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
+Axis Scope
 </div>
-<div className="mt-1 text-sm text-white/55">
-Structure Field
+<div className="mt-1 text-sm text-white/55">Live structure instrument</div>
 </div>
-</div>
-<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/60 md:text-xs md:tracking-[0.24em]">
+<div className="rounded-full border border-white/12 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-white/62">
 {isLive ? "Live" : "Idle"}
 </div>
 </div>
 
-<div className="relative mx-auto aspect-square w-full max-w-[300px] sm:max-w-[320px] md:max-w-[360px]">
-<svg viewBox={`0 0 ${scopeSize} ${scopeSize}`} className="h-full w-full">
+<div className="relative mx-auto aspect-square w-full max-w-[300px] sm:max-w-[340px] md:max-w-[380px]">
+<div className="absolute inset-0 rounded-full bg-[radial-gradient(circle,rgba(255,255,255,0.04),transparent_58%)] blur-2xl" />
+<svg viewBox={`0 0 ${scopeSize} ${scopeSize}`} className="relative h-full w-full">
 <defs>
 <radialGradient id="scopeGlow" cx="50%" cy="50%" r="50%">
-<stop offset="0%" stopColor="rgba(255,255,255,0.10)" />
-<stop offset="70%" stopColor="rgba(255,255,255,0.02)" />
+<stop offset="0%" stopColor="rgba(255,255,255,0.12)" />
+<stop offset="72%" stopColor="rgba(255,255,255,0.02)" />
 <stop offset="100%" stopColor="rgba(255,255,255,0)" />
 </radialGradient>
-
 <linearGradient id="sweepGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-<stop offset="0%" stopColor="rgba(255,255,255,0.00)" />
-<stop offset="100%" stopColor="rgba(255,255,255,0.22)" />
+<stop offset="0%" stopColor="rgba(255,255,255,0)" />
+<stop offset="100%" stopColor="rgba(255,255,255,0.20)" />
 </linearGradient>
 </defs>
 
 <circle cx={center} cy={center} r="150" fill="url(#scopeGlow)" />
-
 <circle
 cx={center}
 cy={center}
 r="136"
 fill="none"
 stroke="rgba(255,255,255,0.08)"
-strokeWidth="12"
+strokeWidth="14"
 />
 <circle
 cx={center}
@@ -474,7 +487,7 @@ cy={center}
 r="136"
 fill="none"
 stroke={tone.ring}
-strokeWidth="12"
+strokeWidth="14"
 strokeLinecap="round"
 strokeDasharray={circumference}
 strokeDashoffset={dashOffset}
@@ -496,23 +509,23 @@ cx={center}
 cy={center}
 r={r}
 fill="none"
-stroke="rgba(255,255,255,0.10)"
-strokeWidth="1"
+stroke="rgba(255,255,255,0.09)"
+strokeWidth="1.2"
 />
 ))}
 
 <line
 x1={center}
-y1={36}
+y1={34}
 x2={center}
-y2={scopeSize - 36}
+y2={scopeSize - 34}
 stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
 />
 <line
-x1={36}
+x1={34}
 y1={center}
-x2={scopeSize - 36}
+x2={scopeSize - 34}
 y2={center}
 stroke="rgba(255,255,255,0.12)"
 strokeWidth="1"
@@ -524,13 +537,11 @@ y1={center}
 x2={sweepX}
 y2={sweepY}
 stroke="url(#sweepGradient)"
-strokeWidth="2"
-style={{
-filter: "drop-shadow(0 0 14px rgba(255,255,255,0.10))",
-}}
+strokeWidth="2.4"
+style={{ filter: "drop-shadow(0 0 12px rgba(255,255,255,0.08))" }}
 />
 
-<circle cx={center} cy={center} r="4.5" fill="rgba(255,255,255,0.85)" />
+<circle cx={center} cy={center} r="5" fill="rgba(255,255,255,0.88)" />
 
 {(isLocked || lockPulse) && (
 <circle
@@ -539,8 +550,8 @@ cy={center}
 r={108}
 fill="none"
 stroke={tone.ring}
-strokeWidth="1.4"
-opacity={lockPulse ? 0.95 : 0.7}
+strokeWidth="1.5"
+opacity={lockPulse ? 0.95 : 0.72}
 style={{
 filter: lockPulse ? `drop-shadow(${tone.glow})` : "none",
 transition: "opacity 140ms ease",
@@ -552,14 +563,12 @@ transition: "opacity 140ms ease",
 <circle
 cx={center}
 cy={center}
-r={124}
+r={123}
 fill="none"
 stroke={tone.ring}
-strokeWidth="1.1"
-opacity="0.32"
-style={{
-filter: `drop-shadow(${tone.glow})`,
-}}
+strokeWidth="1.2"
+opacity="0.28"
+style={{ filter: `drop-shadow(${tone.glow})` }}
 />
 )}
 
@@ -578,36 +587,29 @@ transition:
 }}
 />
 </svg>
-
-<div className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-[10px] uppercase tracking-[0.22em] text-white/36 md:text-[11px] md:tracking-[0.26em]">
-Structure Field
-</div>
 </div>
 
 <div className="mt-4 grid grid-cols-3 gap-2 md:gap-3">
-<StatChip label="Structure" value={displayScore.toString()} />
+<StatChip label="State" value={displayState} />
 <StatChip label="Direction" value={displayDirection} />
-<StatChip label="Lock" value={isLocked ? "YES" : "NO"} />
+<StatChip label="Axis Lock" value={isLocked ? "LOCKED" : displayScore.toString()} />
 </div>
 </section>
 
-<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
-<div className="mb-3 flex items-center justify-between md:mb-4">
+<section className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.40)] backdrop-blur-xl md:p-5">
+<div className="mb-3 flex items-center justify-between">
 <div>
-<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Line
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
+Axis Line
 </div>
-<div className="mt-1 text-sm text-white/55">
-Structure over time
+<div className="mt-1 text-sm text-white/55">Structure over time</div>
 </div>
-</div>
-
-<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/50 md:text-xs md:tracking-[0.24em]">
+<div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.24em] text-white/55">
 {signal.length} frames
 </div>
 </div>
 
-<div className="overflow-hidden rounded-[18px] border border-white/8 bg-[#07090d] p-2 md:rounded-[20px] md:p-3">
+<div className="overflow-hidden rounded-[22px] border border-white/8 bg-[#06090f] p-2 md:p-3">
 <svg viewBox="0 0 720 140" className="h-[120px] w-full md:h-[160px]">
 <defs>
 <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
@@ -623,7 +625,7 @@ x1="0"
 y1={y}
 x2="720"
 y2={y}
-stroke="rgba(255,255,255,0.06)"
+stroke="rgba(255,255,255,0.05)"
 strokeWidth="1"
 />
 ))}
@@ -646,7 +648,7 @@ x1={p.x}
 y1={130}
 x2={p.x}
 y2={18}
-stroke="rgba(255,255,255,0.16)"
+stroke="rgba(255,255,255,0.14)"
 strokeWidth="1"
 strokeDasharray="4 5"
 />
@@ -658,25 +660,20 @@ strokeDasharray="4 5"
 </section>
 </div>
 
-<div className="flex flex-col gap-4 md:gap-5">
-<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
-<div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Lock
+<div className="space-y-4 md:space-y-5">
+<section className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.40)] backdrop-blur-xl md:p-5">
+<div className="flex items-center justify-between">
+<div>
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/42">
+Axis Lock
 </div>
-<div className="mt-1 text-sm text-white/55 md:mt-2">
-Stability above 90 held for 420ms
-</div>
-
-<div className="mt-4 rounded-[20px] border border-white/8 bg-[#07090d] p-4 md:mt-5 md:rounded-[24px] md:p-5">
-<div className="flex items-center justify-between gap-3">
-<div className="text-xs uppercase tracking-[0.22em] text-white/40 md:text-sm md:tracking-[0.24em]">
-Read
+<div className="mt-1 text-sm text-white/55">Live control cluster</div>
 </div>
 <div
-className="rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] md:text-xs md:tracking-[0.24em]"
+className="rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.24em]"
 style={{
 color: tone.ring,
-border: `1px solid ${tone.ring}33`,
+borderColor: `${tone.ring}33`,
 boxShadow: isLocked ? tone.glow : "none",
 }}
 >
@@ -684,61 +681,38 @@ boxShadow: isLocked ? tone.glow : "none",
 </div>
 </div>
 
-<div className="mt-5 grid grid-cols-3 gap-3">
-<button
-onClick={enableMotion}
-className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
->
-<div className="text-[10px] tracking-[0.24em] text-white/50">
-MOTION
-</div>
-<div className="mt-1 text-sm font-medium">
-{permissionState === "granted"
+<div className="mt-4 grid grid-cols-3 gap-2">
+<ControlButton
+label="Motion"
+value={
+permissionState === "granted"
 ? "ON"
 : permissionState === "denied"
 ? "DENIED"
 : permissionState === "unsupported"
 ? "SIM"
-: "ENABLE"}
-</div>
-</button>
-
-<button
-onClick={startLive}
-className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
->
-<div className="text-[10px] tracking-[0.24em] text-white/50">
-LIVE
-</div>
-<div className="mt-1 text-sm font-medium">START</div>
-</button>
-
-<button
-onClick={endSession}
-className="flex flex-col items-center justify-center rounded-xl border border-white/10 bg-white/5 py-3 transition hover:bg-white/10"
->
-<div className="text-[10px] tracking-[0.24em] text-white/50">
-SESSION
-</div>
-<div className="mt-1 text-sm font-medium">END</div>
-</button>
+: "ENABLE"
+}
+onClick={enableMotion}
+/>
+<ControlButton label="Live" value="START" onClick={startLive} />
+<ControlButton label="Session" value="END" onClick={endSession} />
 </div>
 
 <button
 onClick={clearSession}
-className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 py-2 text-xs tracking-[0.24em] text-white/60 transition hover:bg-white/10"
+className="mt-2 w-full rounded-2xl border border-white/10 bg-white/[0.04] py-3 text-sm tracking-[0.24em] text-sky-400 transition hover:bg-white/[0.07]"
 >
 CLEAR AXIS HISTORY
 </button>
-</div>
 </section>
 
-<section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
+<section className="rounded-[26px] border border-white/10 bg-white/[0.03] p-4 shadow-[0_20px_80px_rgba(0,0,0,0.40)] backdrop-blur-xl md:p-5">
 <div className="mb-4 flex gap-2">
 <button
 onClick={() => setPanel("brain")}
 className={cn(
-"flex-1 rounded-xl border px-4 py-2 text-sm font-medium transition",
+"flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition",
 panel === "brain"
 ? "border-white/16 bg-white/10 text-white"
 : "border-white/8 bg-white/[0.03] text-white/55",
@@ -750,7 +724,7 @@ Brain
 <button
 onClick={() => setPanel("history")}
 className={cn(
-"flex-1 rounded-xl border px-4 py-2 text-sm font-medium transition",
+"flex-1 rounded-xl border px-4 py-2.5 text-sm font-medium transition",
 panel === "history"
 ? "border-white/16 bg-white/10 text-white"
 : "border-white/8 bg-white/[0.03] text-white/55",
@@ -762,61 +736,37 @@ Axis History
 
 {panel === "brain" ? (
 <div>
-<div className="mb-1 text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Read
+<div className="mb-1 text-[10px] uppercase tracking-[0.28em] text-white/42">
+Reading
 </div>
 <div className="mb-4 text-sm text-white/55">
-Live interpretation of structure during action
+Live structure interpretation
 </div>
 
-<div className="grid gap-2 md:gap-3">
+<div className="grid gap-2.5">
 <InsightRow label="State" value={displayState} />
 <InsightRow label="Direction" value={displayDirection} />
-<InsightRow
-label="Read"
-value={
-isLocked
-? "Decision window open"
-: displayScore >= 80
-? "Approaching lock"
-: "Searching structure"
-}
-/>
-<InsightRow
-label="Signal"
-value={
-displayState === "CENTERED"
-? "Balanced and organized"
-: displayState === "FLOAT"
-? "Stable with controlled drift"
-: displayState === "DROP"
-? "Forward load increasing"
-: displayState === "SHIFT"
-? "Lateral transfer active"
-: "Structure breaking"
-}
-/>
+<InsightRow label="Reading" value={reading} />
+<InsightRow label="Signal" value={signalText} />
 </div>
 </div>
 ) : (
 <div>
-<div className="mb-1 text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
+<div className="mb-1 text-[10px] uppercase tracking-[0.28em] text-white/42">
 Axis History
 </div>
-<div className="mb-4 text-sm text-white/55">
-Auto-logged on lock
-</div>
+<div className="mb-4 text-sm text-white/55">Captured</div>
 
 {history.length === 0 ? (
 <div className="rounded-[20px] border border-dashed border-white/12 bg-[#07090d] px-4 py-8 text-center text-sm text-white/42">
-No locked reads yet.
+No captured reads yet.
 </div>
 ) : (
-<div className="space-y-2 md:space-y-3">
+<div className="space-y-2.5">
 {history.map((item) => (
 <div
 key={item.id}
-className="rounded-[18px] border border-white/8 bg-[#07090d] px-4 py-3 md:rounded-[22px] md:py-4"
+className="rounded-[20px] border border-white/8 bg-[#07090d] px-4 py-3.5"
 >
 <div className="flex items-start justify-between gap-3">
 <div className="min-w-0">
@@ -835,7 +785,7 @@ stateAccent(item.state),
 
 <div className="shrink-0 text-right">
 <div
-className="text-lg font-semibold md:text-xl"
+className="text-lg font-semibold"
 style={{ color: scoreTone(item.stability).ring }}
 >
 {item.stability}
@@ -861,11 +811,11 @@ style={{ color: scoreTone(item.stability).ring }}
 
 function StatChip({ label, value }: { label: string; value: string }) {
 return (
-<div className="rounded-[16px] border border-white/8 bg-[#07090d] px-3 py-3 md:rounded-[18px] md:px-4">
+<div className="rounded-[18px] border border-white/8 bg-[#07090d] px-3 py-3 md:px-4">
 <div className="text-[9px] uppercase tracking-[0.22em] text-white/38 md:text-[10px] md:tracking-[0.24em]">
 {label}
 </div>
-<div className="mt-1 truncate text-xs font-medium text-white/82 md:text-sm">
+<div className="mt-1 truncate text-xs font-medium text-white/86 md:text-sm">
 {value}
 </div>
 </div>
@@ -874,11 +824,35 @@ return (
 
 function InsightRow({ label, value }: { label: string; value: string }) {
 return (
-<div className="flex items-start justify-between gap-4 rounded-[16px] border border-white/8 bg-[#07090d] px-4 py-3 md:rounded-[18px]">
+<div className="flex items-start justify-between gap-4 rounded-[18px] border border-white/8 bg-[#07090d] px-4 py-3">
 <div className="text-[9px] uppercase tracking-[0.22em] text-white/38 md:text-[10px] md:tracking-[0.24em]">
 {label}
 </div>
-<div className="max-w-[68%] text-right text-sm text-white/82">{value}</div>
+<div className="max-w-[68%] text-right text-sm text-white/86">{value}</div>
 </div>
+);
+}
+
+function ControlButton({
+label,
+value,
+onClick,
+}: {
+label: string;
+value: string;
+onClick: () => void;
+}) {
+return (
+<button
+onClick={onClick}
+className="rounded-2xl border border-white/10 bg-white/[0.04] px-3 py-3 transition hover:bg-white/[0.07]"
+>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/42">
+{label}
+</div>
+<div className="mt-1 text-xl font-medium tracking-tight text-sky-400">
+{value}
+</div>
+</button>
 );
 }
