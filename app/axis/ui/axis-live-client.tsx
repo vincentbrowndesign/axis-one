@@ -24,8 +24,16 @@ locked: boolean;
 time: number;
 };
 
+type PeakHold = {
+score: number;
+state: AxisState;
+direction: string;
+visible: boolean;
+};
+
 const HISTORY_LIMIT = 12;
 const SIGNAL_LIMIT = 64;
+const PEAK_HOLD_MS = 1100;
 
 function cn(...parts: Array<string | false | null | undefined>) {
 return parts.filter(Boolean).join(" ");
@@ -98,6 +106,12 @@ const [history, setHistory] = useState<AxisHistoryItem[]>([]);
 const [signal, setSignal] = useState<SignalPoint[]>([]);
 const [sweepDeg, setSweepDeg] = useState(0);
 const [lockPulse, setLockPulse] = useState(false);
+const [peakHold, setPeakHold] = useState<PeakHold>({
+score: 0,
+state: "CENTERED",
+direction: "CENTER",
+visible: false,
+});
 const [, forceRender] = useState(0);
 
 const rawRef = useRef({ x: 0, y: 0 });
@@ -108,12 +122,18 @@ const frameRef = useRef<AxisFrame | null>(null);
 const simulationRef = useRef(0);
 const rafRef = useRef<number | null>(null);
 const pulseTimeoutRef = useRef<number | null>(null);
+const peakTimeoutRef = useRef<number | null>(null);
 
 const current = frameRef.current;
 
 const tone = useMemo(
 () => scoreTone(current?.stability ?? 0),
 [current?.stability],
+);
+
+const peakTone = useMemo(
+() => scoreTone(peakHold.score),
+[peakHold.score],
 );
 
 useEffect(() => {
@@ -133,6 +153,7 @@ useEffect(() => {
 return () => {
 if (rafRef.current) cancelAnimationFrame(rafRef.current);
 if (pulseTimeoutRef.current) window.clearTimeout(pulseTimeoutRef.current);
+if (peakTimeoutRef.current) window.clearTimeout(peakTimeoutRef.current);
 };
 }, []);
 
@@ -226,10 +247,22 @@ const item = createHistoryItem(nextFrame);
 setHistory((prev) => [item, ...prev].slice(0, HISTORY_LIMIT));
 setLockPulse(true);
 
+setPeakHold({
+score: nextFrame.stability,
+state: nextFrame.state,
+direction: nextFrame.direction,
+visible: true,
+});
+
 if (pulseTimeoutRef.current) window.clearTimeout(pulseTimeoutRef.current);
 pulseTimeoutRef.current = window.setTimeout(() => {
 setLockPulse(false);
 }, 420);
+
+if (peakTimeoutRef.current) window.clearTimeout(peakTimeoutRef.current);
+peakTimeoutRef.current = window.setTimeout(() => {
+setPeakHold((prev) => ({ ...prev, visible: false }));
+}, PEAK_HOLD_MS);
 }
 
 forceRender((v) => v + 1);
@@ -291,6 +324,12 @@ setSignal([]);
 holdStartRef.current = null;
 lockCooldownRef.current = 0;
 setLockPulse(false);
+setPeakHold({
+score: 0,
+state: "CENTERED",
+direction: "CENTER",
+visible: false,
+});
 }
 
 const displayState = current?.state ?? "CENTERED";
@@ -331,7 +370,7 @@ tone.border,
 <div className="relative flex items-center justify-between gap-4">
 <div className="min-w-0">
 <div className="mb-1 text-[10px] font-medium uppercase tracking-[0.26em] text-white/45 md:mb-2 md:text-[11px] md:tracking-[0.28em]">
-Axis State
+State
 </div>
 <div
 className={cn(
@@ -348,8 +387,28 @@ style={{ textShadow: isLocked ? tone.glow : "none" }}
 </div>
 
 <div className="shrink-0 text-right">
+{peakHold.visible ? (
+<>
 <div className="text-[10px] uppercase tracking-[0.24em] text-white/40 md:text-[11px] md:tracking-[0.28em]">
-Axis Lock
+Peak
+</div>
+<div
+className="mt-1 text-3xl font-semibold md:mt-2 md:text-5xl"
+style={{
+color: peakTone.ring,
+textShadow: peakTone.glow,
+}}
+>
+{peakHold.score}
+</div>
+<div className="mt-1 text-xs text-white/50 md:mt-2 md:text-sm">
+{peakHold.state} · {peakHold.direction}
+</div>
+</>
+) : (
+<>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40 md:text-[11px] md:tracking-[0.28em]">
+Lock
 </div>
 <div
 className="mt-1 text-3xl font-semibold md:mt-2 md:text-5xl"
@@ -363,6 +422,8 @@ textShadow: isLocked ? tone.glow : "none",
 <div className="mt-1 text-xs text-white/50 md:mt-2 md:text-sm">
 {isLocked ? "Structure locked" : "Scanning structure"}
 </div>
+</>
+)}
 </div>
 </div>
 </section>
@@ -371,10 +432,10 @@ textShadow: isLocked ? tone.glow : "none",
 <div className="mb-3 flex items-center justify-between md:mb-4">
 <div>
 <div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Axis Scope
+Scope
 </div>
 <div className="mt-1 text-sm text-white/55">
-AXIS STRUCTURE FIELD
+Structure Field
 </div>
 </div>
 <div className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-[10px] uppercase tracking-[0.22em] text-white/60 md:text-xs md:tracking-[0.24em]">
@@ -524,9 +585,9 @@ Structure Field
 </div>
 
 <div className="mt-4 grid grid-cols-3 gap-2 md:gap-3">
-<StatChip label="X Axis" value={displayX.toFixed(2)} />
-<StatChip label="Y Axis" value={displayY.toFixed(2)} />
+<StatChip label="Structure" value={displayScore.toString()} />
 <StatChip label="Direction" value={displayDirection} />
+<StatChip label="Lock" value={isLocked ? "YES" : "NO"} />
 </div>
 </section>
 
@@ -534,7 +595,7 @@ Structure Field
 <div className="mb-3 flex items-center justify-between md:mb-4">
 <div>
 <div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Axis Line
+Line
 </div>
 <div className="mt-1 text-sm text-white/55">
 Structure over time
@@ -600,7 +661,7 @@ strokeDasharray="4 5"
 <div className="flex flex-col gap-4 md:gap-5">
 <section className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 backdrop-blur-xl md:rounded-[28px] md:p-5">
 <div className="text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Axis Lock
+Lock
 </div>
 <div className="mt-1 text-sm text-white/55 md:mt-2">
 Stability above 90 held for 420ms
@@ -609,7 +670,7 @@ Stability above 90 held for 420ms
 <div className="mt-4 rounded-[20px] border border-white/8 bg-[#07090d] p-4 md:mt-5 md:rounded-[24px] md:p-5">
 <div className="flex items-center justify-between gap-3">
 <div className="text-xs uppercase tracking-[0.22em] text-white/40 md:text-sm md:tracking-[0.24em]">
-Lock State
+Read
 </div>
 <div
 className="rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.22em] md:text-xs md:tracking-[0.24em]"
@@ -619,7 +680,7 @@ border: `1px solid ${tone.ring}33`,
 boxShadow: isLocked ? tone.glow : "none",
 }}
 >
-{isLocked ? "Locked" : "Scanning"}
+{isLocked ? "LOCKED" : "SCANNING"}
 </div>
 </div>
 
@@ -683,7 +744,7 @@ panel === "brain"
 : "border-white/8 bg-white/[0.03] text-white/55",
 )}
 >
-Axis Brain
+Brain
 </button>
 
 <button
@@ -702,14 +763,14 @@ Axis History
 {panel === "brain" ? (
 <div>
 <div className="mb-1 text-[10px] uppercase tracking-[0.26em] text-white/45 md:text-[11px] md:tracking-[0.28em]">
-Axis Brain
+Read
 </div>
 <div className="mb-4 text-sm text-white/55">
-Live interpretation of structure during decision
+Live interpretation of structure during action
 </div>
 
 <div className="grid gap-2 md:gap-3">
-<InsightRow label="Primary state" value={displayState} />
+<InsightRow label="State" value={displayState} />
 <InsightRow label="Direction" value={displayDirection} />
 <InsightRow
 label="Read"
@@ -748,7 +809,7 @@ Auto-logged on lock
 
 {history.length === 0 ? (
 <div className="rounded-[20px] border border-dashed border-white/12 bg-[#07090d] px-4 py-8 text-center text-sm text-white/42">
-No locked windows yet. Start live sensing and hold structure to create Axis History.
+No locked reads yet.
 </div>
 ) : (
 <div className="space-y-2 md:space-y-3">
