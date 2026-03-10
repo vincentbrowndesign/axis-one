@@ -1,9 +1,9 @@
-import "./globals.css";
 import type { Metadata } from "next";
+import "./globals.css";
 
 export const metadata: Metadata = {
-title: "Axis",
-description: "Axis structure instrument",
+title: "Axis Measurement",
+description: "Axis measurement system",
 };
 
 export default function RootLayout({

@@ -1,24 +1,40 @@
-import Link from "next/link";
-
 export default function ResearchPage() {
 return (
-<main className="min-h-screen bg-black text-white">
-<div className="mx-auto max-w-5xl px-6 py-12">
-<Link href="/" className="text-sm text-white/60 hover:text-white">
-← Back
-</Link>
-
-<h1 className="mt-6 text-3xl font-semibold tracking-tight md:text-5xl">
-Research
-</h1>
-<p className="mt-4 max-w-2xl text-white/70">
-Axis is a measurable property: structural control during decisions.
-This page will host definitions, methods, and validation.
-</p>
-
-<div className="mt-10 rounded-2xl border border-white/10 bg-white/5 p-6 text-sm text-white/70">
-v0 includes: definitions, session protocol, and state calibration.
+<main
+style={{
+minHeight: "100vh",
+background: "#05070b",
+color: "#f5f7fb",
+padding: "32px 20px",
+}}
+>
+<div
+style={{
+maxWidth: 960,
+margin: "0 auto",
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 24,
+padding: 24,
+background: "rgba(255,255,255,0.03)",
+}}
+>
+<div
+style={{
+fontSize: 12,
+letterSpacing: "0.28em",
+textTransform: "uppercase",
+opacity: 0.6,
+marginBottom: 12,
+}}
+>
+Axis Research
 </div>
+
+<h1 style={{ margin: 0, fontSize: 40 }}>Research</h1>
+<p style={{ opacity: 0.72, lineHeight: 1.6, marginTop: 14 }}>
+Placeholder route for system notes, experiments, state definitions,
+and future instrument documentation.
+</p>
 </div>
 </main>
 );

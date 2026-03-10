@@ -1,43 +1,39 @@
-import Link from "next/link";
-
 export default function SessionsPage() {
 return (
-<main className="min-h-screen bg-black text-white">
-<div className="mx-auto max-w-5xl px-6 py-12">
-<Link href="/" className="text-sm text-white/60 hover:text-white">
-← Back
-</Link>
+<main
+style={{
+minHeight: "100vh",
+background: "#05070b",
+color: "#f5f7fb",
+padding: "32px 20px",
+}}
+>
+<div
+style={{
+maxWidth: 960,
+margin: "0 auto",
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 24,
+padding: 24,
+background: "rgba(255,255,255,0.03)",
+}}
+>
+<div
+style={{
+fontSize: 12,
+letterSpacing: "0.28em",
+textTransform: "uppercase",
+opacity: 0.6,
+marginBottom: 12,
+}}
+>
+Axis Sessions
+</div>
 
-<h1 className="mt-6 text-3xl font-semibold tracking-tight md:text-5xl">
-Sessions
-</h1>
-<p className="mt-4 max-w-2xl text-white/70">
-A session is the smallest unit of Axis. One person. One movement. One
-decision window.
+<h1 style={{ margin: 0, fontSize: 40 }}>Sessions</h1>
+<p style={{ opacity: 0.72, lineHeight: 1.6, marginTop: 14 }}>
+Placeholder route for session history, exports, and session review.
 </p>
-
-<ol className="mt-10 space-y-3 text-sm text-white/80">
-<li className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<span className="font-semibold">1) Start capture</span>
-<div className="mt-1 text-white/70">Begin motion recording.</div>
-</li>
-<li className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<span className="font-semibold">2) Perform movement</span>
-<div className="mt-1 text-white/70">Drive, stop, cut, step, etc.</div>
-</li>
-<li className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<span className="font-semibold">3) Tag the decision</span>
-<div className="mt-1 text-white/70">
-Mark the moment the decision happens.
-</div>
-</li>
-<li className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<span className="font-semibold">4) Compute</span>
-<div className="mt-1 text-white/70">
-Axis returns Measure + State.
-</div>
-</li>
-</ol>
 </div>
 </main>
 );

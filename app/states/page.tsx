@@ -1,53 +1,40 @@
-import Link from "next/link";
-
 export default function StatesPage() {
 return (
-<main className="min-h-screen bg-black text-white">
-<div className="mx-auto max-w-5xl px-6 py-12">
-
-<Link href="/" className="text-sm text-white/60 hover:text-white">
-← Back
-</Link>
-
-<h1 className="mt-6 text-3xl font-semibold tracking-tight md:text-5xl">
+<main
+style={{
+minHeight: "100vh",
+background: "#05070b",
+color: "#f5f7fb",
+padding: "32px 20px",
+}}
+>
+<div
+style={{
+maxWidth: 960,
+margin: "0 auto",
+border: "1px solid rgba(255,255,255,0.12)",
+borderRadius: 24,
+padding: 24,
+background: "rgba(255,255,255,0.03)",
+}}
+>
+<div
+style={{
+fontSize: 12,
+letterSpacing: "0.28em",
+textTransform: "uppercase",
+opacity: 0.6,
+marginBottom: 12,
+}}
+>
 Axis States
-</h1>
+</div>
 
-<p className="mt-4 max-w-2xl text-white/70">
-Axis returns a clear structural state during a decision window.
+<h1 style={{ margin: 0, fontSize: 40 }}>States</h1>
+<p style={{ opacity: 0.72, lineHeight: 1.6, marginTop: 14 }}>
+Placeholder route for state definitions like lock, shift, drop, off
+axis, and reading.
 </p>
-
-<div className="mt-10 grid gap-4 md:grid-cols-3">
-
-<div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<div className="text-sm font-semibold">
-Out of Control
-</div>
-<div className="mt-2 text-sm text-white/70">
-Structure breaks under load.
-</div>
-</div>
-
-<div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<div className="text-sm font-semibold">
-In Rhythm
-</div>
-<div className="mt-2 text-sm text-white/70">
-Structure mostly holds with minor deviation.
-</div>
-</div>
-
-<div className="rounded-2xl border border-white/10 bg-white/5 p-6">
-<div className="text-sm font-semibold">
-In Control
-</div>
-<div className="mt-2 text-sm text-white/70">
-Structure remains stable during the decision.
-</div>
-</div>
-
-</div>
-
 </div>
 </main>
 );
