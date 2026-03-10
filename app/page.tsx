@@ -70,9 +70,8 @@ lineHeight: 1.6,
 color: "rgba(245,247,251,0.72)",
 }}
 >
-Clean route reset. One route per function. Camera lives at
-<strong> /axis-camera</strong>. Run instrument lives at
-<strong> /axis</strong>.
+Clean route reset. Camera is at <strong>/axis-camera</strong>. Run
+instrument is at <strong>/axis</strong>.
 </p>
 </div>
 
@@ -92,9 +91,9 @@ display: "block",
 padding: "18px 18px",
 borderRadius: 18,
 border: "1px solid rgba(255,255,255,0.12)",
-textDecoration: "none",
 color: "#f5f7fb",
-background: "linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))",
+background:
+"linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02))",
 fontSize: 15,
 letterSpacing: "0.08em",
 textTransform: "uppercase",

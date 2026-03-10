@@ -35,8 +35,7 @@ Axis Control
 <h1 style={{ margin: 0, fontSize: 40 }}>Control</h1>
 
 <p style={{ opacity: 0.72, lineHeight: 1.6, marginTop: 14 }}>
-Placeholder control route. Keep this page alive so routing is clean
-while the live controller gets rebuilt.
+Placeholder control route while the live controller gets rebuilt.
 </p>
 
 <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 24 }}>
@@ -45,8 +44,6 @@ href="/axis-camera"
 style={{
 padding: "14px 18px",
 borderRadius: 14,
-textDecoration: "none",
-color: "#f5f7fb",
 border: "1px solid rgba(255,255,255,0.12)",
 }}
 >
@@ -58,8 +55,6 @@ href="/axis"
 style={{
 padding: "14px 18px",
 borderRadius: 14,
-textDecoration: "none",
-color: "#f5f7fb",
 border: "1px solid rgba(255,255,255,0.12)",
 }}
 >

@@ -32,7 +32,7 @@ Axis Sessions
 
 <h1 style={{ margin: 0, fontSize: 40 }}>Sessions</h1>
 <p style={{ opacity: 0.72, lineHeight: 1.6, marginTop: 14 }}>
-Placeholder route for session history, exports, and session review.
+Placeholder route for session history and exports.
 </p>
 </div>
 </main>
