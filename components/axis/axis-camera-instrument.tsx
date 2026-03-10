@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type AxisState = "aligned" | "shift" | "drop" | "recover" | "unknown";
+type AxisState = "aligned" | "shift" | "drop" | "recover" | "reframe" | "unknown";
 type ViewMode = "front" | "side";
 
 type Point = {
@@ -15,6 +15,9 @@ state: AxisState;
 stability: number;
 alignment: number;
 lean: number;
+lock: boolean;
+driftX: number;
+driftY: number;
 };
 
 function clamp(v: number, min: number, max: number) {
@@ -39,11 +42,12 @@ if (state === "aligned") return "#8CFFB5";
 if (state === "recover") return "#FFE27A";
 if (state === "shift") return "#FFB26B";
 if (state === "drop") return "#FF7A7A";
+if (state === "reframe") return "#7AB8FF";
 return "#7AB8FF";
 }
 
 function getFrontState(stability: number, alignment: number, lean: number): AxisState {
-if (stability >= 82 && alignment >= 78 && lean <= 0.08) return "aligned";
+if (stability >= 84 && alignment >= 80 && lean <= 0.08) return "aligned";
 if (stability >= 66 && alignment >= 58) return "recover";
 if (lean > 0.22 || alignment < 40) return "drop";
 if (stability >= 46) return "shift";
@@ -76,6 +80,9 @@ state: "unknown",
 stability: 0,
 alignment: 0,
 lean: 0,
+lock: false,
+driftX: 0,
+driftY: 0,
 });
 
 async function stopCamera() {
@@ -162,10 +169,13 @@ const nose = l[0];
 
 if (!ls || !rs || !lh || !rh || !lk || !rk || !la || !ra || !nose) {
 return {
-state: "unknown",
+state: "reframe",
 stability: 0,
 alignment: 0,
 lean: 0,
+lock: false,
+driftX: 0,
+driftY: 0,
 };
 }
 
@@ -196,7 +206,11 @@ const stability = clamp(
 const alignment = clamp(100 - verticalError * 85, 0, 100);
 const state = getFrontState(stability, alignment, lean);
 
-return { state, stability, alignment, lean };
+const driftX = clamp((hipMid.x - 0.5) * 2.2, -1, 1);
+const driftY = clamp((hipMid.y - 0.56) * 2.0, -1, 1);
+const lock = Math.abs(driftX) < 0.08 && Math.abs(driftY) < 0.08 && alignment >= 80 && stability >= 82;
+
+return { state, stability, alignment, lean, lock, driftX, driftY };
 }
 
 function computeSideReadout(l: any[]): Readout {
@@ -208,10 +222,13 @@ const ear = l[8] ?? l[7] ?? l[0];
 
 if (!shoulder || !hip || !knee || !ankle || !ear) {
 return {
-state: "unknown",
+state: "reframe",
 stability: 0,
 alignment: 0,
 lean: 0,
+lock: false,
+driftX: 0,
+driftY: 0,
 };
 }
 
@@ -232,15 +249,19 @@ const stability = clamp(100 - forwardError * 70 + segmentBalance * 16, 0, 100);
 const alignment = clamp(100 - forwardError * 95, 0, 100);
 const state = getSideState(stability, alignment, lean);
 
-return { state, stability, alignment, lean };
+const driftX = clamp((hip.x - ankle.x) * 5.5, -1, 1);
+const driftY = clamp((shoulder.y - hip.y) * 2.2, -1, 1);
+const lock = Math.abs(driftX) < 0.12 && alignment >= 74 && stability >= 80;
+
+return { state, stability, alignment, lean, lock, driftX, driftY };
 }
 
 function computeReadout(l: any[]): Readout {
 return viewMode === "front" ? computeFrontReadout(l) : computeSideReadout(l);
 }
 
-function drawReferenceField(ctx: CanvasRenderingContext2D, w: number, h: number) {
-const frameW = w * 0.42;
+function drawReferenceField(ctx: CanvasRenderingContext2D, w: number, h: number, r: Readout) {
+const frameW = viewMode === "front" ? w * 0.42 : w * 0.32;
 const frameH = h * 0.65;
 
 const frameX = w / 2 - frameW / 2;
@@ -262,6 +283,38 @@ ctx.beginPath();
 ctx.moveTo(frameX, h / 2);
 ctx.lineTo(frameX + frameW, h / 2);
 ctx.stroke();
+
+const cx = w / 2;
+const cy = h / 2;
+const ringColor = r.lock ? "rgba(140,255,181,0.95)" : "rgba(255,255,255,0.16)";
+
+ctx.strokeStyle = ringColor;
+ctx.lineWidth = r.lock ? 4 : 2;
+ctx.beginPath();
+ctx.arc(cx, cy, 26, 0, Math.PI * 2);
+ctx.stroke();
+
+const dotX = cx + r.driftX * 110;
+const dotY = cy + r.driftY * 110;
+
+ctx.fillStyle = r.lock ? "#8CFFB5" : "#7AB8FF";
+ctx.beginPath();
+ctx.arc(dotX, dotY, 10, 0, Math.PI * 2);
+ctx.fill();
+
+ctx.fillStyle = "rgba(255,255,255,0.42)";
+ctx.font = "16px sans-serif";
+
+ctx.fillText("UP", cx - 12, frameY - 12);
+ctx.fillText("DOWN", cx - 24, frameY + frameH + 28);
+ctx.fillText("LEFT", frameX - 48, cy + 6);
+ctx.fillText("RIGHT", frameX + frameW + 14, cy + 6);
+
+if (r.lock) {
+ctx.fillStyle = "#8CFFB5";
+ctx.font = "700 24px sans-serif";
+ctx.fillText("LOCKED", cx - 46, frameY - 42);
+}
 }
 
 function drawOverlay(landmarks: any[] | null, r: Readout) {
@@ -294,7 +347,7 @@ ctx.moveTo(0, h / 2);
 ctx.lineTo(w, h / 2);
 ctx.stroke();
 
-drawReferenceField(ctx, w, h);
+drawReferenceField(ctx, w, h, r);
 
 const color = stateColor(r.state);
 
@@ -345,8 +398,8 @@ ctx.fill();
 }
 }
 
-ctx.fillStyle = "rgba(5,7,10,0.72)";
-ctx.fillRect(28, 28, 390, 166);
+ctx.fillStyle = "rgba(5,7,10,0.66)";
+ctx.fillRect(28, 28, 430, 176);
 
 ctx.fillStyle = "rgba(255,255,255,0.48)";
 ctx.font = "18px sans-serif";
@@ -359,6 +412,10 @@ ctx.fillText(r.state.toUpperCase(), 50, 104);
 ctx.fillStyle = "white";
 ctx.font = "24px sans-serif";
 ctx.fillText(`STABILITY ${Math.round(r.stability)}%`, 50, 142);
+
+ctx.fillStyle = "rgba(255,255,255,0.82)";
+ctx.font = "20px sans-serif";
+ctx.fillText(`DRIFT X ${r.driftX.toFixed(2)} / DRIFT Y ${r.driftY.toFixed(2)}`, 50, 170);
 }
 
 function tick() {
@@ -376,6 +433,17 @@ const landmarks = result?.landmarks?.[0] ?? null;
 let next = readout;
 if (landmarks) {
 next = computeReadout(landmarks);
+setReadout(next);
+} else {
+next = {
+state: "reframe",
+stability: 0,
+alignment: 0,
+lean: 0,
+lock: false,
+driftX: 0,
+driftY: 0,
+};
 setReadout(next);
 }
 
@@ -436,10 +504,10 @@ ref={canvasRef}
 className="pointer-events-none absolute inset-0 h-full w-full"
 />
 
-<div className="pointer-events-none absolute left-0 right-0 top-0 flex items-start justify-between bg-gradient-to-b from-black/70 via-black/25 to-transparent px-4 py-4 sm:px-6">
+<div className="pointer-events-none absolute left-0 right-0 top-0 flex items-start justify-between bg-gradient-to-b from-black/70 via-black/20 to-transparent px-4 py-4 sm:px-6">
 <div>
 <div className="text-[11px] tracking-[0.28em] text-white/42">AXIS CAMERA</div>
-<div className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+<div className="mt-1 text-xl font-semibold tracking-tight sm:text-2xl">
 Measurement Instrument
 </div>
 </div>
@@ -450,7 +518,7 @@ Measurement Instrument
 </div>
 </div>
 
-<div className="absolute left-4 top-24 z-20 flex gap-2 sm:left-6 sm:top-28">
+<div className="absolute left-4 top-20 z-20 flex flex-wrap gap-2 sm:left-6 sm:top-24">
 <button
 type="button"
 onClick={() => setViewMode("front")}
@@ -486,7 +554,7 @@ className="rounded-full border border-white/10 bg-black/30 px-4 py-2 text-sm tex
 </button>
 </div>
 
-<div className="pointer-events-none absolute bottom-0 left-0 right-0 grid gap-3 bg-gradient-to-t from-black/88 via-black/50 to-transparent px-4 pb-4 pt-24 sm:grid-cols-4 sm:px-6">
+<div className="pointer-events-none absolute bottom-0 left-0 right-0 grid gap-3 bg-gradient-to-t from-black/88 via-black/50 to-transparent px-4 pb-4 pt-24 sm:grid-cols-5 sm:px-6">
 <div className="rounded-2xl border border-white/10 bg-black/35 p-4 backdrop-blur-sm">
 <div className="text-[11px] tracking-[0.22em] text-white/45">STATE</div>
 <div className="mt-2 text-2xl font-semibold text-white">{readout.state}</div>
@@ -510,6 +578,13 @@ className="rounded-full border border-white/10 bg-black/30 px-4 py-2 text-sm tex
 <div className="text-[11px] tracking-[0.22em] text-white/45">LEAN</div>
 <div className="mt-2 text-2xl font-semibold text-white">
 {readout.lean.toFixed(2)}
+</div>
+</div>
+
+<div className="rounded-2xl border border-white/10 bg-black/35 p-4 backdrop-blur-sm">
+<div className="text-[11px] tracking-[0.22em] text-white/45">LOCK</div>
+<div className="mt-2 text-2xl font-semibold text-white">
+{readout.lock ? "LOCKED" : "LIVE"}
 </div>
 </div>
 </div>
