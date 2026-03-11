@@ -71,7 +71,7 @@ state: AxisState;
 
 const UI_REFRESH_MS = 220;
 const MAX_TRAIL_POINTS = 18;
-const MAX_EVENTS = 10;
+const MAX_EVENTS = 8;
 
 const SMOOTH_STABILITY = 0.12;
 const SMOOTH_TILT = 0.18;
@@ -197,6 +197,7 @@ const rafRef = useRef<number | null>(null);
 const mountedRef = useRef(false);
 const runningRef = useRef(false);
 const modelReadyRef = useRef(false);
+const facingModeRef = useRef<"user" | "environment">("user");
 
 const lastUiUpdateRef = useRef(0);
 const lastDetectionRef = useRef(0);
@@ -239,6 +240,20 @@ const [tiltLoad, setTiltLoad] = useState(7);
 const [decisionAction, setDecisionAction] = useState<DecisionAction>("PASS");
 const [events, setEvents] = useState<EventItem[]>([]);
 const [isPaused, setIsPaused] = useState(false);
+const [cameraLabel, setCameraLabel] = useState("Front");
+const [isFlipping, setIsFlipping] = useState(false);
+
+const stopStream = useCallback(() => {
+if (streamRef.current) {
+streamRef.current.getTracks().forEach((track) => track.stop());
+streamRef.current = null;
+}
+const video = videoRef.current;
+if (video) {
+video.pause();
+video.srcObject = null;
+}
+}, []);
 
 const loadPoseModel = useCallback(async () => {
 if (modelReadyRef.current || poseRef.current) return;
@@ -277,7 +292,7 @@ if (!video) throw new Error("Video missing");
 const constraints: MediaStreamConstraints = {
 audio: false,
 video: {
-facingMode: "user",
+facingMode: { ideal: facingModeRef.current },
 width: { ideal: 1080 },
 height: { ideal: 1920 },
 },
@@ -287,6 +302,7 @@ const stream = await navigator.mediaDevices.getUserMedia(constraints);
 streamRef.current = stream;
 video.srcObject = stream;
 await video.play();
+setCameraLabel(facingModeRef.current === "user" ? "Front" : "Back");
 }, []);
 
 const pushEvent = useCallback((item: Omit<EventItem, "id" | "ts">) => {
@@ -322,24 +338,12 @@ ctx.clearRect(0, 0, width, height);
 
 const cx = width / 2;
 const cy = height / 2;
-const pad = 36;
-const radius = Math.min(width, height) / 2 - pad;
-
-const glow = ctx.createRadialGradient(cx, cy, radius * 0.08, cx, cy, radius);
-glow.addColorStop(0, "rgba(90,255,170,0.22)");
-glow.addColorStop(0.45, "rgba(90,255,170,0.08)");
-glow.addColorStop(1, "rgba(90,255,170,0)");
-ctx.fillStyle = glow;
-ctx.fillRect(0, 0, width, height);
-
-ctx.save();
-ctx.beginPath();
-ctx.rect(pad, pad, width - pad * 2, height - pad * 2);
-ctx.clip();
+const pad = 0;
+const radius = Math.min(width, height) / 2 - 24;
 
 if (video && video.videoWidth && video.videoHeight) {
 const sourceAspect = video.videoWidth / video.videoHeight;
-const destAspect = (width - pad * 2) / (height - pad * 2);
+const destAspect = width / height;
 
 let sx = 0;
 let sy = 0;
@@ -356,57 +360,73 @@ sy = (video.videoHeight - sh) / 2;
 
 ctx.save();
 ctx.globalAlpha = 0.18;
-ctx.filter = "grayscale(1) blur(1px) contrast(1.1)";
-ctx.drawImage(video, sx, sy, sw, sh, pad, pad, width - pad * 2, height - pad * 2);
+ctx.filter = "grayscale(1) blur(0.6px) contrast(1.08) brightness(0.82)";
+if (facingModeRef.current === "user") {
+ctx.translate(width, 0);
+ctx.scale(-1, 1);
+}
+ctx.drawImage(video, sx, sy, sw, sh, 0, 0, width, height);
 ctx.restore();
 }
 
-ctx.strokeStyle = "rgba(255,255,255,0.08)";
+const glow = ctx.createRadialGradient(cx, cy, radius * 0.08, cx, cy, radius);
+glow.addColorStop(0, "rgba(120,255,175,0.18)");
+glow.addColorStop(0.45, "rgba(120,255,175,0.06)");
+glow.addColorStop(1, "rgba(120,255,175,0)");
+ctx.fillStyle = glow;
+ctx.fillRect(0, 0, width, height);
+
+ctx.save();
+
+ctx.strokeStyle = "rgba(255,255,255,0.06)";
 ctx.lineWidth = 1;
 
-for (let i = 1; i <= 4; i += 1) {
-const y = pad + ((height - pad * 2) / 5) * i;
+for (let i = 1; i <= 5; i += 1) {
+const y = (height / 6) * i;
 ctx.beginPath();
-ctx.moveTo(pad, y);
-ctx.lineTo(width - pad, y);
+ctx.moveTo(0, y);
+ctx.lineTo(width, y);
 ctx.stroke();
 }
 
-for (let i = 1; i <= 4; i += 1) {
-const x = pad + ((width - pad * 2) / 5) * i;
+for (let i = 1; i <= 5; i += 1) {
+const x = (width / 6) * i;
 ctx.beginPath();
-ctx.moveTo(x, pad);
-ctx.lineTo(x, height - pad);
+ctx.moveTo(x, 0);
+ctx.lineTo(x, height);
 ctx.stroke();
 }
 
-ctx.strokeStyle = "rgba(255,255,255,0.12)";
+ctx.strokeStyle = "rgba(255,255,255,0.11)";
 ctx.lineWidth = 1.5;
-[0.22, 0.42, 0.68].forEach((ratio) => {
+[0.18, 0.34, 0.56].forEach((ratio) => {
 ctx.beginPath();
 ctx.arc(cx, cy, radius * ratio, 0, Math.PI * 2);
 ctx.stroke();
 });
 
-ctx.strokeStyle = "rgba(255,255,255,0.16)";
+ctx.strokeStyle = "rgba(255,255,255,0.14)";
 ctx.lineWidth = 2;
 ctx.beginPath();
-ctx.moveTo(cx, pad);
-ctx.lineTo(cx, height - pad);
+ctx.moveTo(cx, 0);
+ctx.lineTo(cx, height);
 ctx.stroke();
 
 ctx.beginPath();
-ctx.moveTo(pad, cy);
-ctx.lineTo(width - pad, cy);
+ctx.moveTo(0, cy);
+ctx.lineTo(width, cy);
 ctx.stroke();
 
 const body = latestBodyRef.current;
 
 if (body) {
-const toCanvas = (p: { x: number; y: number }) => ({
-x: pad + p.x * (width - pad * 2),
-y: pad + p.y * (height - pad * 2),
-});
+const toCanvas = (p: { x: number; y: number }) => {
+const xBase = facingModeRef.current === "user" ? 1 - p.x : p.x;
+return {
+x: xBase * width,
+y: p.y * height,
+};
+};
 
 const nose = toCanvas(body.nose);
 const ls = toCanvas(body.ls);
@@ -416,7 +436,7 @@ const rh = toCanvas(body.rh);
 const center = toCanvas(body.center);
 
 ctx.save();
-ctx.strokeStyle = "rgba(126,255,176,0.95)";
+ctx.strokeStyle = "rgba(130,255,180,0.96)";
 ctx.lineWidth = 4;
 ctx.lineJoin = "round";
 ctx.lineCap = "round";
@@ -426,31 +446,31 @@ ctx.moveTo(ls.x, ls.y);
 ctx.quadraticCurveTo((ls.x + nose.x) / 2, (ls.y + nose.y) / 2, nose.x, nose.y);
 ctx.quadraticCurveTo((nose.x + rs.x) / 2, (nose.y + rs.y) / 2, rs.x, rs.y);
 ctx.lineTo(rh.x, rh.y);
-ctx.quadraticCurveTo(center.x, rh.y + 16, lh.x, lh.y);
+ctx.quadraticCurveTo(center.x, rh.y + 18, lh.x, lh.y);
 ctx.closePath();
 ctx.stroke();
 
-ctx.strokeStyle = "rgba(126,255,176,0.72)";
+ctx.strokeStyle = "rgba(130,255,180,0.72)";
 ctx.lineWidth = 3;
 ctx.beginPath();
 ctx.moveTo(ls.x, ls.y);
 ctx.lineTo(rs.x, rs.y);
 ctx.stroke();
 
-ctx.strokeStyle = "rgba(126,255,176,0.55)";
+ctx.strokeStyle = "rgba(130,255,180,0.52)";
 ctx.lineWidth = 2;
 ctx.beginPath();
 ctx.moveTo((ls.x + rs.x) / 2, (ls.y + rs.y) / 2);
 ctx.lineTo((lh.x + rh.x) / 2, (lh.y + rh.y) / 2);
 ctx.stroke();
 
-ctx.fillStyle = "rgba(126,255,176,0.95)";
+ctx.fillStyle = "rgba(130,255,180,0.95)";
 ctx.beginPath();
-ctx.arc(nose.x, nose.y, 7, 0, Math.PI * 2);
+ctx.arc(nose.x, nose.y, 6, 0, Math.PI * 2);
 ctx.fill();
 
 if (trailRef.current.length > 1) {
-ctx.strokeStyle = "rgba(126,255,176,0.55)";
+ctx.strokeStyle = "rgba(130,255,180,0.44)";
 ctx.lineWidth = 3;
 ctx.beginPath();
 trailRef.current.forEach((p, index) => {
@@ -461,11 +481,11 @@ else ctx.lineTo(c.x, c.y);
 ctx.stroke();
 }
 
-ctx.fillStyle = "rgba(126,255,176,1)";
-ctx.shadowColor = "rgba(126,255,176,0.65)";
-ctx.shadowBlur = 22;
+ctx.fillStyle = "rgba(130,255,180,1)";
+ctx.shadowColor = "rgba(130,255,180,0.7)";
+ctx.shadowBlur = 24;
 ctx.beginPath();
-ctx.arc(center.x, center.y, 10, 0, Math.PI * 2);
+ctx.arc(center.x, center.y, 9, 0, Math.PI * 2);
 ctx.fill();
 ctx.restore();
 }
@@ -639,6 +659,43 @@ setStatus("Camera failed");
 }
 }, [ensureCamera, loadPoseModel, phase, processFrame]);
 
+const flipCamera = useCallback(async () => {
+if (isFlipping) return;
+
+setIsFlipping(true);
+setStatus("Flipping camera");
+
+const wasLive = phase === "live";
+runningRef.current = false;
+
+if (rafRef.current) {
+cancelAnimationFrame(rafRef.current);
+rafRef.current = null;
+}
+
+stopStream();
+facingModeRef.current = facingModeRef.current === "user" ? "environment" : "user";
+
+try {
+await ensureCamera();
+
+if (wasLive) {
+runningRef.current = true;
+setPhase("live");
+setStatus("Motion Ready");
+rafRef.current = requestAnimationFrame(processFrame);
+} else {
+setStatus("Motion Ready");
+}
+} catch (error) {
+console.error(error);
+setPhase("idle");
+setStatus("Camera failed");
+} finally {
+setIsFlipping(false);
+}
+}, [ensureCamera, isFlipping, phase, processFrame, stopStream]);
+
 const resetSystem = useCallback(() => {
 trailRef.current = [];
 latestBodyRef.current = null;
@@ -679,53 +736,50 @@ mountedRef.current = false;
 runningRef.current = false;
 
 if (rafRef.current) cancelAnimationFrame(rafRef.current);
-if (streamRef.current) {
-streamRef.current.getTracks().forEach((track) => track.stop());
-streamRef.current = null;
-}
+stopStream();
 if (poseRef.current?.close) poseRef.current.close();
 poseRef.current = null;
 modelReadyRef.current = false;
 };
-}, [drawScope]);
+}, [drawScope, stopStream]);
 
 const stateColor = useMemo(() => {
 if (stateLabel === "ALIGNED") return "text-[#87f5a6]";
-if (stateLabel === "SHIFT") return "text-[#f0d46c]";
+if (stateLabel === "SHIFT") return "text-[#d7f06c]";
 if (stateLabel === "DROP") return "text-[#79b8ff]";
 return "text-white";
 }, [stateLabel]);
 
 return (
 <main className="min-h-screen bg-black text-white">
-<video
-ref={videoRef}
-playsInline
-muted
-autoPlay
-className="hidden"
-style={{ transform: "scaleX(-1)" }}
-/>
+<video ref={videoRef} playsInline muted autoPlay className="hidden" />
 
-<div className="mx-auto max-w-5xl px-4 pb-24 pt-10">
-<section className="rounded-[34px] border border-white/8 bg-white/[0.02] p-6 shadow-[0_0_60px_rgba(0,0,0,0.45)]">
-<div className="mb-5 flex items-center gap-3 text-[12px] uppercase tracking-[0.42em] text-white/55">
+<div className="mx-auto max-w-5xl px-4 pb-16 pt-6 md:pt-8">
+<section className="rounded-[34px] border border-white/8 bg-white/[0.02] p-5 shadow-[0_0_60px_rgba(0,0,0,0.45)] md:p-6">
+<div className="mb-4 flex items-center gap-3 text-[12px] uppercase tracking-[0.42em] text-white/55">
 <span className="h-3 w-3 rounded-full bg-[#87f5a6]" />
 AXIS RUN INSTRUMENT
 </div>
 
+<div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+<div>
 <h1 className="text-4xl font-semibold tracking-tight md:text-6xl">
 State.Window.Decision.
 </h1>
-
-<p className="mt-4 max-w-3xl text-lg text-white/65">
+<p className="mt-3 max-w-3xl text-lg text-white/65">
 Axis captures movement transitions automatically and logs live state events.
 </p>
+</div>
 
-<div className="mt-8 flex flex-wrap gap-4">
+<div className="text-right text-sm uppercase tracking-[0.28em] text-white/45">
+{cameraLabel} Camera
+</div>
+</div>
+
+<div className="mt-6 flex flex-wrap gap-3">
 <button
 onClick={() => setStatus("Motion Ready")}
-className="rounded-[24px] border border-white/80 px-7 py-4 text-2xl font-medium"
+className="rounded-[22px] border border-white/70 px-5 py-3 text-xl font-medium"
 >
 Motion Ready
 </button>
@@ -733,99 +787,96 @@ Motion Ready
 <button
 onClick={startSystem}
 disabled={phase === "starting"}
-className="rounded-[24px] bg-white px-7 py-4 text-2xl font-semibold text-black disabled:opacity-60"
+className="rounded-[22px] bg-white px-5 py-3 text-xl font-semibold text-black disabled:opacity-60"
 >
-{phase === "starting" ? "Starting..." : "Start"}
+{phase === "starting" ? "Starting..." : phase === "live" ? "Live" : "Start"}
+</button>
+
+<button
+onClick={flipCamera}
+disabled={isFlipping}
+className="rounded-[22px] border border-white/70 px-5 py-3 text-xl font-medium disabled:opacity-60"
+>
+{isFlipping ? "Flipping..." : "Flip Camera"}
 </button>
 
 <button
 onClick={() => setIsPaused((prev) => !prev)}
-className="rounded-[24px] border border-white/80 px-7 py-4 text-2xl font-medium"
+className="rounded-[22px] border border-white/70 px-5 py-3 text-xl font-medium"
 >
 {isPaused ? "Resume" : "Pause"}
 </button>
 
 <button
 onClick={resetSystem}
-className="rounded-[24px] border border-white/80 px-7 py-4 text-2xl font-medium"
+className="rounded-[22px] border border-white/70 px-5 py-3 text-xl font-medium"
 >
 Reset
 </button>
 </div>
 
-<div className="my-8 h-px bg-white/20" />
+<div className="my-6 h-px bg-white/16" />
 
-<section className="rounded-[34px] border border-white/8 bg-white/[0.015] p-5">
-<div className="mb-4 flex items-start justify-between">
+<section>
+<div className="mb-3 flex items-start justify-between gap-4">
 <div>
-<div className="text-2xl font-semibold">AXIS SCOPE</div>
-<div className="text-[12px] uppercase tracking-[0.36em] text-white/45">
+<div className="text-[34px] font-semibold leading-none md:text-[44px]">AXIS SCOPE</div>
+<div className="mt-1 text-[12px] uppercase tracking-[0.36em] text-white/42">
 LIVE STATE FIELD
 </div>
 </div>
 
-<div className={`text-3xl font-semibold ${stateColor}`}>{stateLabel}</div>
+<div className="text-right">
+<div className={`text-[32px] font-semibold leading-none md:text-[44px] ${stateColor}`}>
+{stateLabel}
+</div>
+<div className="mt-2 text-sm uppercase tracking-[0.28em] text-white/45">{status}</div>
+</div>
 </div>
 
-<div className="overflow-hidden rounded-[28px] border border-white/8 bg-black">
 <canvas
 ref={scopeCanvasRef}
-className="block h-[520px] w-full md:h-[700px]"
+className="block h-[56vh] min-h-[420px] w-full rounded-[28px] md:h-[68vh] md:min-h-[620px]"
 />
-</div>
 </section>
 
-<div className="mt-6 grid gap-6 md:grid-cols-3">
-<StatChartCard
-label="STABILITY"
+<div className="mt-5 grid gap-4 md:grid-cols-4">
+<CompactMetric
+label="Stability"
 value={`${stability}%`}
-sublabel={stability >= 84 ? "body ready" : "body moving"}
 tone="green"
-values={[74, 76, 81, 79, 83, 88, 88, 84, 83, 85, 80, 79, 75, 76, 74, 73, 74, 76]}
 />
-
-<StatChartCard
-label="DECISION WINDOW"
+<CompactMetric
+label="Decision Window"
 value={`${decisionWindow} ms`}
-sublabel="live window"
 tone="blue"
-values={[54, 54, 55, 56, 57, 59, 61, 63, 65, 66, 68, 69, 70, 71, 71, 71, 71, 70]}
 />
-
-<StatChartCard
-label="DECISION QUALITY"
+<CompactMetric
+label="Quality"
 value={decisionQuality}
-sublabel="state and action fit"
 tone="green"
-values={[83, 82, 82, 80, 80, 80, 79, 80, 80, 78, 78, 77, 78, 77, 79, 80, 81, 84]}
+/>
+<CompactMetric
+label="Tilt Load"
+value={`${tiltLoad.toFixed(1)}°`}
+tone="yellow"
 />
 </div>
 
-<div className="mt-6 grid gap-6 md:grid-cols-[1.25fr_0.9fr]">
-<section className="rounded-[34px] border border-white/8 bg-white/[0.015] p-6">
-<div className="mb-6 text-[12px] uppercase tracking-[0.42em] text-white/50">
-LIVE STATE
-</div>
-
-<LargeMetric label="Axis State" value={stateLabel} valueClass={stateColor} />
-<LargeMetric label="Tilt Load" value={`${tiltLoad.toFixed(1)}°`} />
-<LargeMetric label="Decision Action" value={decisionAction} />
-<LargeMetric label="Read" value={decisionQuality} valueClass="text-[#87f5a6]" />
-</section>
-
-<section className="rounded-[34px] border border-white/8 bg-white/[0.015] p-6">
-<div className="mb-6 text-[12px] uppercase tracking-[0.42em] text-white/50">
+<div className="mt-5 grid gap-5 md:grid-cols-[0.8fr_1.2fr]">
+<section className="rounded-[28px] border border-white/8 bg-white/[0.015] p-5">
+<div className="mb-5 text-[12px] uppercase tracking-[0.42em] text-white/50">
 DECISION INPUT
 </div>
 
-<div className="grid grid-cols-2 gap-4">
+<div className="grid grid-cols-2 gap-3">
 {(["SHOOT", "DRIVE", "PASS", "HOLD"] as DecisionAction[]).map((action) => {
 const active = decisionAction === action;
 return (
 <button
 key={action}
 onClick={() => setDecisionAction(action)}
-className={`rounded-[22px] border px-6 py-7 text-left text-2xl transition ${
+className={`rounded-[20px] border px-5 py-5 text-left text-[18px] transition md:text-[22px] ${
 active
 ? "border-white/80 bg-white/[0.03] text-white"
 : "border-white/10 bg-white/[0.02] text-white/70"
@@ -837,31 +888,30 @@ active
 })}
 </div>
 </section>
-</div>
 
-<section className="mt-6 rounded-[34px] border border-white/8 bg-white/[0.015] p-6">
-<div className="mb-6 flex items-center justify-between">
+<section className="rounded-[28px] border border-white/8 bg-white/[0.015] p-5">
+<div className="mb-5 flex items-center justify-between gap-4">
 <div className="text-[12px] uppercase tracking-[0.42em] text-white/50">
 EVENT HISTORY
 </div>
-<div className="text-xl text-white/45">{events.length} events</div>
+<div className="text-lg text-white/45">{events.length} events</div>
 </div>
 
-<div className="space-y-4">
+<div className="space-y-3">
 {events.length === 0 ? (
-<div className="rounded-[24px] border border-white/10 p-6 text-2xl text-white/50">
+<div className="rounded-[20px] border border-white/10 p-5 text-xl text-white/50">
 No events yet.
 </div>
 ) : (
 events.map((event) => (
 <div
 key={event.id}
-className="rounded-[24px] border border-white/10 bg-black/60 p-5"
+className="rounded-[20px] border border-white/10 bg-black/60 p-4"
 >
-<div className="flex items-center justify-between gap-4">
-<div className="flex items-center gap-3">
+<div className="flex items-start justify-between gap-4">
+<div className="flex min-w-0 items-start gap-3">
 <span
-className={`h-4 w-4 rounded-full ${
+className={`mt-1 h-3.5 w-3.5 rounded-full ${
 event.tone === "green"
 ? "bg-[#87f5a6]"
 : event.tone === "blue"
@@ -869,12 +919,18 @@ event.tone === "green"
 : "bg-[#f0d46c]"
 }`}
 />
-<div className="text-2xl font-semibold">{event.title}</div>
-<div className="text-lg text-white/45">{event.ts}</div>
+<div className="min-w-0">
+<div className="text-[20px] font-semibold leading-tight md:text-[24px]">
+{event.title}
+</div>
+<div className="mt-1 text-[15px] text-white/45 md:text-[17px]">
+{event.ts}
+</div>
+</div>
 </div>
 
 <span
-className={`rounded-full border px-4 py-2 text-xl font-medium ${toneClass(
+className={`shrink-0 rounded-full border px-4 py-2 text-[16px] font-medium md:text-[18px] ${toneClass(
 event.tone
 )}`}
 >
@@ -886,8 +942,10 @@ event.tone
 </span>
 </div>
 
-<div className="mt-3 text-xl text-white/55">{event.subtitle}</div>
-<div className="mt-3 text-xl text-white/60">
+<div className="mt-3 text-[18px] text-white/58 md:text-[22px]">
+{event.subtitle}
+</div>
+<div className="mt-2 text-[17px] text-white/60 md:text-[20px]">
 {event.value} &nbsp; Action {decisionAction}
 </div>
 </div>
@@ -895,107 +953,36 @@ event.tone
 )}
 </div>
 </section>
+</div>
 </section>
 </div>
 </main>
 );
 }
 
-function LargeMetric({
+function CompactMetric({
 label,
 value,
-valueClass = "text-white",
-}: {
-label: string;
-value: string;
-valueClass?: string;
-}) {
-return (
-<div className="mb-4 rounded-[24px] border border-white/80 px-6 py-6">
-<div className="mb-3 text-xl text-white/55">{label}</div>
-<div className={`text-5xl font-semibold ${valueClass}`}>{value}</div>
-</div>
-);
-}
-
-function StatChartCard({
-label,
-value,
-sublabel,
 tone,
-values,
 }: {
 label: string;
 value: string;
-sublabel: string;
 tone: "green" | "blue" | "yellow";
-values: number[];
 }) {
-return (
-<section className="rounded-[34px] border border-white/8 bg-white/[0.015] p-6">
-<div className="mb-3 flex items-start justify-between">
-<div className="text-[12px] uppercase tracking-[0.42em] text-white/50">{label}</div>
-<span
-className={`h-4 w-4 rounded-full ${
+const dotClass =
 tone === "green"
 ? "bg-[#87f5a6] shadow-[0_0_20px_rgba(135,245,166,0.65)]"
 : tone === "blue"
 ? "bg-[#79b8ff] shadow-[0_0_20px_rgba(121,184,255,0.65)]"
-: "bg-[#f0d46c] shadow-[0_0_20px_rgba(240,212,108,0.65)]"
-}`}
-/>
-</div>
-
-<div className="text-6xl font-semibold">{value}</div>
-
-<div className="mt-5 h-[180px]">
-<MiniLineChart
-values={values}
-color={tone === "green" ? "#87f5a6" : tone === "blue" ? "#79b8ff" : "#f0d46c"}
-/>
-</div>
-
-<div className="mt-4 text-2xl text-white/50">{sublabel}</div>
-</section>
-);
-}
-
-function MiniLineChart({
-values,
-color,
-}: {
-values: number[];
-color: string;
-}) {
-const width = 1000;
-const height = 240;
-const padX = 20;
-const padY = 24;
-
-const min = Math.min(...values);
-const max = Math.max(...values);
-const span = Math.max(max - min, 1);
-
-const points = values.map((v, i) => {
-const x = padX + (i / Math.max(values.length - 1, 1)) * (width - padX * 2);
-const y = height - padY - ((v - min) / span) * (height - padY * 2);
-return [x, y] as const;
-});
-
-const d = points
-.map((p, i) => `${i === 0 ? "M" : "L"} ${p[0].toFixed(1)} ${p[1].toFixed(1)}`)
-.join(" ");
+: "bg-[#d7f06c] shadow-[0_0_20px_rgba(215,240,108,0.55)]";
 
 return (
-<svg viewBox={`0 0 ${width} ${height}`} className="h-full w-full overflow-visible">
-<path
-d={d}
-fill="none"
-stroke={color}
-strokeWidth="10"
-strokeLinecap="round"
-strokeLinejoin="round"
-/>
-</svg>
+<section className="rounded-[24px] border border-white/8 bg-white/[0.015] p-4">
+<div className="mb-3 flex items-center justify-between gap-4">
+<div className="text-[11px] uppercase tracking-[0.34em] text-white/48">{label}</div>
+<span className={`h-3.5 w-3.5 rounded-full ${dotClass}`} />
+</div>
+<div className="text-[30px] font-semibold leading-none md:text-[38px]">{value}</div>
+</section>
 );
 }
