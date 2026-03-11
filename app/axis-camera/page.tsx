@@ -237,6 +237,8 @@ const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back
 const [recording, setRecording] = useState(false);
 const [phase, setPhase] = useState<SessionPhase>("idle");
 const [trackingLost, setTrackingLost] = useState(false);
+const [starting, setStarting] = useState(false);
+const [hasStartedOnce, setHasStartedOnce] = useState(false);
 
 const stabilityGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.stability) : "--"),
