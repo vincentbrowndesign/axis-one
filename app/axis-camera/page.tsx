@@ -11,7 +11,6 @@ forVisionTasks(basePath: string): Promise<unknown>;
 };
 
 type PoseLandmarkerInstance = {
-setOptions(options: Record<string, unknown>): Promise<void>;
 detectForVideo(video: HTMLVideoElement, timestampMs: number): PoseLandmarkerResult;
 close?: () => void;
 };
@@ -26,33 +25,53 @@ options: Record<string, unknown>
 };
 };
 
-type AxisState = "ENTER FRAME" | "LOCK" | "SHIFT" | "DROP" | "RECOVER";
-
+type AxisState = "ENTER FRAME" | "CENTER" | "SHIFT" | "DROP";
 type Grade = "A" | "B" | "C" | "D" | "F" | "--";
+
+type Point = {
+x: number;
+y: number;
+};
 
 type UiSnapshot = {
 score: number;
 stability: number;
 alignment: number;
 lean: number;
+centerScore: number;
 state: AxisState;
+reading: number;
+axisRecoveryMs: number | null;
 status: string;
 live: boolean;
 };
 
-type Point = { x: number; y: number };
+type RecoveryTracker = {
+active: boolean;
+startMs: number | null;
+holdStartMs: number | null;
+lastCompletedMs: number | null;
+};
 
-const UI_REFRESH_MS = 800;
-const MAX_HOLD_MS = 1200;
+const UI_REFRESH_MS = 220;
+const MAX_HOLD_MS = 1000;
 const HISTORY_SIZE = 18;
+
+const CENTER_THRESHOLD = 0.82;
+const SHIFT_THRESHOLD = 0.6;
+const LEAN_MAX = 0.25;
+const RECOVERY_HOLD_MS = 400;
 
 const INITIAL_UI: UiSnapshot = {
 score: 0,
 stability: 0,
 alignment: 0,
 lean: 0,
+centerScore: 0,
 state: "ENTER FRAME",
-status: "Ready",
+reading: 0,
+axisRecoveryMs: null,
+status: "Loading",
 live: false,
 };
 
@@ -75,20 +94,6 @@ if (score >= 84) return "B";
 if (score >= 74) return "C";
 if (score >= 64) return "D";
 return "F";
-}
-
-function mapScoreToState(
-stability: number,
-alignment: number,
-lean: number,
-previousState: AxisState
-): AxisState {
-if (stability === 0 && alignment === 0) return "ENTER FRAME";
-if (alignment >= 90 && stability >= 90 && lean <= 0.06) return "LOCK";
-if (alignment >= 80 && stability >= 80 && lean <= 0.12) return "RECOVER";
-if (lean >= 0.24 || alignment < 55 || stability < 55) return "DROP";
-if (lean >= 0.12 || alignment < 78 || stability < 78) return "SHIFT";
-return previousState === "DROP" ? "RECOVER" : "LOCK";
 }
 
 function computeShoulderData(
@@ -115,19 +120,41 @@ const torsoLength = Math.max(0.001, Math.sqrt(dx * dx + dy * dy));
 const lean = Math.abs(dx) / torsoLength;
 
 const shoulderSlope =
-Math.abs(leftShoulder.y - rightShoulder.y) / Math.max(0.001, Math.abs(leftShoulder.x - rightShoulder.x));
+Math.abs(leftShoulder.y - rightShoulder.y) /
+Math.max(0.001, Math.abs(leftShoulder.x - rightShoulder.x));
 
-const alignment = clamp(1 - lean * 2.2) * 100;
+const alignmentBase = clamp(1 - lean * 2.2) * 100;
 const levelnessPenalty = clamp(shoulderSlope * 2.6);
-const postureAlignment = clamp(alignment / 100 - levelnessPenalty * 0.35) * 100;
+const alignment = clamp(alignmentBase / 100 - levelnessPenalty * 0.35) * 100;
 
 return {
 shoulderCenter,
 hipCenter,
 lean,
 torsoLength,
-alignment: postureAlignment,
+alignment,
 };
+}
+
+function computeCenterScore(alignment: number, stability: number, lean: number) {
+const alignmentN = alignment / 100;
+const stabilityN = stability / 100;
+const leanN = 1 - clamp(lean / LEAN_MAX, 0, 1);
+
+return clamp(0.45 * alignmentN + 0.4 * stabilityN + 0.15 * leanN, 0, 1);
+}
+
+function stateFromCenterScore(centerScore: number): AxisState {
+if (centerScore >= CENTER_THRESHOLD) return "CENTER";
+if (centerScore >= SHIFT_THRESHOLD) return "SHIFT";
+return "DROP";
+}
+
+function gradeAccent(grade: Grade): "white" | "green" | "yellow" | "red" {
+if (grade === "A" || grade === "B") return "green";
+if (grade === "C" || grade === "D") return "yellow";
+if (grade === "F") return "red";
+return "white";
 }
 
 export default function AxisCameraPage() {
@@ -138,37 +165,54 @@ const streamRef = useRef<MediaStream | null>(null);
 const rafRef = useRef<number | null>(null);
 const poseRef = useRef<PoseLandmarkerInstance | null>(null);
 
-const lastUiUpdateRef = useRef<number>(0);
-const lastGoodDetectionRef = useRef<number>(0);
-const mountedRef = useRef<boolean>(false);
+const mountedRef = useRef(false);
+const modelReadyRef = useRef(false);
+const runningRef = useRef(false);
+const usingFrontCameraRef = useRef(true);
 
-const usingFrontCameraRef = useRef<boolean>(true);
-const runningRef = useRef<boolean>(false);
-const modelReadyRef = useRef<boolean>(false);
+const lastUiUpdateRef = useRef(0);
+const lastGoodDetectionRef = useRef(0);
+
+const recoveryRef = useRef<RecoveryTracker>({
+active: false,
+startMs: null,
+holdStartMs: null,
+lastCompletedMs: null,
+});
 
 const smoothedRef = useRef({
 score: 0,
 stability: 0,
 alignment: 0,
 lean: 0,
+centerScore: 0,
 state: "ENTER FRAME" as AxisState,
 });
 
-const historyRef = useRef<UiSnapshot[]>([]);
 const lastGoodGeometryRef = useRef<{
 shoulderCenter: Point;
 hipCenter: Point;
 bodyLineX: number;
+driftX: number;
+driftY: number;
 } | null>(null);
 
+const historyRef = useRef<UiSnapshot[]>([]);
+
 const [ui, setUi] = useState<UiSnapshot>(INITIAL_UI);
-const [status, setStatus] = useState<string>("Loading camera");
+const [status, setStatus] = useState("Loading camera");
 const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Front View");
-const [recording, setRecording] = useState<boolean>(false);
+const [recording, setRecording] = useState(false);
 
 const scoreGrade = useMemo(() => gradeFromScore(ui.score), [ui.score]);
-const stabilityGrade = useMemo(() => (ui.live ? gradeFromScore(ui.stability) : "--"), [ui.live, ui.stability]);
-const alignmentGrade = useMemo(() => (ui.live ? gradeFromScore(ui.alignment) : "--"), [ui.live, ui.alignment]);
+const stabilityGrade = useMemo(
+() => (ui.live ? gradeFromScore(ui.stability) : "--"),
+[ui.live, ui.stability]
+);
+const alignmentGrade = useMemo(
+() => (ui.live ? gradeFromScore(ui.alignment) : "--"),
+[ui.live, ui.alignment]
+);
 const leanGrade = useMemo(() => {
 if (!ui.live) return "--";
 if (ui.lean <= 0.05) return "A";
@@ -179,7 +223,16 @@ return "F";
 }, [ui.live, ui.lean]);
 
 const drawScope = useCallback(
-(geometry?: { shoulderCenter: Point; hipCenter: Point; bodyLineX: number } | null, live = false) => {
+(
+geometry?: {
+shoulderCenter: Point;
+hipCenter: Point;
+bodyLineX: number;
+driftX: number;
+driftY: number;
+} | null,
+live = false
+) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
 if (!canvas || !video) return;
@@ -197,82 +250,85 @@ canvas.height = height;
 
 ctx.clearRect(0, 0, width, height);
 
-// center instrument field
-const scopeSize = Math.min(width * 0.52, height * 0.34);
+const scopeHeight = Math.min(height * 0.34, width * 0.52);
 const cx = width / 2;
 const cy = height * 0.43;
-const radius = scopeSize / 2;
+const lineTop = cy - scopeHeight / 2;
+const lineBottom = cy + scopeHeight / 2;
 
 ctx.save();
-ctx.strokeStyle = "rgba(255,255,255,0.09)";
-ctx.lineWidth = 1.5;
 
-for (let i = 1; i <= 4; i += 1) {
+ctx.strokeStyle = "rgba(255,255,255,0.16)";
+ctx.lineWidth = 3;
 ctx.beginPath();
-ctx.arc(cx, cy, (radius / 4) * i, 0, Math.PI * 2);
-ctx.stroke();
-}
-
-ctx.beginPath();
-ctx.moveTo(cx - radius, cy);
-ctx.lineTo(cx + radius, cy);
+ctx.moveTo(cx, lineTop);
+ctx.lineTo(cx, lineBottom);
 ctx.stroke();
 
+ctx.strokeStyle = "rgba(255,255,255,0.12)";
+ctx.lineWidth = 2;
 ctx.beginPath();
-ctx.moveTo(cx, cy - radius);
-ctx.lineTo(cx, cy + radius);
+ctx.moveTo(cx - 34, cy);
+ctx.lineTo(cx + 34, cy);
 ctx.stroke();
 
-ctx.fillStyle = "rgba(255,255,255,0.14)";
 ctx.beginPath();
-ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+ctx.stroke();
+
+ctx.fillStyle = "rgba(255,255,255,0.22)";
+ctx.beginPath();
+ctx.arc(cx, cy, 4, 0, Math.PI * 2);
 ctx.fill();
 
 if (geometry && live) {
-const { shoulderCenter, hipCenter, bodyLineX } = geometry;
+const dotX = cx + geometry.driftX * 180;
+const dotY = cy + geometry.driftY * 120;
 
-const centerBodyX = ((shoulderCenter.x + hipCenter.x) / 2) * width;
-const centerBodyY = ((shoulderCenter.y + hipCenter.y) / 2) * height;
-const vectorX = clamp((centerBodyX - bodyLineX) / (width * 0.18), -1, 1) * (radius * 0.82);
-const vectorY = clamp((centerBodyY - cy) / (height * 0.2), -1, 1) * (radius * 0.7);
-
-const dotX = cx + vectorX;
-const dotY = cy + vectorY;
-
-const ringAlpha = clamp(ui.stability / 100, 0.18, 1);
-ctx.strokeStyle =
+const lineColor =
 ui.state === "DROP"
-? `rgba(255,102,102,${ringAlpha})`
+? "#ff6b6b"
 : ui.state === "SHIFT"
-? `rgba(255,196,92,${ringAlpha})`
-: `rgba(117,255,192,${ringAlpha})`;
+? "#ffc15c"
+: "#75ffc0";
 
+ctx.strokeStyle = lineColor;
 ctx.lineWidth = 3;
-ctx.beginPath();
-ctx.arc(cx, cy, radius * 0.72, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * clamp(ui.score / 100));
-ctx.stroke();
-
-ctx.strokeStyle = "rgba(255,255,255,0.24)";
-ctx.lineWidth = 2;
 ctx.beginPath();
 ctx.moveTo(cx, cy);
 ctx.lineTo(dotX, dotY);
 ctx.stroke();
 
-ctx.fillStyle =
-ui.state === "DROP" ? "#ff6b6b" : ui.state === "SHIFT" ? "#ffc15c" : "#75ffc0";
+const angle = Math.atan2(dotY - cy, dotX - cx);
+const arrowSize = 12;
+
 ctx.beginPath();
-ctx.arc(dotX, dotY, 8, 0, Math.PI * 2);
+ctx.moveTo(dotX, dotY);
+ctx.lineTo(
+dotX - arrowSize * Math.cos(angle - Math.PI / 6),
+dotY - arrowSize * Math.sin(angle - Math.PI / 6)
+);
+ctx.moveTo(dotX, dotY);
+ctx.lineTo(
+dotX - arrowSize * Math.cos(angle + Math.PI / 6),
+dotY - arrowSize * Math.sin(angle + Math.PI / 6)
+);
+ctx.stroke();
+
+ctx.fillStyle = lineColor;
+ctx.beginPath();
+ctx.arc(dotX, dotY, 10, 0, Math.PI * 2);
 ctx.fill();
 }
 
 ctx.restore();
 },
-[ui.score, ui.stability, ui.state]
+[ui.state]
 );
 
 const stopCamera = useCallback(() => {
 runningRef.current = false;
+
 if (rafRef.current) {
 cancelAnimationFrame(rafRef.current);
 rafRef.current = null;
@@ -292,19 +348,21 @@ try {
 stopCamera();
 setStatus("Starting camera");
 
-const constraints: MediaStreamConstraints = {
+const stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
 video: {
 facingMode: usingFrontCameraRef.current ? "user" : { ideal: "environment" },
 width: { ideal: 1080 },
 height: { ideal: 1920 },
 },
-};
+});
 
-const stream = await navigator.mediaDevices.getUserMedia(constraints);
 streamRef.current = stream;
 video.srcObject = stream;
 await video.play();
+
+video.width = video.videoWidth;
+video.height = video.videoHeight;
 
 runningRef.current = true;
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
@@ -358,23 +416,28 @@ const endSession = useCallback(() => {
 stopCamera();
 historyRef.current = [];
 lastGoodGeometryRef.current = null;
+
 smoothedRef.current = {
 score: 0,
 stability: 0,
 alignment: 0,
 lean: 0,
+centerScore: 0,
 state: "ENTER FRAME",
 };
+
+recoveryRef.current = {
+active: false,
+startMs: null,
+holdStartMs: null,
+lastCompletedMs: null,
+};
+
 setRecording(false);
 setStatus("Session ended");
 setUi({
-score: 0,
-stability: 0,
-alignment: 0,
-lean: 0,
-state: "ENTER FRAME",
+...INITIAL_UI,
 status: "Ready",
-live: false,
 });
 drawScope(null, false);
 }, [drawScope, stopCamera]);
@@ -390,11 +453,10 @@ const updateUiFromHistory = useCallback(
 (fallbackStatus?: string) => {
 const current = historyRef.current;
 if (!current.length) {
-const next = {
+setUi({
 ...INITIAL_UI,
 status: fallbackStatus ?? status,
-};
-setUi(next);
+});
 return;
 }
 
@@ -402,14 +464,20 @@ const score = average(current.map((item) => item.score));
 const stability = average(current.map((item) => item.stability));
 const alignment = average(current.map((item) => item.alignment));
 const lean = average(current.map((item) => item.lean));
+const centerScore = average(current.map((item) => item.centerScore));
+const reading = Math.round(score);
 const state = current[current.length - 1].state;
+const axisRecoveryMs = recoveryRef.current.lastCompletedMs;
 
 setUi({
 score: Math.round(score),
 stability: Math.round(stability),
 alignment: Math.round(alignment),
 lean: Number(lean.toFixed(2)),
+centerScore: Number(centerScore.toFixed(2)),
 state,
+reading,
+axisRecoveryMs,
 status: fallbackStatus ?? "Live",
 live: true,
 });
@@ -420,51 +488,97 @@ live: true,
 const processFrame = useCallback(() => {
 const video = videoRef.current;
 const pose = poseRef.current;
-if (!mountedRef.current || !runningRef.current || !video || !pose) {
-return;
-}
+
+if (!mountedRef.current || !runningRef.current || !video || !pose) return;
 
 const now = performance.now();
-
 let liveThisFrame = false;
 
 try {
 if (video.readyState >= 2) {
-const result = pose.detectForVideo(video, now);
-const landmarks = result.landmarks?.[0];
+let result: PoseLandmarkerResult | null = null;
+
+try {
+result = pose.detectForVideo(video, now);
+} catch (error) {
+console.warn("Pose read skipped", error);
+result = null;
+}
+
+const landmarks = result?.landmarks?.[0];
 
 if (landmarks && landmarks.length > 24) {
-const leftShoulder = landmarks[11];
-const rightShoulder = landmarks[12];
-const leftHip = landmarks[23];
-const rightHip = landmarks[24];
-
-const geometry = computeShoulderData(leftShoulder, rightShoulder, leftHip, rightHip);
+const geometry = computeShoulderData(landmarks[11], landmarks[12], landmarks[23], landmarks[24]);
 
 if (geometry) {
 const varianceLean = Math.abs(geometry.lean - smoothedRef.current.lean);
 const targetAlignment = geometry.alignment;
 const targetStability = clamp(1 - varianceLean * 10) * 100;
-const targetScore = clamp(targetAlignment / 100 * 0.58 + targetStability / 100 * 0.42) * 100;
+const targetCenterScore = computeCenterScore(
+targetAlignment,
+targetStability,
+geometry.lean
+);
+const targetScore = targetCenterScore * 100;
+const targetState = stateFromCenterScore(targetCenterScore);
 
 smoothedRef.current.alignment = lerp(smoothedRef.current.alignment, targetAlignment, 0.14);
 smoothedRef.current.stability = lerp(smoothedRef.current.stability, targetStability, 0.16);
 smoothedRef.current.lean = lerp(smoothedRef.current.lean, geometry.lean, 0.14);
-smoothedRef.current.score = lerp(smoothedRef.current.score, targetScore, 0.15);
-
-smoothedRef.current.state = mapScoreToState(
-smoothedRef.current.stability,
-smoothedRef.current.alignment,
-smoothedRef.current.lean,
-smoothedRef.current.state
+smoothedRef.current.centerScore = lerp(
+smoothedRef.current.centerScore,
+targetCenterScore,
+0.18
 );
+smoothedRef.current.score = lerp(smoothedRef.current.score, targetScore, 0.15);
+smoothedRef.current.state = stateFromCenterScore(smoothedRef.current.centerScore);
 
-const bodyLineX = ((geometry.shoulderCenter.x + geometry.hipCenter.x) / 2) * (video.videoWidth || 1);
+const prevState = historyRef.current.length
+? historyRef.current[historyRef.current.length - 1].state
+: "ENTER FRAME";
+
+if (
+!recoveryRef.current.active &&
+prevState === "CENTER" &&
+(smoothedRef.current.state === "SHIFT" || smoothedRef.current.state === "DROP")
+) {
+recoveryRef.current.active = true;
+recoveryRef.current.startMs = now;
+recoveryRef.current.holdStartMs = null;
+}
+
+if (recoveryRef.current.active) {
+if (smoothedRef.current.state === "CENTER") {
+if (recoveryRef.current.holdStartMs === null) {
+recoveryRef.current.holdStartMs = now;
+}
+
+if (
+recoveryRef.current.startMs !== null &&
+now - recoveryRef.current.holdStartMs >= RECOVERY_HOLD_MS
+) {
+recoveryRef.current.lastCompletedMs = now - recoveryRef.current.startMs;
+recoveryRef.current.active = false;
+recoveryRef.current.startMs = null;
+recoveryRef.current.holdStartMs = null;
+}
+} else {
+recoveryRef.current.holdStartMs = null;
+}
+}
+
+const bodyLineX =
+((geometry.shoulderCenter.x + geometry.hipCenter.x) / 2) * (video.videoWidth || 1);
+
+const driftX = clamp((geometry.hipCenter.x - 0.5) * 2.4, -1, 1);
+const driftY = clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1);
 
 lastGoodGeometryRef.current = {
 shoulderCenter: geometry.shoulderCenter,
 hipCenter: geometry.hipCenter,
 bodyLineX,
+driftX,
+driftY,
 };
 
 lastGoodDetectionRef.current = now;
@@ -475,7 +589,10 @@ score: smoothedRef.current.score,
 stability: smoothedRef.current.stability,
 alignment: smoothedRef.current.alignment,
 lean: smoothedRef.current.lean,
+centerScore: smoothedRef.current.centerScore,
 state: smoothedRef.current.state,
+reading: Math.round(smoothedRef.current.score),
+axisRecoveryMs: recoveryRef.current.lastCompletedMs,
 status: "Live",
 live: true,
 });
@@ -496,17 +613,18 @@ lastUiUpdateRef.current = now;
 if (liveThisFrame || held) {
 updateUiFromHistory("Live");
 } else {
-const previousState = smoothedRef.current.state === "DROP" ? "RECOVER" : "ENTER FRAME";
 setUi((prev) => ({
 ...prev,
-state: previousState,
+state: "ENTER FRAME",
 status: "Enter frame",
 live: false,
 }));
 }
 }
 
+if (runningRef.current) {
 rafRef.current = requestAnimationFrame(processFrame);
+}
 }, [drawScope, pushUiHistory, updateUiFromHistory]);
 
 const startSession = useCallback(async () => {
@@ -524,6 +642,12 @@ return;
 
 historyRef.current = [];
 lastUiUpdateRef.current = performance.now();
+
+if (rafRef.current) {
+cancelAnimationFrame(rafRef.current);
+rafRef.current = null;
+}
+
 setStatus("Live measurement active");
 setUi((prev) => ({
 ...prev,
@@ -531,7 +655,6 @@ status: "Live",
 live: true,
 }));
 
-if (rafRef.current) cancelAnimationFrame(rafRef.current);
 rafRef.current = requestAnimationFrame(processFrame);
 }, [loadPoseModel, processFrame, startCamera]);
 
@@ -542,7 +665,6 @@ await startSession();
 
 useEffect(() => {
 mountedRef.current = true;
-
 void startSession();
 
 return () => {
@@ -554,8 +676,11 @@ modelReadyRef.current = false;
 };
 }, [endSession, startSession]);
 
+const axisRecoveryLabel =
+ui.axisRecoveryMs === null ? "--" : `${(ui.axisRecoveryMs / 1000).toFixed(2)}s`;
+
 return (
-<main className="relative min-h-screen bg-black text-white overflow-hidden">
+<main className="relative min-h-screen overflow-hidden bg-black text-white">
 <video
 ref={videoRef}
 playsInline
@@ -565,7 +690,7 @@ className="absolute inset-0 h-full w-full object-cover"
 style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 />
 
-<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(24,33,100,0.30),rgba(0,0,0,0.72)_70%)]" />
+<div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(18,31,64,0.22),rgba(0,0,0,0.74)_70%)]" />
 
 <canvas
 ref={overlayRef}
@@ -575,30 +700,15 @@ style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 
 <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 pb-8 pt-5">
 <div className="flex items-start justify-between gap-4">
-<div className="rounded-[28px] border border-white/10 bg-black/26 px-5 py-4 backdrop-blur-xl">
-<div className="text-[11px] uppercase tracking-[0.4em] text-white/45">Axis Camera</div>
-<div className="mt-2 text-[20px] leading-none text-white/86">Measurement Instrument</div>
-<div
-className={`mt-2 text-[28px] font-semibold leading-none ${
-ui.state === "DROP"
-? "text-[#ff6b6b]"
-: ui.state === "SHIFT"
-? "text-[#ffc15c]"
-: ui.state === "RECOVER"
-? "text-[#ffd86b]"
-: ui.state === "LOCK"
-? "text-[#75ffc0]"
-: "text-white"
-}`}
->
-{ui.state}
-</div>
+<div className="rounded-[28px] border border-white/10 bg-black/28 px-5 py-4 backdrop-blur-xl">
+<div className="text-[12px] uppercase tracking-[0.42em] text-white/44">Axis Scope</div>
+<div className="mt-2 text-[18px] text-white/80">Measure your center.</div>
 </div>
 
-<div className="rounded-[28px] border border-white/10 bg-black/26 px-5 py-4 text-right backdrop-blur-xl">
+<div className="rounded-[28px] border border-white/10 bg-black/28 px-5 py-4 text-right backdrop-blur-xl">
 <div className="text-[11px] uppercase tracking-[0.4em] text-white/45">Status</div>
 <div className="mt-2 text-[18px] text-white/86">{status}</div>
-<div className="mt-2 text-[14px] text-white/55">Score {ui.score}</div>
+<div className="mt-2 text-[13px] text-white/55">{cameraLabel}</div>
 </div>
 </div>
 
@@ -606,28 +716,23 @@ ui.state === "DROP"
 
 <div className="rounded-[30px] border border-white/10 bg-black/28 p-4 backdrop-blur-2xl">
 <div className="grid grid-cols-2 gap-3">
-<MetricCard label="Axis Score" value={String(ui.score)} accent="white" />
-<MetricCard label="Stability" value={stabilityGrade} accent={gradeAccent(stabilityGrade)} />
-<MetricCard label="Alignment" value={alignmentGrade} accent={gradeAccent(alignmentGrade)} />
-<MetricCard label="Lean" value={leanGrade} accent={gradeAccent(leanGrade)} />
+<MetricCard label="State" value={ui.state} accent={stateAccent(ui.state)} textSize="text-[34px]" />
+<MetricCard label="Reading" value={String(ui.reading)} accent="white" textSize="text-[52px]" />
+<MetricCard label="Axis Recovery" value={axisRecoveryLabel} accent="green" textSize="text-[36px]" />
+<MetricCard label="Stability" value={stabilityGrade} accent={gradeAccent(stabilityGrade)} textSize="text-[52px]" />
+</div>
+
+<div className="mt-3 grid grid-cols-2 gap-3">
+<SmallMetric label="Alignment" value={alignmentGrade} accent={gradeAccent(alignmentGrade)} />
+<SmallMetric label="Lean" value={leanGrade} accent={gradeAccent(leanGrade)} />
 </div>
 
 <div className="mt-4 grid grid-cols-3 gap-3">
 <ControlButton onClick={endSession}>End Session</ControlButton>
 <ControlButton onClick={flipCamera}>Flip Camera</ControlButton>
-<ControlButton
-onClick={() => setRecording((prev) => !prev)}
-active={recording}
->
+<ControlButton onClick={() => setRecording((prev) => !prev)} active={recording}>
 {recording ? "Recording" : "Record"}
 </ControlButton>
-</div>
-
-<div className="mt-4 flex items-center justify-between rounded-[24px] border border-white/10 bg-black/35 px-4 py-3">
-<div className="text-[12px] uppercase tracking-[0.28em] text-white/42">{cameraLabel}</div>
-<div className="text-[13px] text-white/55">
-Instrument underneath. Product on top.
-</div>
 </div>
 </div>
 </div>
@@ -636,6 +741,34 @@ Instrument underneath. Product on top.
 }
 
 function MetricCard({
+label,
+value,
+accent,
+textSize,
+}: {
+label: string;
+value: string;
+accent: "white" | "green" | "yellow" | "red";
+textSize: string;
+}) {
+const colorClass =
+accent === "green"
+? "text-[#75ffc0]"
+: accent === "yellow"
+? "text-[#ffc15c]"
+: accent === "red"
+? "text-[#ff7c7c]"
+: "text-white";
+
+return (
+<div className="rounded-[24px] border border-white/10 bg-white/[0.04] px-5 py-4">
+<div className="text-[11px] uppercase tracking-[0.35em] text-white/42">{label}</div>
+<div className={`mt-3 ${textSize} font-semibold leading-none ${colorClass}`}>{value}</div>
+</div>
+);
+}
+
+function SmallMetric({
 label,
 value,
 accent,
@@ -654,9 +787,9 @@ accent === "green"
 : "text-white";
 
 return (
-<div className="rounded-[24px] border border-white/10 bg-white/[0.04] px-5 py-4">
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/42">{label}</div>
-<div className={`mt-3 text-[48px] font-semibold leading-none ${colorClass}`}>{value}</div>
+<div className="rounded-[22px] border border-white/10 bg-white/[0.035] px-4 py-3">
+<div className="text-[11px] uppercase tracking-[0.32em] text-white/42">{label}</div>
+<div className={`mt-2 text-[30px] font-semibold leading-none ${colorClass}`}>{value}</div>
 </div>
 );
 }
@@ -684,9 +817,9 @@ active
 );
 }
 
-function gradeAccent(grade: Grade): "white" | "green" | "yellow" | "red" {
-if (grade === "A" || grade === "B") return "green";
-if (grade === "C" || grade === "D") return "yellow";
-if (grade === "F") return "red";
+function stateAccent(state: AxisState): "white" | "green" | "yellow" | "red" {
+if (state === "CENTER") return "green";
+if (state === "SHIFT") return "yellow";
+if (state === "DROP") return "red";
 return "white";
 }
