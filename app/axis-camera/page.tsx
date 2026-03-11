@@ -65,21 +65,21 @@ velocity: number;
 state: Exclude<AxisState, "LOST" | "ENTER FRAME">;
 };
 
-const UI_REFRESH_MS = 220;
+const UI_REFRESH_MS = 180;
 const MAX_TRAIL_POINTS = 18;
-const MAX_EVENTS = 8;
+const MAX_EVENTS = 6;
 
 const SMOOTH_STABILITY = 0.18;
-const SMOOTH_TILT = 0.16;
+const SMOOTH_TILT = 0.12;
 const SMOOTH_WINDOW = 0.12;
-const SMOOTH_VELOCITY = 0.2;
+const SMOOTH_VELOCITY = 0.16;
+const SMOOTH_QUALITY = 0.14;
 
-const ALIGNED_THRESHOLD = 0.82;
-const SHIFT_THRESHOLD = 0.58;
-const STATE_HOLD_MS = 240;
-const LOST_GRACE_MS = 1500;
-const SIGNAL_LOST_EVENT_MS = 2200;
-const DRIFT_WARNING_THRESHOLD = 0.0014;
+const ALIGNED_THRESHOLD = 0.83;
+const SHIFT_THRESHOLD = 0.6;
+const STATE_HOLD_MS = 220;
+const LOST_GRACE_MS = 1200;
+const LOST_EVENT_MS = 2200;
 const EVENT_COOLDOWN_MS = 1800;
 
 function clamp(value: number, min = 0, max = 1) {
@@ -116,10 +116,30 @@ second: "2-digit",
 });
 }
 
-function gradeQuality(score: number): string {
+function qualityLabel(score: number) {
 if (score >= 85) return "GOOD";
 if (score >= 70) return "OK";
 return "LOW";
+}
+
+function qualityTone(score: number): EventTone {
+if (score >= 85) return "green";
+if (score >= 70) return "yellow";
+return "blue";
+}
+
+function toneClass(tone: EventTone) {
+if (tone === "green") return "text-[#7CFF9E] border-[#7CFF9E]/20 bg-[#7CFF9E]/8";
+if (tone === "blue") return "text-[#59A8FF] border-[#59A8FF]/20 bg-[#59A8FF]/8";
+if (tone === "yellow") return "text-[#E8C75C] border-[#E8C75C]/20 bg-[#E8C75C]/8";
+return "text-white/72 border-white/10 bg-white/[0.04]";
+}
+
+function stateTone(state: AxisState): EventTone {
+if (state === "ALIGNED") return "green";
+if (state === "SHIFT") return "yellow";
+if (state === "DROP") return "blue";
+return "gray";
 }
 
 function computeBodyMetrics(
@@ -144,13 +164,10 @@ const dy = shoulderMid.y - hipMid.y;
 const torsoLength = Math.max(Math.sqrt(dx * dx + dy * dy), 0.001);
 
 const lean = Math.abs(dx) / torsoLength;
-const shoulderSlope =
-Math.abs(ls.y - rs.y) / Math.max(Math.abs(ls.x - rs.x), 0.001);
+const shoulderSlope = Math.abs(ls.y - rs.y) / Math.max(Math.abs(ls.x - rs.x), 0.001);
 
-const tiltDegrees = Math.min(
-25,
-Math.abs(Math.atan2(ls.y - rs.y, rs.x - ls.x)) * (180 / Math.PI)
-);
+let tiltDegrees = Math.abs(Math.atan2(ls.y - rs.y, rs.x - ls.x)) * (180 / Math.PI);
+tiltDegrees = Math.min(tiltDegrees, 45);
 
 const center = {
 x: hipMid.x,
@@ -162,13 +179,13 @@ if (previousCenter && dtMs > 0) {
 velocity = distance2D(center, previousCenter) / dtMs;
 }
 
-const alignment = clamp(1 - lean * 1.45 - shoulderSlope * 0.58);
+const alignment = clamp(1 - lean * 1.45 - shoulderSlope * 0.62);
 const velocityPenalty = clamp(velocity * 22, 0, 1);
-const leanPenalty = clamp(lean * 0.9, 0, 1);
-const tiltPenalty = clamp((tiltDegrees / 25) * 0.55, 0, 1);
+const leanPenalty = clamp(lean * 0.95, 0, 1);
+const tiltPenalty = clamp((tiltDegrees / 30) * 0.45, 0, 1);
 
 const stability = clamp(
-1 - (velocityPenalty * 0.6 + leanPenalty * 0.25 + tiltPenalty * 0.15),
+1 - (velocityPenalty * 0.6 + leanPenalty * 0.22 + tiltPenalty * 0.18),
 0,
 1
 );
@@ -199,13 +216,6 @@ state,
 };
 }
 
-function toneClass(tone: EventTone) {
-if (tone === "green") return "text-[#5CFF9A] border-[#5CFF9A]/20 bg-[#5CFF9A]/8";
-if (tone === "blue") return "text-[#5FB3FF] border-[#5FB3FF]/20 bg-[#5FB3FF]/8";
-if (tone === "yellow") return "text-[#FFD95A] border-[#FFD95A]/20 bg-[#FFD95A]/8";
-return "text-white/70 border-white/10 bg-white/[0.04]";
-}
-
 export default function AxisCameraPage() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const fieldCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -226,8 +236,8 @@ const previousCenterRef = useRef<{ x: number; y: number } | null>(null);
 const lastEventAtRef = useRef<Record<string, number>>({});
 
 const smoothedRef = useRef({
-stability: 74,
-tilt: 6,
+stability: 76,
+tilt: 8,
 windowMs: 640,
 quality: 82,
 velocity: 0,
@@ -236,7 +246,7 @@ velocity: 0,
 const publishedRef = useRef({
 stability: 76,
 windowMs: 640,
-tilt: 7,
+tilt: 8,
 quality: 82,
 velocity: 0,
 });
@@ -261,7 +271,7 @@ const [stateLabel, setStateLabel] = useState<AxisState>("ENTER FRAME");
 const [stability, setStability] = useState(76);
 const [windowMs, setWindowMs] = useState(640);
 const [quality, setQuality] = useState("GOOD");
-const [tilt, setTilt] = useState(7);
+const [tilt, setTilt] = useState(8);
 const [velocityRead, setVelocityRead] = useState(0);
 const [events, setEvents] = useState<EventItem[]>([]);
 const [isPaused, setIsPaused] = useState(false);
@@ -273,6 +283,7 @@ if (streamRef.current) {
 streamRef.current.getTracks().forEach((track) => track.stop());
 streamRef.current = null;
 }
+
 const video = videoRef.current;
 if (video) {
 video.pause();
@@ -327,6 +338,7 @@ const stream = await navigator.mediaDevices.getUserMedia(constraints);
 streamRef.current = stream;
 video.srcObject = stream;
 await video.play();
+
 setCameraLabel(facingModeRef.current === "user" ? "Front" : "Back");
 }, []);
 
@@ -351,7 +363,7 @@ ts: nowTime(),
 );
 }, []);
 
-const drawField = useCallback(() => {
+const drawInstrument = useCallback(() => {
 const canvas = fieldCanvasRef.current;
 const video = videoRef.current;
 if (!canvas) return;
@@ -401,54 +413,56 @@ ctx.restore();
 
 const cx = width / 2;
 const cy = height / 2;
-const radius = Math.min(width, height) / 2 - 24;
 
 ctx.save();
 
+// field grid
 ctx.strokeStyle = "rgba(255,255,255,0.04)";
 ctx.lineWidth = 1;
-for (let i = 1; i <= 5; i += 1) {
-const y = (height / 6) * i;
+
+for (let i = 1; i <= 7; i += 1) {
+const y = (height / 8) * i;
 ctx.beginPath();
 ctx.moveTo(0, y);
 ctx.lineTo(width, y);
 ctx.stroke();
 }
-for (let i = 1; i <= 5; i += 1) {
-const x = (width / 6) * i;
+
+for (let i = 1; i <= 7; i += 1) {
+const x = (width / 8) * i;
 ctx.beginPath();
 ctx.moveTo(x, 0);
 ctx.lineTo(x, height);
 ctx.stroke();
 }
 
-ctx.strokeStyle = "rgba(255,255,255,0.08)";
-ctx.lineWidth = 1.2;
-[0.18, 0.34, 0.56].forEach((ratio) => {
-ctx.beginPath();
-ctx.arc(cx, cy, radius * ratio, 0, Math.PI * 2);
-ctx.stroke();
-});
+// main instrument marks
+ctx.strokeStyle = "rgba(255,255,255,0.12)";
+ctx.lineWidth = 1.8;
 
-// broken reticle
-const gap = 56;
-ctx.strokeStyle = "rgba(255,255,255,0.11)";
-ctx.lineWidth = 2;
 ctx.beginPath();
 ctx.moveTo(cx, 0);
-ctx.lineTo(cx, cy - gap);
-ctx.stroke();
-ctx.beginPath();
-ctx.moveTo(cx, cy + gap);
 ctx.lineTo(cx, height);
 ctx.stroke();
+
 ctx.beginPath();
 ctx.moveTo(0, cy);
-ctx.lineTo(cx - gap, cy);
-ctx.stroke();
-ctx.beginPath();
-ctx.moveTo(cx + gap, cy);
 ctx.lineTo(width, cy);
+ctx.stroke();
+
+// center marker, not scope circles
+const mark = 18;
+ctx.strokeStyle = "rgba(255,255,255,0.08)";
+ctx.lineWidth = 1.2;
+
+ctx.beginPath();
+ctx.moveTo(cx - mark, cy);
+ctx.lineTo(cx + mark, cy);
+ctx.stroke();
+
+ctx.beginPath();
+ctx.moveTo(cx, cy - mark);
+ctx.lineTo(cx, cy + mark);
 ctx.stroke();
 
 const body = latestBodyRef.current;
@@ -466,34 +480,43 @@ const center = toCanvas(body.center);
 
 ctx.save();
 
-ctx.strokeStyle = "rgba(92,255,154,0.58)";
-ctx.lineWidth = 2.6;
-ctx.beginPath();
-ctx.moveTo(ls.x, ls.y);
-ctx.lineTo(rs.x, rs.y);
-ctx.stroke();
+const isAligned = stateStableRef.current.current === "ALIGNED";
+const isShift = stateStableRef.current.current === "SHIFT";
+const stroke =
+isAligned ? "rgba(124,255,158,0.88)" : isShift ? "rgba(232,199,92,0.86)" : "rgba(89,168,255,0.86)";
 
-ctx.strokeStyle = "rgba(92,255,154,0.34)";
-ctx.lineWidth = 1.8;
+// center spine
+ctx.strokeStyle = stroke;
+ctx.lineWidth = 2.2;
 ctx.beginPath();
 ctx.moveTo(shoulderMid.x, shoulderMid.y);
 ctx.lineTo(hipMid.x, hipMid.y);
 ctx.stroke();
 
+// shoulder bar
+ctx.lineWidth = 4;
+ctx.beginPath();
+ctx.moveTo(ls.x, ls.y);
+ctx.lineTo(rs.x, rs.y);
+ctx.stroke();
+
+// trail line
 if (trailRef.current.length > 1) {
+ctx.beginPath();
 trailRef.current.forEach((p, i) => {
 const c = toCanvas(p);
-const alpha = (i + 1) / trailRef.current.length;
-ctx.fillStyle = `rgba(92,255,154,${alpha * 0.24})`;
-ctx.beginPath();
-ctx.arc(c.x, c.y, 2 + alpha * 1.5, 0, Math.PI * 2);
-ctx.fill();
+if (i === 0) ctx.moveTo(c.x, c.y);
+else ctx.lineTo(c.x, c.y);
 });
+ctx.strokeStyle = stroke.replace("0.86", "0.2").replace("0.88", "0.2");
+ctx.lineWidth = 2;
+ctx.stroke();
 }
 
-ctx.fillStyle = "rgba(92,255,154,1)";
+// center dot
+ctx.fillStyle = stroke.replace("0.86", "1").replace("0.88", "1");
 ctx.beginPath();
-ctx.arc(center.x, center.y, 6, 0, Math.PI * 2);
+ctx.arc(center.x, center.y, 7, 0, Math.PI * 2);
 ctx.fill();
 
 ctx.restore();
@@ -532,22 +555,16 @@ previousCenterRef.current = body.center;
 smoothedRef.current.velocity = lerp(smoothedRef.current.velocity, body.velocity, SMOOTH_VELOCITY);
 smoothedRef.current.stability = lerp(smoothedRef.current.stability, body.stability * 100, SMOOTH_STABILITY);
 smoothedRef.current.tilt = lerp(smoothedRef.current.tilt, body.tiltDegrees, SMOOTH_TILT);
-smoothedRef.current.windowMs = lerp(
-smoothedRef.current.windowMs,
-540 + body.centerScore * 240,
-SMOOTH_WINDOW
-);
-smoothedRef.current.quality = lerp(
-smoothedRef.current.quality,
-body.centerScore * 100,
-0.14
-);
+smoothedRef.current.windowMs = lerp(smoothedRef.current.windowMs, 540 + body.centerScore * 240, SMOOTH_WINDOW);
+smoothedRef.current.quality = lerp(smoothedRef.current.quality, body.centerScore * 100, SMOOTH_QUALITY);
 
 const nextState = body.state;
 const stable = stateStableRef.current;
 
 if (stable.current === "ENTER FRAME" || stable.current === "LOST") {
 stable.current = nextState;
+stable.pending = null;
+stable.since = null;
 } else if (nextState !== stable.current) {
 if (stable.pending !== nextState) {
 stable.pending = nextState;
@@ -574,7 +591,7 @@ publishedRef.current.stability = pStability;
 if (shouldUpdateNumber(pTilt, publishedRef.current.tilt, 0.2)) {
 publishedRef.current.tilt = pTilt;
 }
-if (shouldUpdateNumber(pWindow, publishedRef.current.windowMs, 2)) {
+if (shouldUpdateNumber(pWindow, publishedRef.current.windowMs, 3)) {
 publishedRef.current.windowMs = pWindow;
 }
 if (shouldUpdateNumber(pQuality, publishedRef.current.quality, 1)) {
@@ -589,12 +606,10 @@ if (trailRef.current.length > MAX_TRAIL_POINTS) trailRef.current.shift();
 
 const stableState = stable.current;
 if (stableState !== previousStateRef.current) {
-pushEvent(stableState, `Velocity ${pVelocity.toFixed(4)}`, stableState === "ALIGNED" ? "green" : stableState === "SHIFT" ? "yellow" : "blue");
-previousStateRef.current = stableState;
+if (stableState !== "ENTER FRAME" && stableState !== "LOST") {
+pushEvent(stableState, `${stableState === "ALIGNED" ? "Window" : stableState === "SHIFT" ? "Tilt" : "Velocity"} ${stableState === "ALIGNED" ? pWindow + " ms" : stableState === "SHIFT" ? pTilt.toFixed(1) + "°" : pVelocity.toFixed(4)}`, stateTone(stableState));
 }
-
-if (pVelocity >= DRIFT_WARNING_THRESHOLD && stableState !== "DROP") {
-pushEvent("DRIFT WARNING", `Velocity ${pVelocity.toFixed(4)}`, "blue");
+previousStateRef.current = stableState;
 }
 
 if (now - lastUiUpdateRef.current >= UI_REFRESH_MS) {
@@ -603,7 +618,7 @@ setStateLabel(stableState);
 setStability(publishedRef.current.stability);
 setTilt(publishedRef.current.tilt);
 setWindowMs(publishedRef.current.windowMs);
-setQuality(gradeQuality(publishedRef.current.quality));
+setQuality(qualityLabel(publishedRef.current.quality));
 setVelocityRead(publishedRef.current.velocity);
 setStatus("Motion Ready");
 }
@@ -620,17 +635,18 @@ setStateLabel("LOST");
 setStatus("Signal lost");
 }
 }
-if (lostFor > SIGNAL_LOST_EVENT_MS) {
+
+if (lostFor > LOST_EVENT_MS) {
 pushEvent("SIGNAL LOST", "Tracking lost", "gray");
 }
 }
 
-drawField();
+drawInstrument();
 
 if (runningRef.current) {
 rafRef.current = requestAnimationFrame(processFrame);
 }
-}, [drawField, isPaused, pushEvent]);
+}, [drawInstrument, isPaused, pushEvent]);
 
 const startSystem = useCallback(async () => {
 if (phase === "starting" || phase === "live") return;
@@ -663,6 +679,7 @@ setStatus("Flipping camera");
 
 const wasLive = phase === "live";
 runningRef.current = false;
+
 if (rafRef.current) {
 cancelAnimationFrame(rafRef.current);
 rafRef.current = null;
@@ -673,6 +690,7 @@ facingModeRef.current = facingModeRef.current === "user" ? "environment" : "user
 
 try {
 await ensureCamera();
+
 if (wasLive) {
 runningRef.current = true;
 setPhase("live");
@@ -704,14 +722,14 @@ since: null,
 publishedRef.current = {
 stability: 76,
 windowMs: 640,
-tilt: 7,
+tilt: 8,
 quality: 82,
 velocity: 0,
 };
 smoothedRef.current = {
-stability: 74,
-tilt: 6,
+stability: 76,
 windowMs: 640,
+tilt: 8,
 quality: 82,
 velocity: 0,
 };
@@ -720,16 +738,16 @@ setEvents([]);
 setStateLabel("ENTER FRAME");
 setStability(76);
 setWindowMs(640);
-setQuality("GOOD");
-setTilt(7);
+setTilt(8);
 setVelocityRead(0);
+setQuality("GOOD");
 setStatus("Motion Ready");
-drawField();
-}, [drawField]);
+drawInstrument();
+}, [drawInstrument]);
 
 useEffect(() => {
 mountedRef.current = true;
-drawField();
+drawInstrument();
 
 return () => {
 mountedRef.current = false;
@@ -740,12 +758,12 @@ if (poseRef.current?.close) poseRef.current.close();
 poseRef.current = null;
 modelReadyRef.current = false;
 };
-}, [drawField, stopStream]);
+}, [drawInstrument, stopStream]);
 
 const stateColor = useMemo(() => {
-if (stateLabel === "ALIGNED") return "text-[#5CFF9A]";
-if (stateLabel === "SHIFT") return "text-[#FFD95A]";
-if (stateLabel === "DROP") return "text-[#5FB3FF]";
+if (stateLabel === "ALIGNED") return "text-[#7CFF9E]";
+if (stateLabel === "SHIFT") return "text-[#E8C75C]";
+if (stateLabel === "DROP") return "text-[#59A8FF]";
 if (stateLabel === "LOST") return "text-white/70";
 return "text-white";
 }, [stateLabel]);
@@ -755,13 +773,15 @@ return (
 <video ref={videoRef} playsInline muted autoPlay className="hidden" />
 
 <div className="mx-auto max-w-6xl px-3 pb-10 pt-3 md:px-4 md:pt-4">
-<section className="overflow-hidden rounded-[30px] border border-white/8 bg-[#0A0A0A] shadow-[0_0_80px_rgba(0,0,0,0.55)]">
+<section className="overflow-hidden rounded-[28px] border border-white/8 bg-[#0A0A0A] shadow-[0_0_80px_rgba(0,0,0,0.55)]">
 <div className="flex items-center justify-between gap-4 border-b border-white/8 px-4 py-3 md:px-5">
 <div>
 <div className="text-[11px] uppercase tracking-[0.42em] text-white/46">
 AXIS INSTRUMENT
 </div>
-<div className="mt-1 text-[18px] font-semibold md:text-[22px]">AXIS</div>
+<div className="mt-1 text-[18px] font-semibold md:text-[22px]">
+MEASURE YOUR CENTER
+</div>
 </div>
 
 <div className="text-right">
@@ -777,7 +797,7 @@ AXIS INSTRUMENT
 <div className="relative">
 <canvas
 ref={fieldCanvasRef}
-className="block h-[72vh] min-h-[540px] w-full md:h-[78vh] md:min-h-[780px]"
+className="block h-[72vh] min-h-[540px] w-full md:h-[78vh] md:min-h-[760px]"
 />
 
 <div className="pointer-events-none absolute inset-x-0 top-0 flex justify-between px-4 pt-4 md:px-5">
@@ -789,7 +809,7 @@ className="block h-[72vh] min-h-[540px] w-full md:h-[78vh] md:min-h-[780px]"
 </div>
 </div>
 
-<div className="absolute inset-x-0 bottom-0 border-t border-white/8 bg-[rgba(8,8,8,0.86)] px-4 py-3 backdrop-blur-md md:px-5">
+<div className="absolute inset-x-0 bottom-0 border-t border-white/8 bg-[rgba(8,8,8,0.88)] px-4 py-3 backdrop-blur-md md:px-5">
 <div className="grid grid-cols-2 gap-x-6 gap-y-3 md:grid-cols-5">
 <RailMetric label="State" value={stateLabel} valueClass={stateColor} />
 <RailMetric label="Stability" value={`${stability}%`} />
@@ -868,17 +888,15 @@ className="rounded-[18px] border border-white/10 bg-[#0C0C0C] p-4"
 <span
 className={`h-3 w-3 rounded-full ${
 event.tone === "green"
-? "bg-[#5CFF9A]"
+? "bg-[#7CFF9E]"
 : event.tone === "blue"
-? "bg-[#5FB3FF]"
+? "bg-[#59A8FF]"
 : event.tone === "yellow"
-? "bg-[#FFD95A]"
+? "bg-[#E8C75C]"
 : "bg-white/55"
 }`}
 />
-<div className="truncate text-[19px] font-semibold">
-{event.title}
-</div>
+<div className="truncate text-[19px] font-semibold">{event.title}</div>
 </div>
 <div className="mt-1 text-[14px] text-white/40">{event.ts}</div>
 </div>
@@ -907,14 +925,14 @@ event.tone
 
 <section className="px-4 py-4 md:px-5">
 <div className="mb-4 text-[11px] uppercase tracking-[0.42em] text-white/42">
-LIVE LOGIC
+MARKING LOGIC
 </div>
 
 <div className="grid gap-3 md:grid-cols-2">
 <LogicCard label="Primary states" value="ALIGNED SHIFT DROP LOST" />
 <LogicCard label="Warnings" value="DRIFT WARNING SIGNAL LOST" />
-<LogicCard label="Measured truth" value="Velocity plus tilt plus lean" />
-<LogicCard label="Displayed field" value="Ghost image axis line center dot trail" />
+<LogicCard label="Field marks" value="Grid center spine shoulder bar anchor dot" />
+<LogicCard label="Measured truth" value="Velocity tilt lean stability window" />
 </div>
 </section>
 </div>
