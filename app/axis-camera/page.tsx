@@ -53,14 +53,32 @@ holdStartMs: number | null;
 lastCompletedMs: number | null;
 };
 
-const UI_REFRESH_MS = 220;
-const MAX_HOLD_MS = 1000;
-const HISTORY_SIZE = 18;
+type StableStateTracker = {
+current: AxisState;
+pending: AxisState | null;
+pendingSince: number | null;
+};
+
+const UI_REFRESH_MS = 280;
+const MAX_HOLD_MS = 1400;
+const HISTORY_SIZE = 20;
 
 const CENTER_THRESHOLD = 0.82;
 const SHIFT_THRESHOLD = 0.6;
 const LEAN_MAX = 0.25;
-const RECOVERY_HOLD_MS = 400;
+const RECOVERY_HOLD_MS = 450;
+const STATE_HOLD_MS = 320;
+
+const SCORE_EPSILON = 1.2;
+const STABILITY_EPSILON = 1.2;
+const ALIGNMENT_EPSILON = 1.2;
+const LEAN_EPSILON = 0.008;
+
+const SMOOTH_SCORE = 0.14;
+const SMOOTH_STABILITY = 0.14;
+const SMOOTH_ALIGNMENT = 0.14;
+const SMOOTH_LEAN = 0.12;
+const SMOOTH_CENTER = 0.16;
 
 const INITIAL_UI: UiSnapshot = {
 score: 0,
@@ -94,6 +112,20 @@ if (score >= 84) return "B";
 if (score >= 74) return "C";
 if (score >= 64) return "D";
 return "F";
+}
+
+function gradeAccent(grade: Grade): "white" | "green" | "yellow" | "red" {
+if (grade === "A" || grade === "B") return "green";
+if (grade === "C" || grade === "D") return "yellow";
+if (grade === "F") return "red";
+return "white";
+}
+
+function stateAccent(state: AxisState): "white" | "green" | "yellow" | "red" {
+if (state === "CENTER") return "green";
+if (state === "SHIFT") return "yellow";
+if (state === "DROP") return "red";
+return "white";
 }
 
 function computeShoulderData(
@@ -131,7 +163,6 @@ return {
 shoulderCenter,
 hipCenter,
 lean,
-torsoLength,
 alignment,
 };
 }
@@ -150,18 +181,8 @@ if (centerScore >= SHIFT_THRESHOLD) return "SHIFT";
 return "DROP";
 }
 
-function gradeAccent(grade: Grade): "white" | "green" | "yellow" | "red" {
-if (grade === "A" || grade === "B") return "green";
-if (grade === "C" || grade === "D") return "yellow";
-if (grade === "F") return "red";
-return "white";
-}
-
-function stateAccent(state: AxisState): "white" | "green" | "yellow" | "red" {
-if (state === "CENTER") return "green";
-if (state === "SHIFT") return "yellow";
-if (state === "DROP") return "red";
-return "white";
+function shouldUpdateNumber(next: number, prev: number, epsilon: number) {
+return Math.abs(next - prev) >= epsilon;
 }
 
 export default function AxisCameraPage() {
@@ -187,18 +208,29 @@ holdStartMs: null,
 lastCompletedMs: null,
 });
 
+const stableStateRef = useRef<StableStateTracker>({
+current: "ENTER FRAME",
+pending: null,
+pendingSince: null,
+});
+
 const smoothedRef = useRef({
 score: 0,
 stability: 0,
 alignment: 0,
 lean: 0,
 centerScore: 0,
-state: "ENTER FRAME" as AxisState,
+});
+
+const publishedRef = useRef({
+score: 0,
+stability: 0,
+alignment: 0,
+lean: 0,
+centerScore: 0,
 });
 
 const lastGoodGeometryRef = useRef<{
-shoulderCenter: Point;
-hipCenter: Point;
 driftX: number;
 driftY: number;
 } | null>(null);
@@ -232,8 +264,6 @@ return "F";
 const drawScope = useCallback(
 (
 geometry?: {
-shoulderCenter: Point;
-hipCenter: Point;
 driftX: number;
 driftY: number;
 } | null,
@@ -264,7 +294,7 @@ const lineBottom = cy + scopeHeight / 2;
 
 ctx.save();
 
-ctx.strokeStyle = "rgba(255,255,255,0.16)";
+ctx.strokeStyle = "rgba(255,255,255,0.18)";
 ctx.lineWidth = 3;
 ctx.beginPath();
 ctx.moveTo(cx, lineTop);
@@ -274,22 +304,22 @@ ctx.stroke();
 ctx.strokeStyle = "rgba(255,255,255,0.12)";
 ctx.lineWidth = 2;
 ctx.beginPath();
-ctx.moveTo(cx - 34, cy);
-ctx.lineTo(cx + 34, cy);
+ctx.moveTo(cx - 36, cy);
+ctx.lineTo(cx + 36, cy);
 ctx.stroke();
 
 ctx.beginPath();
-ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+ctx.arc(cx, cy, 18, 0, Math.PI * 2);
 ctx.stroke();
 
-ctx.fillStyle = "rgba(255,255,255,0.22)";
+ctx.fillStyle = "rgba(255,255,255,0.25)";
 ctx.beginPath();
 ctx.arc(cx, cy, 4, 0, Math.PI * 2);
 ctx.fill();
 
 if (geometry && live) {
-const dotX = cx + geometry.driftX * 180;
-const dotY = cy + geometry.driftY * 120;
+const dotX = cx + geometry.driftX * 190;
+const dotY = cy + geometry.driftY * 130;
 
 const lineColor =
 ui.state === "DROP"
@@ -299,14 +329,14 @@ ui.state === "DROP"
 : "#75ffc0";
 
 ctx.strokeStyle = lineColor;
-ctx.lineWidth = 3;
+ctx.lineWidth = 4;
 ctx.beginPath();
 ctx.moveTo(cx, cy);
 ctx.lineTo(dotX, dotY);
 ctx.stroke();
 
 const angle = Math.atan2(dotY - cy, dotX - cx);
-const arrowSize = 12;
+const arrowSize = 14;
 
 ctx.beginPath();
 ctx.moveTo(dotX, dotY);
@@ -323,7 +353,7 @@ ctx.stroke();
 
 ctx.fillStyle = lineColor;
 ctx.beginPath();
-ctx.arc(dotX, dotY, 10, 0, Math.PI * 2);
+ctx.arc(dotX, dotY, 11, 0, Math.PI * 2);
 ctx.fill();
 }
 
@@ -491,7 +521,20 @@ stability: 0,
 alignment: 0,
 lean: 0,
 centerScore: 0,
-state: "ENTER FRAME",
+};
+
+publishedRef.current = {
+score: 0,
+stability: 0,
+alignment: 0,
+lean: 0,
+centerScore: 0,
+};
+
+stableStateRef.current = {
+current: "ENTER FRAME",
+pending: null,
+pendingSince: null,
 };
 
 recoveryRef.current = {
@@ -588,18 +631,38 @@ targetStability,
 geometry.lean
 );
 const targetScore = targetCenterScore * 100;
+const targetState = stateFromCenterScore(targetCenterScore);
 
-smoothedRef.current.alignment = lerp(smoothedRef.current.alignment, targetAlignment, 0.14);
-smoothedRef.current.stability = lerp(smoothedRef.current.stability, targetStability, 0.16);
-smoothedRef.current.lean = lerp(smoothedRef.current.lean, geometry.lean, 0.14);
+smoothedRef.current.alignment = lerp(smoothedRef.current.alignment, targetAlignment, SMOOTH_ALIGNMENT);
+smoothedRef.current.stability = lerp(smoothedRef.current.stability, targetStability, SMOOTH_STABILITY);
+smoothedRef.current.lean = lerp(smoothedRef.current.lean, geometry.lean, SMOOTH_LEAN);
 smoothedRef.current.centerScore = lerp(
 smoothedRef.current.centerScore,
 targetCenterScore,
-0.18
+SMOOTH_CENTER
 );
-smoothedRef.current.score = lerp(smoothedRef.current.score, targetScore, 0.15);
-smoothedRef.current.state = stateFromCenterScore(smoothedRef.current.centerScore);
+smoothedRef.current.score = lerp(smoothedRef.current.score, targetScore, SMOOTH_SCORE);
 
+if (stableStateRef.current.current === "ENTER FRAME") {
+stableStateRef.current.current = targetState;
+} else if (targetState !== stableStateRef.current.current) {
+if (stableStateRef.current.pending !== targetState) {
+stableStateRef.current.pending = targetState;
+stableStateRef.current.pendingSince = now;
+} else if (
+stableStateRef.current.pendingSince !== null &&
+now - stableStateRef.current.pendingSince >= STATE_HOLD_MS
+) {
+stableStateRef.current.current = targetState;
+stableStateRef.current.pending = null;
+stableStateRef.current.pendingSince = null;
+}
+} else {
+stableStateRef.current.pending = null;
+stableStateRef.current.pendingSince = null;
+}
+
+const stableState = stableStateRef.current.current;
 const prevState = historyRef.current.length
 ? historyRef.current[historyRef.current.length - 1].state
 : "ENTER FRAME";
@@ -607,7 +670,7 @@ const prevState = historyRef.current.length
 if (
 !recoveryRef.current.active &&
 prevState === "CENTER" &&
-(smoothedRef.current.state === "SHIFT" || smoothedRef.current.state === "DROP")
+(stableState === "SHIFT" || stableState === "DROP")
 ) {
 recoveryRef.current.active = true;
 recoveryRef.current.startMs = now;
@@ -615,7 +678,7 @@ recoveryRef.current.holdStartMs = null;
 }
 
 if (recoveryRef.current.active) {
-if (smoothedRef.current.state === "CENTER") {
+if (stableState === "CENTER") {
 if (recoveryRef.current.holdStartMs === null) {
 recoveryRef.current.holdStartMs = now;
 }
@@ -634,12 +697,67 @@ recoveryRef.current.holdStartMs = null;
 }
 }
 
-const driftX = clamp((geometry.hipCenter.x - 0.5) * 2.4, -1, 1);
-const driftY = clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1);
+let publishedScore = publishedRef.current.score;
+let publishedStability = publishedRef.current.stability;
+let publishedAlignment = publishedRef.current.alignment;
+let publishedLean = publishedRef.current.lean;
+let publishedCenter = publishedRef.current.centerScore;
+
+if (shouldUpdateNumber(smoothedRef.current.score, publishedRef.current.score, SCORE_EPSILON)) {
+publishedScore = smoothedRef.current.score;
+publishedRef.current.score = publishedScore;
+}
+
+if (
+shouldUpdateNumber(
+smoothedRef.current.stability,
+publishedRef.current.stability,
+STABILITY_EPSILON
+)
+) {
+publishedStability = smoothedRef.current.stability;
+publishedRef.current.stability = publishedStability;
+}
+
+if (
+shouldUpdateNumber(
+smoothedRef.current.alignment,
+publishedRef.current.alignment,
+ALIGNMENT_EPSILON
+)
+) {
+publishedAlignment = smoothedRef.current.alignment;
+publishedRef.current.alignment = publishedAlignment;
+}
+
+if (shouldUpdateNumber(smoothedRef.current.lean, publishedRef.current.lean, LEAN_EPSILON)) {
+publishedLean = smoothedRef.current.lean;
+publishedRef.current.lean = publishedLean;
+}
+
+if (
+shouldUpdateNumber(
+smoothedRef.current.centerScore,
+publishedRef.current.centerScore,
+0.01
+)
+) {
+publishedCenter = smoothedRef.current.centerScore;
+publishedRef.current.centerScore = publishedCenter;
+}
+
+const driftX = lerp(
+lastGoodGeometryRef.current?.driftX ?? 0,
+clamp((geometry.hipCenter.x - 0.5) * 2.4, -1, 1),
+0.18
+);
+const driftY = lerp(
+lastGoodGeometryRef.current?.driftY ?? 0,
+clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1),
+0.18
+);
 
 lastGoodGeometryRef.current = {
-shoulderCenter: geometry.shoulderCenter,
-hipCenter: geometry.hipCenter,
 driftX,
 driftY,
 };
@@ -648,13 +766,13 @@ lastGoodDetectionRef.current = now;
 liveThisFrame = true;
 
 pushUiHistory({
-score: smoothedRef.current.score,
-stability: smoothedRef.current.stability,
-alignment: smoothedRef.current.alignment,
-lean: smoothedRef.current.lean,
-centerScore: smoothedRef.current.centerScore,
-state: smoothedRef.current.state,
-reading: Math.round(smoothedRef.current.score),
+score: publishedScore,
+stability: publishedStability,
+alignment: publishedAlignment,
+lean: publishedLean,
+centerScore: publishedCenter,
+state: stableState,
+reading: Math.round(publishedScore),
 axisRecoveryMs: recoveryRef.current.lastCompletedMs,
 status: "Live",
 live: true,
@@ -791,7 +909,7 @@ onClick={startSession}
 disabled={starting}
 className="rounded-[24px] border border-white/10 bg-white/[0.06] px-6 py-4 text-[18px] font-medium text-white transition hover:bg-white/[0.1] disabled:opacity-60"
 >
-{starting ? "Starting…" : hasStartedOnce ? "Start Measurement" : "Allow Camera and Start"}
+{starting ? "Starting..." : hasStartedOnce ? "Start Measurement" : "Allow Camera and Start"}
 </button>
 </div>
 )}
