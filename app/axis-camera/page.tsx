@@ -28,11 +28,6 @@ options: Record<string, unknown>
 type AxisState = "ENTER FRAME" | "CENTER" | "SHIFT" | "DROP";
 type Grade = "A" | "B" | "C" | "D" | "F" | "--";
 
-type Point = {
-x: number;
-y: number;
-};
-
 type UiSnapshot = {
 score: number;
 stability: number;
@@ -60,8 +55,10 @@ pendingSince: number | null;
 };
 
 const UI_REFRESH_MS = 280;
-const MAX_HOLD_MS = 1400;
 const HISTORY_SIZE = 20;
+
+const HOLD_LAST_GOOD_MS = 2200;
+const REACQUIRE_MS = 8000;
 
 const CENTER_THRESHOLD = 0.82;
 const SHIFT_THRESHOLD = 0.6;
@@ -187,6 +184,7 @@ return Math.abs(next - prev) >= epsilon;
 
 export default function AxisCameraPage() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
+const freezeCanvasRef = useRef<HTMLCanvasElement | null>(null);
 const overlayRef = useRef<HTMLCanvasElement | null>(null);
 
 const streamRef = useRef<MediaStream | null>(null);
@@ -197,6 +195,7 @@ const mountedRef = useRef(false);
 const modelReadyRef = useRef(false);
 const runningRef = useRef(false);
 const usingFrontCameraRef = useRef(false);
+const hasCameraEverStartedRef = useRef(false);
 
 const lastUiUpdateRef = useRef(0);
 const lastGoodDetectionRef = useRef(0);
@@ -243,6 +242,7 @@ const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back
 const [recording, setRecording] = useState(false);
 const [starting, setStarting] = useState(false);
 const [hasStartedOnce, setHasStartedOnce] = useState(false);
+const [showFrozenFrame, setShowFrozenFrame] = useState(false);
 
 const stabilityGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.stability) : "--"),
@@ -261,13 +261,35 @@ if (ui.lean <= 0.2) return "D";
 return "F";
 }, [ui.live, ui.lean]);
 
+const captureFreezeFrame = useCallback(() => {
+const video = videoRef.current;
+const freezeCanvas = freezeCanvasRef.current;
+if (!video || !freezeCanvas || !video.videoWidth || !video.videoHeight) return;
+
+freezeCanvas.width = video.videoWidth;
+freezeCanvas.height = video.videoHeight;
+
+const ctx = freezeCanvas.getContext("2d");
+if (!ctx) return;
+
+ctx.save();
+
+if (usingFrontCameraRef.current) {
+ctx.translate(freezeCanvas.width, 0);
+ctx.scale(-1, 1);
+}
+
+ctx.drawImage(video, 0, 0, freezeCanvas.width, freezeCanvas.height);
+ctx.restore();
+}, []);
+
 const drawScope = useCallback(
 (
 geometry?: {
 driftX: number;
 driftY: number;
 } | null,
-live = false
+visible = false
 ) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
@@ -317,7 +339,7 @@ ctx.beginPath();
 ctx.arc(cx, cy, 4, 0, Math.PI * 2);
 ctx.fill();
 
-if (geometry && live) {
+if (geometry && visible) {
 const dotX = cx + geometry.driftX * 190;
 const dotY = cy + geometry.driftY * 130;
 
@@ -396,10 +418,7 @@ width: { ideal: 1080 },
 height: { ideal: 1920 },
 },
 },
-{
-audio: false,
-video: true,
-},
+{ audio: false, video: true },
 ]
 : [
 {
@@ -410,16 +429,8 @@ width: { ideal: 1080 },
 height: { ideal: 1920 },
 },
 },
-{
-audio: false,
-video: {
-facingMode: "environment",
-},
-},
-{
-audio: false,
-video: true,
-},
+{ audio: false, video: { facingMode: "environment" } },
+{ audio: false, video: true },
 ];
 
 let lastError: unknown = null;
@@ -447,6 +458,7 @@ const startCamera = useCallback(async () => {
 try {
 stopCamera();
 setStatus("Starting camera");
+setShowFrozenFrame(false);
 
 try {
 await openCameraStream(usingFrontCameraRef.current);
@@ -457,6 +469,7 @@ await openCameraStream(usingFrontCameraRef.current);
 }
 
 runningRef.current = true;
+hasCameraEverStartedRef.current = true;
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
 setStatus(modelReadyRef.current ? "Live measurement active" : "Loading pose model");
 } catch (error) {
@@ -466,7 +479,7 @@ setUi((prev) => ({
 ...prev,
 live: false,
 status: "Camera failed",
-state: "ENTER FRAME",
+state: prev.state,
 }));
 }
 }, [openCameraStream, stopCamera]);
@@ -514,6 +527,7 @@ const endSession = useCallback(() => {
 stopCamera();
 historyRef.current = [];
 lastGoodGeometryRef.current = null;
+lastGoodDetectionRef.current = 0;
 
 smoothedRef.current = {
 score: 0,
@@ -545,6 +559,7 @@ lastCompletedMs: null,
 };
 
 setRecording(false);
+setShowFrozenFrame(false);
 setStatus("Ready");
 setUi({
 ...INITIAL_UI,
@@ -563,13 +578,7 @@ historyRef.current.shift();
 const updateUiFromHistory = useCallback(
 (fallbackStatus?: string) => {
 const current = historyRef.current;
-if (!current.length) {
-setUi({
-...INITIAL_UI,
-status: fallbackStatus ?? status,
-});
-return;
-}
+if (!current.length) return;
 
 const score = average(current.map((item) => item.score));
 const stability = average(current.map((item) => item.stability));
@@ -593,7 +602,7 @@ status: fallbackStatus ?? "Live",
 live: true,
 });
 },
-[status]
+[]
 );
 
 const processFrame = useCallback(() => {
@@ -757,13 +766,12 @@ clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1),
 0.18
 );
 
-lastGoodGeometryRef.current = {
-driftX,
-driftY,
-};
-
+lastGoodGeometryRef.current = { driftX, driftY };
 lastGoodDetectionRef.current = now;
 liveThisFrame = true;
+setShowFrozenFrame(false);
+
+captureFreezeFrame();
 
 pushUiHistory({
 score: publishedScore,
@@ -785,15 +793,28 @@ console.error(error);
 setStatus("Measurement read failed");
 }
 
-const held = now - lastGoodDetectionRef.current <= MAX_HOLD_MS;
-drawScope(lastGoodGeometryRef.current, liveThisFrame || held);
+const msSinceGood = now - lastGoodDetectionRef.current;
+const shouldHold = msSinceGood <= HOLD_LAST_GOOD_MS;
+const shouldReacquire = msSinceGood <= REACQUIRE_MS;
+
+if (!liveThisFrame && shouldHold && hasCameraEverStartedRef.current) {
+setShowFrozenFrame(true);
+}
+
+drawScope(lastGoodGeometryRef.current, liveThisFrame || shouldHold);
 
 if (now - lastUiUpdateRef.current > UI_REFRESH_MS) {
 lastUiUpdateRef.current = now;
 
-if (liveThisFrame || held) {
-updateUiFromHistory("Live");
-} else {
+if (liveThisFrame || shouldHold) {
+updateUiFromHistory(liveThisFrame ? "Live" : "Reacquiring");
+} else if (shouldReacquire && historyRef.current.length) {
+setUi((prev) => ({
+...prev,
+status: "Reacquiring",
+live: true,
+}));
+} else if (!historyRef.current.length) {
 setUi((prev) => ({
 ...prev,
 state: "ENTER FRAME",
@@ -806,7 +827,7 @@ live: false,
 if (runningRef.current) {
 rafRef.current = requestAnimationFrame(processFrame);
 }
-}, [drawScope, pushUiHistory, updateUiFromHistory]);
+}, [captureFreezeFrame, drawScope, pushUiHistory, updateUiFromHistory]);
 
 const startSession = useCallback(async () => {
 if (starting) return;
@@ -877,7 +898,18 @@ playsInline
 muted
 autoPlay
 className="absolute inset-0 h-full w-full object-cover"
-style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
+style={{
+transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none",
+opacity: showFrozenFrame ? 0 : 1,
+}}
+/>
+
+<canvas
+ref={freezeCanvasRef}
+className="absolute inset-0 h-full w-full object-cover"
+style={{
+display: showFrozenFrame ? "block" : "none",
+}}
 />
 
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(18,31,64,0.22),rgba(0,0,0,0.74)_70%)]" />
