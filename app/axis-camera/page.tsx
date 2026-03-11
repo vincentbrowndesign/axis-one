@@ -195,6 +195,7 @@ const mountedRef = useRef(false);
 const modelReadyRef = useRef(false);
 const runningRef = useRef(false);
 const usingFrontCameraRef = useRef(false);
+const hasCameraStartedRef = useRef(false);
 
 const lastUiUpdateRef = useRef(0);
 const lastGoodDetectionRef = useRef(0);
@@ -233,7 +234,7 @@ const historyRef = useRef<UiSnapshot[]>([]);
 
 const [ui, setUi] = useState<UiSnapshot>(INITIAL_UI);
 const [status, setStatus] = useState("Ready");
-const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back View");
+const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Front View");
 const [recording, setRecording] = useState(false);
 const [phase, setPhase] = useState<SessionPhase>("idle");
 const [trackingLost, setTrackingLost] = useState(false);
@@ -375,6 +376,8 @@ if (video) {
 video.pause();
 video.srcObject = null;
 }
+
+hasCameraStartedRef.current = false;
 }, []);
 
 const openCameraStream = useCallback(async (front: boolean) => {
@@ -428,25 +431,32 @@ throw lastError ?? new Error("Unable to open camera");
 }, []);
 
 const startCamera = useCallback(async () => {
-stopCamera();
 setStatus("Starting camera");
 
 try {
+if (!streamRef.current) {
 try {
 await openCameraStream(usingFrontCameraRef.current);
 } catch {
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
 await openCameraStream(usingFrontCameraRef.current);
 }
+} else {
+const video = videoRef.current;
+if (video && video.paused) {
+await video.play();
+}
+}
 
 runningRef.current = true;
+hasCameraStartedRef.current = true;
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
 } catch (error) {
 console.error(error);
 setStatus("Camera failed to start");
 throw error;
 }
-}, [openCameraStream, stopCamera]);
+}, [openCameraStream]);
 
 const loadPoseModel = useCallback(async () => {
 if (modelReadyRef.current || poseRef.current) return;
@@ -790,12 +800,17 @@ setStarting(false);
 const flipCamera = useCallback(async () => {
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
 
-if (phase === "live") {
-await startSession();
-} else {
+if (streamRef.current) {
+stopCamera();
+setPhase("idle");
+setStatus("Ready");
+setUi((prev) => ({ ...prev, live: false }));
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
+return;
 }
-}, [phase, startSession]);
+
+setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
+}, [stopCamera]);
 
 useEffect(() => {
 mountedRef.current = true;
@@ -818,7 +833,10 @@ playsInline
 muted
 autoPlay
 className="absolute inset-0 h-full w-full object-cover"
-style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
+style={{
+transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none",
+visibility: hasCameraStartedRef.current ? "visible" : "hidden",
+}}
 />
 
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(18,31,64,0.22),rgba(0,0,0,0.74)_70%)]" />
