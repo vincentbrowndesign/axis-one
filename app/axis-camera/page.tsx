@@ -27,6 +27,7 @@ options: Record<string, unknown>
 
 type AxisState = "ENTER FRAME" | "CENTER" | "SHIFT" | "DROP";
 type Grade = "A" | "B" | "C" | "D" | "F" | "--";
+type SessionPhase = "idle" | "starting" | "live";
 
 type UiSnapshot = {
 score: number;
@@ -54,15 +55,13 @@ pending: AxisState | null;
 pendingSince: number | null;
 };
 
-const UI_REFRESH_MS = 280;
+const UI_REFRESH_MS = 300;
 const HISTORY_SIZE = 20;
-
-const HOLD_LAST_GOOD_MS = 2200;
-const REACQUIRE_MS = 8000;
 
 const CENTER_THRESHOLD = 0.82;
 const SHIFT_THRESHOLD = 0.6;
 const LEAN_MAX = 0.25;
+
 const RECOVERY_HOLD_MS = 450;
 const STATE_HOLD_MS = 320;
 
@@ -76,6 +75,8 @@ const SMOOTH_STABILITY = 0.14;
 const SMOOTH_ALIGNMENT = 0.14;
 const SMOOTH_LEAN = 0.12;
 const SMOOTH_CENTER = 0.16;
+
+const TRACKING_GRACE_MS = 10000;
 
 const INITIAL_UI: UiSnapshot = {
 score: 0,
@@ -184,7 +185,6 @@ return Math.abs(next - prev) >= epsilon;
 
 export default function AxisCameraPage() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
-const freezeCanvasRef = useRef<HTMLCanvasElement | null>(null);
 const overlayRef = useRef<HTMLCanvasElement | null>(null);
 
 const streamRef = useRef<MediaStream | null>(null);
@@ -195,7 +195,6 @@ const mountedRef = useRef(false);
 const modelReadyRef = useRef(false);
 const runningRef = useRef(false);
 const usingFrontCameraRef = useRef(false);
-const hasCameraEverStartedRef = useRef(false);
 
 const lastUiUpdateRef = useRef(0);
 const lastGoodDetectionRef = useRef(0);
@@ -229,29 +228,26 @@ lean: 0,
 centerScore: 0,
 });
 
-const lastGoodGeometryRef = useRef<{
-driftX: number;
-driftY: number;
-} | null>(null);
-
+const lastGoodGeometryRef = useRef<{ driftX: number; driftY: number } | null>(null);
 const historyRef = useRef<UiSnapshot[]>([]);
 
 const [ui, setUi] = useState<UiSnapshot>(INITIAL_UI);
 const [status, setStatus] = useState("Ready");
 const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back View");
 const [recording, setRecording] = useState(false);
-const [starting, setStarting] = useState(false);
-const [hasStartedOnce, setHasStartedOnce] = useState(false);
-const [showFrozenFrame, setShowFrozenFrame] = useState(false);
+const [phase, setPhase] = useState<SessionPhase>("idle");
+const [trackingLost, setTrackingLost] = useState(false);
 
 const stabilityGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.stability) : "--"),
 [ui.live, ui.stability]
 );
+
 const alignmentGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.alignment) : "--"),
 [ui.live, ui.alignment]
 );
+
 const leanGrade = useMemo(() => {
 if (!ui.live) return "--";
 if (ui.lean <= 0.05) return "A";
@@ -261,36 +257,11 @@ if (ui.lean <= 0.2) return "D";
 return "F";
 }, [ui.live, ui.lean]);
 
-const captureFreezeFrame = useCallback(() => {
-const video = videoRef.current;
-const freezeCanvas = freezeCanvasRef.current;
-if (!video || !freezeCanvas || !video.videoWidth || !video.videoHeight) return;
-
-freezeCanvas.width = video.videoWidth;
-freezeCanvas.height = video.videoHeight;
-
-const ctx = freezeCanvas.getContext("2d");
-if (!ctx) return;
-
-ctx.save();
-
-if (usingFrontCameraRef.current) {
-ctx.translate(freezeCanvas.width, 0);
-ctx.scale(-1, 1);
-}
-
-ctx.drawImage(video, 0, 0, freezeCanvas.width, freezeCanvas.height);
-ctx.restore();
-}, []);
+const axisRecoveryLabel =
+ui.axisRecoveryMs === null ? "--" : `${(ui.axisRecoveryMs / 1000).toFixed(2)}s`;
 
 const drawScope = useCallback(
-(
-geometry?: {
-driftX: number;
-driftY: number;
-} | null,
-visible = false
-) => {
+(geometry?: { driftX: number; driftY: number } | null, visible = false) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
 if (!canvas) return;
@@ -445,7 +416,7 @@ await video.play();
 video.width = video.videoWidth || 720;
 video.height = video.videoHeight || 1280;
 
-return stream;
+return;
 } catch (error) {
 lastError = error;
 }
@@ -455,39 +426,29 @@ throw lastError ?? new Error("Unable to open camera");
 }, []);
 
 const startCamera = useCallback(async () => {
-try {
 stopCamera();
 setStatus("Starting camera");
-setShowFrozenFrame(false);
 
 try {
+try {
 await openCameraStream(usingFrontCameraRef.current);
-} catch (firstError) {
-console.warn("Preferred camera failed trying fallback", firstError);
+} catch {
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
 await openCameraStream(usingFrontCameraRef.current);
 }
 
 runningRef.current = true;
-hasCameraEverStartedRef.current = true;
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
-setStatus(modelReadyRef.current ? "Live measurement active" : "Loading pose model");
 } catch (error) {
 console.error(error);
 setStatus("Camera failed to start");
-setUi((prev) => ({
-...prev,
-live: false,
-status: "Camera failed",
-state: prev.state,
-}));
+throw error;
 }
 }, [openCameraStream, stopCamera]);
 
 const loadPoseModel = useCallback(async () => {
 if (modelReadyRef.current || poseRef.current) return;
 
-try {
 setStatus("Loading pose model");
 
 const visionModule = (await import("@mediapipe/tasks-vision")) as unknown as TasksVisionModule;
@@ -509,18 +470,6 @@ minTrackingConfidence: 0.58,
 });
 
 modelReadyRef.current = true;
-setStatus("Pose model ready");
-} catch (error) {
-console.error(error);
-modelReadyRef.current = false;
-setStatus("Pose model failed to start");
-setUi((prev) => ({
-...prev,
-live: false,
-status: "Pose model failed",
-}));
-throw error;
-}
 }, []);
 
 const endSession = useCallback(() => {
@@ -558,8 +507,9 @@ holdStartMs: null,
 lastCompletedMs: null,
 };
 
+setTrackingLost(false);
 setRecording(false);
-setShowFrozenFrame(false);
+setPhase("idle");
 setStatus("Ready");
 setUi({
 ...INITIAL_UI,
@@ -575,8 +525,7 @@ historyRef.current.shift();
 }
 }, []);
 
-const updateUiFromHistory = useCallback(
-(fallbackStatus?: string) => {
+const updateUiFromHistory = useCallback((fallbackStatus?: string) => {
 const current = historyRef.current;
 if (!current.length) return;
 
@@ -601,9 +550,7 @@ axisRecoveryMs,
 status: fallbackStatus ?? "Live",
 live: true,
 });
-},
-[]
-);
+}, []);
 
 const processFrame = useCallback(() => {
 const video = videoRef.current;
@@ -612,44 +559,39 @@ const pose = poseRef.current;
 if (!mountedRef.current || !runningRef.current || !video || !pose) return;
 
 const now = performance.now();
-let liveThisFrame = false;
+let foundPoseThisFrame = false;
 
-try {
 if (video.readyState >= 2) {
 let result: PoseLandmarkerResult | null = null;
 
 try {
 result = pose.detectForVideo(video, now);
-} catch (error) {
-console.warn("Pose read skipped", error);
+} catch {
 result = null;
 }
 
 const landmarks = result?.landmarks?.[0];
 
 if (landmarks && landmarks.length > 24) {
-const geometry = computeShoulderData(landmarks[11], landmarks[12], landmarks[23], landmarks[24]);
+const geometry = computeShoulderData(
+landmarks[11],
+landmarks[12],
+landmarks[23],
+landmarks[24]
+);
 
 if (geometry) {
 const varianceLean = Math.abs(geometry.lean - smoothedRef.current.lean);
 const targetAlignment = geometry.alignment;
 const targetStability = clamp(1 - varianceLean * 10) * 100;
-const targetCenterScore = computeCenterScore(
-targetAlignment,
-targetStability,
-geometry.lean
-);
+const targetCenterScore = computeCenterScore(targetAlignment, targetStability, geometry.lean);
 const targetScore = targetCenterScore * 100;
 const targetState = stateFromCenterScore(targetCenterScore);
 
 smoothedRef.current.alignment = lerp(smoothedRef.current.alignment, targetAlignment, SMOOTH_ALIGNMENT);
 smoothedRef.current.stability = lerp(smoothedRef.current.stability, targetStability, SMOOTH_STABILITY);
 smoothedRef.current.lean = lerp(smoothedRef.current.lean, geometry.lean, SMOOTH_LEAN);
-smoothedRef.current.centerScore = lerp(
-smoothedRef.current.centerScore,
-targetCenterScore,
-SMOOTH_CENTER
-);
+smoothedRef.current.centerScore = lerp(smoothedRef.current.centerScore, targetCenterScore, SMOOTH_CENTER);
 smoothedRef.current.score = lerp(smoothedRef.current.score, targetScore, SMOOTH_SCORE);
 
 if (stableStateRef.current.current === "ENTER FRAME") {
@@ -717,24 +659,12 @@ publishedScore = smoothedRef.current.score;
 publishedRef.current.score = publishedScore;
 }
 
-if (
-shouldUpdateNumber(
-smoothedRef.current.stability,
-publishedRef.current.stability,
-STABILITY_EPSILON
-)
-) {
+if (shouldUpdateNumber(smoothedRef.current.stability, publishedRef.current.stability, STABILITY_EPSILON)) {
 publishedStability = smoothedRef.current.stability;
 publishedRef.current.stability = publishedStability;
 }
 
-if (
-shouldUpdateNumber(
-smoothedRef.current.alignment,
-publishedRef.current.alignment,
-ALIGNMENT_EPSILON
-)
-) {
+if (shouldUpdateNumber(smoothedRef.current.alignment, publishedRef.current.alignment, ALIGNMENT_EPSILON)) {
 publishedAlignment = smoothedRef.current.alignment;
 publishedRef.current.alignment = publishedAlignment;
 }
@@ -744,13 +674,7 @@ publishedLean = smoothedRef.current.lean;
 publishedRef.current.lean = publishedLean;
 }
 
-if (
-shouldUpdateNumber(
-smoothedRef.current.centerScore,
-publishedRef.current.centerScore,
-0.01
-)
-) {
+if (shouldUpdateNumber(smoothedRef.current.centerScore, publishedRef.current.centerScore, 0.01)) {
 publishedCenter = smoothedRef.current.centerScore;
 publishedRef.current.centerScore = publishedCenter;
 }
@@ -768,10 +692,8 @@ clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1),
 
 lastGoodGeometryRef.current = { driftX, driftY };
 lastGoodDetectionRef.current = now;
-liveThisFrame = true;
-setShowFrozenFrame(false);
-
-captureFreezeFrame();
+foundPoseThisFrame = true;
+setTrackingLost(false);
 
 pushUiHistory({
 score: publishedScore,
@@ -788,72 +710,63 @@ live: true,
 }
 }
 }
-} catch (error) {
-console.error(error);
-setStatus("Measurement read failed");
+
+const timeSinceGood = now - lastGoodDetectionRef.current;
+const stillInGrace = timeSinceGood <= TRACKING_GRACE_MS;
+
+if (!foundPoseThisFrame && historyRef.current.length && stillInGrace) {
+setTrackingLost(true);
 }
 
-const msSinceGood = now - lastGoodDetectionRef.current;
-const shouldHold = msSinceGood <= HOLD_LAST_GOOD_MS;
-const shouldReacquire = msSinceGood <= REACQUIRE_MS;
-
-if (!liveThisFrame && shouldHold && hasCameraEverStartedRef.current) {
-setShowFrozenFrame(true);
-}
-
-drawScope(lastGoodGeometryRef.current, liveThisFrame || shouldHold);
+drawScope(lastGoodGeometryRef.current, Boolean(lastGoodGeometryRef.current));
 
 if (now - lastUiUpdateRef.current > UI_REFRESH_MS) {
 lastUiUpdateRef.current = now;
 
-if (liveThisFrame || shouldHold) {
-updateUiFromHistory(liveThisFrame ? "Live" : "Reacquiring");
-} else if (shouldReacquire && historyRef.current.length) {
+if (historyRef.current.length) {
+updateUiFromHistory(trackingLost ? "Tracking lost" : "Live");
+} else {
 setUi((prev) => ({
 ...prev,
-status: "Reacquiring",
-live: true,
-}));
-} else if (!historyRef.current.length) {
-setUi((prev) => ({
-...prev,
-state: "ENTER FRAME",
 status: "Enter frame",
 live: false,
 }));
+}
+
+if (trackingLost) {
+setStatus("Tracking lost");
+} else if (foundPoseThisFrame) {
+setStatus("Live measurement active");
 }
 }
 
 if (runningRef.current) {
 rafRef.current = requestAnimationFrame(processFrame);
 }
-}, [captureFreezeFrame, drawScope, pushUiHistory, updateUiFromHistory]);
+}, [drawScope, pushUiHistory, trackingLost, updateUiFromHistory]);
 
 const startSession = useCallback(async () => {
-if (starting) return;
+if (phase === "starting") return;
 
 setStarting(true);
 setHasStartedOnce(true);
+setPhase("starting");
 
 try {
 await loadPoseModel();
 await startCamera();
 
 if (!runningRef.current || !modelReadyRef.current) {
-setUi((prev) => ({
-...prev,
-status: "Start failed",
-live: false,
-}));
+setPhase("idle");
 return;
 }
 
 historyRef.current = [];
 lastUiUpdateRef.current = performance.now();
+setTrackingLost(false);
 
 if (rafRef.current) {
 cancelAnimationFrame(rafRef.current);
-rafRef.current = null;
 }
 
 setStatus("Live measurement active");
@@ -863,16 +776,24 @@ status: "Live",
 live: true,
 }));
 
+setPhase("live");
 rafRef.current = requestAnimationFrame(processFrame);
+} catch {
+setPhase("idle");
 } finally {
 setStarting(false);
 }
-}, [loadPoseModel, processFrame, startCamera, starting]);
+}, [loadPoseModel, phase, processFrame, startCamera]);
 
 const flipCamera = useCallback(async () => {
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
+
+if (phase === "live") {
 await startSession();
-}, [startSession]);
+} else {
+setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
+}
+}, [phase, startSession]);
 
 useEffect(() => {
 mountedRef.current = true;
@@ -887,9 +808,6 @@ modelReadyRef.current = false;
 };
 }, [drawScope, endSession]);
 
-const axisRecoveryLabel =
-ui.axisRecoveryMs === null ? "--" : `${(ui.axisRecoveryMs / 1000).toFixed(2)}s`;
-
 return (
 <main className="relative min-h-screen overflow-hidden bg-black text-white">
 <video
@@ -898,18 +816,7 @@ playsInline
 muted
 autoPlay
 className="absolute inset-0 h-full w-full object-cover"
-style={{
-transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none",
-opacity: showFrozenFrame ? 0 : 1,
-}}
-/>
-
-<canvas
-ref={freezeCanvasRef}
-className="absolute inset-0 h-full w-full object-cover"
-style={{
-display: showFrozenFrame ? "block" : "none",
-}}
+style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 />
 
 <div className="absolute inset-0 bg-[radial-gradient(circle_at_center,rgba(18,31,64,0.22),rgba(0,0,0,0.74)_70%)]" />
@@ -934,7 +841,7 @@ style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 </div>
 </div>
 
-{!ui.live && (
+{phase !== "live" && (
 <div className="mt-5">
 <button
 onClick={startSession}
@@ -982,7 +889,11 @@ label="Alignment"
 value={alignmentGrade}
 accent={gradeAccent(alignmentGrade)}
 />
-<SmallMetric label="Lean" value={leanGrade} accent={gradeAccent(leanGrade)} />
+<SmallMetric
+label="Lean"
+value={leanGrade}
+accent={gradeAccent(leanGrade)}
+/>
 </div>
 
 <div className="mt-4 grid grid-cols-3 gap-3">
