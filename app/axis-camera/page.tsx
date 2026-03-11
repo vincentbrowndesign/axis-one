@@ -71,7 +71,7 @@ centerScore: 0,
 state: "ENTER FRAME",
 reading: 0,
 axisRecoveryMs: null,
-status: "Loading",
+status: "Ready",
 live: false,
 };
 
@@ -199,7 +199,6 @@ state: "ENTER FRAME" as AxisState,
 const lastGoodGeometryRef = useRef<{
 shoulderCenter: Point;
 hipCenter: Point;
-bodyLineX: number;
 driftX: number;
 driftY: number;
 } | null>(null);
@@ -207,9 +206,11 @@ driftY: number;
 const historyRef = useRef<UiSnapshot[]>([]);
 
 const [ui, setUi] = useState<UiSnapshot>(INITIAL_UI);
-const [status, setStatus] = useState("Loading camera");
+const [status, setStatus] = useState("Ready");
 const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back View");
 const [recording, setRecording] = useState(false);
+const [starting, setStarting] = useState(false);
+const [hasStartedOnce, setHasStartedOnce] = useState(false);
 
 const stabilityGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.stability) : "--"),
@@ -233,7 +234,6 @@ const drawScope = useCallback(
 geometry?: {
 shoulderCenter: Point;
 hipCenter: Point;
-bodyLineX: number;
 driftX: number;
 driftY: number;
 } | null,
@@ -241,18 +241,18 @@ live = false
 ) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
-if (!canvas || !video) return;
+if (!canvas) return;
 
-const ctx = canvas.getContext("2d");
-if (!ctx) return;
-
-const width = video.videoWidth || window.innerWidth;
-const height = video.videoHeight || window.innerHeight;
+const width = video?.videoWidth || window.innerWidth;
+const height = video?.videoHeight || window.innerHeight;
 
 if (canvas.width !== width || canvas.height !== height) {
 canvas.width = width;
 canvas.height = height;
 }
+
+const ctx = canvas.getContext("2d");
+if (!ctx) return;
 
 ctx.clearRect(0, 0, width, height);
 
@@ -344,6 +344,12 @@ if (streamRef.current) {
 streamRef.current.getTracks().forEach((track) => track.stop());
 streamRef.current = null;
 }
+
+const video = videoRef.current;
+if (video) {
+video.pause();
+video.srcObject = null;
+}
 }, []);
 
 const openCameraStream = useCallback(async (front: boolean) => {
@@ -415,8 +421,7 @@ setStatus("Starting camera");
 try {
 await openCameraStream(usingFrontCameraRef.current);
 } catch (firstError) {
-console.warn("Preferred camera failed, trying fallback", firstError);
-
+console.warn("Preferred camera failed trying fallback", firstError);
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
 await openCameraStream(usingFrontCameraRef.current);
 }
@@ -469,8 +474,9 @@ setStatus("Pose model failed to start");
 setUi((prev) => ({
 ...prev,
 live: false,
-status: "Start failed",
+status: "Pose model failed",
 }));
+throw error;
 }
 }, []);
 
@@ -496,7 +502,7 @@ lastCompletedMs: null,
 };
 
 setRecording(false);
-setStatus("Session ended");
+setStatus("Ready");
 setUi({
 ...INITIAL_UI,
 status: "Ready",
@@ -628,16 +634,12 @@ recoveryRef.current.holdStartMs = null;
 }
 }
 
-const bodyLineX =
-((geometry.shoulderCenter.x + geometry.hipCenter.x) / 2) * (video.videoWidth || 1);
-
 const driftX = clamp((geometry.hipCenter.x - 0.5) * 2.4, -1, 1);
 const driftY = clamp((geometry.hipCenter.y - 0.52) * 2.0, -1, 1);
 
 lastGoodGeometryRef.current = {
 shoulderCenter: geometry.shoulderCenter,
 hipCenter: geometry.hipCenter,
-bodyLineX,
 driftX,
 driftY,
 };
@@ -689,6 +691,12 @@ rafRef.current = requestAnimationFrame(processFrame);
 }, [drawScope, pushUiHistory, updateUiFromHistory]);
 
 const startSession = useCallback(async () => {
+if (starting) return;
+
+setStarting(true);
+setHasStartedOnce(true);
+
+try {
 await loadPoseModel();
 await startCamera();
 
@@ -717,7 +725,10 @@ live: true,
 }));
 
 rafRef.current = requestAnimationFrame(processFrame);
-}, [loadPoseModel, processFrame, startCamera]);
+} finally {
+setStarting(false);
+}
+}, [loadPoseModel, processFrame, startCamera, starting]);
 
 const flipCamera = useCallback(async () => {
 usingFrontCameraRef.current = !usingFrontCameraRef.current;
@@ -726,7 +737,7 @@ await startSession();
 
 useEffect(() => {
 mountedRef.current = true;
-void startSession();
+drawScope(null, false);
 
 return () => {
 mountedRef.current = false;
@@ -735,7 +746,7 @@ if (poseRef.current?.close) poseRef.current.close();
 poseRef.current = null;
 modelReadyRef.current = false;
 };
-}, [endSession, startSession]);
+}, [drawScope, endSession]);
 
 const axisRecoveryLabel =
 ui.axisRecoveryMs === null ? "--" : `${(ui.axisRecoveryMs / 1000).toFixed(2)}s`;
@@ -762,7 +773,7 @@ style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-3xl flex-col px-5 pb-8 pt-5">
 <div className="flex items-start justify-between gap-4">
 <div className="rounded-[28px] border border-white/10 bg-black/28 px-5 py-4 backdrop-blur-xl">
-<div className="text-[12px] uppercase tracking-[0.42em] text-white/44">Axis Scope</div>
+<div className="text-[12px] uppercase tracking-[0.42em] text-white/44">AXIS SCOPE</div>
 <div className="mt-2 text-[18px] text-white/80">Measure your center.</div>
 </div>
 
@@ -773,18 +784,54 @@ style={{ transform: usingFrontCameraRef.current ? "scaleX(-1)" : "none" }}
 </div>
 </div>
 
+{!ui.live && (
+<div className="mt-5">
+<button
+onClick={startSession}
+disabled={starting}
+className="rounded-[24px] border border-white/10 bg-white/[0.06] px-6 py-4 text-[18px] font-medium text-white transition hover:bg-white/[0.1] disabled:opacity-60"
+>
+{starting ? "Starting…" : hasStartedOnce ? "Start Measurement" : "Allow Camera and Start"}
+</button>
+</div>
+)}
+
 <div className="flex-1" />
 
 <div className="rounded-[30px] border border-white/10 bg-black/28 p-4 backdrop-blur-2xl">
 <div className="grid grid-cols-2 gap-3">
-<MetricCard label="State" value={ui.state} accent={stateAccent(ui.state)} textSize="text-[34px]" />
-<MetricCard label="Reading" value={String(ui.reading)} accent="white" textSize="text-[52px]" />
-<MetricCard label="Axis Recovery" value={axisRecoveryLabel} accent="green" textSize="text-[36px]" />
-<MetricCard label="Stability" value={stabilityGrade} accent={gradeAccent(stabilityGrade)} textSize="text-[52px]" />
+<MetricCard
+label="State"
+value={ui.state}
+accent={stateAccent(ui.state)}
+textSize="text-[34px]"
+/>
+<MetricCard
+label="Reading"
+value={String(ui.reading)}
+accent="white"
+textSize="text-[52px]"
+/>
+<MetricCard
+label="Axis Recovery"
+value={axisRecoveryLabel}
+accent="green"
+textSize="text-[36px]"
+/>
+<MetricCard
+label="Stability"
+value={stabilityGrade}
+accent={gradeAccent(stabilityGrade)}
+textSize="text-[52px]"
+/>
 </div>
 
 <div className="mt-3 grid grid-cols-2 gap-3">
-<SmallMetric label="Alignment" value={alignmentGrade} accent={gradeAccent(alignmentGrade)} />
+<SmallMetric
+label="Alignment"
+value={alignmentGrade}
+accent={gradeAccent(alignmentGrade)}
+/>
 <SmallMetric label="Lean" value={leanGrade} accent={gradeAccent(leanGrade)} />
 </div>
 
