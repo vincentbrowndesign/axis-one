@@ -610,26 +610,30 @@ publishedRef.current.velocity = pVelocity;
 trailRef.current.push({ x: body.center.x, y: body.center.y });
 if (trailRef.current.length > MAX_TRAIL_POINTS) trailRef.current.shift();
 
-const stableState: AxisState = stable.current;
+const stableState = stable.current;
+const eventState = stateStableRef.current.current as AxisState;
 
-if (stableState !== previousStateRef.current) {
-switch (stableState) {
+if (eventState !== previousStateRef.current) {
+switch (eventState) {
 case "ALIGNED":
 pushEvent("ALIGNED", `Window ${pWindow} ms`, stateTone("ALIGNED"));
 break;
+
 case "SHIFT":
 pushEvent("SHIFT", `Tilt ${pTilt.toFixed(1)}°`, stateTone("SHIFT"));
 break;
+
 case "DROP":
 pushEvent("DROP", `Velocity ${pVelocity.toFixed(4)}`, stateTone("DROP"));
 break;
+
 case "LOST":
 case "ENTER FRAME":
 default:
 break;
 }
 
-previousStateRef.current = stableState;
+previousStateRef.current = eventState;
 }
 
 if (now - lastUiUpdateRef.current >= UI_REFRESH_MS) {
