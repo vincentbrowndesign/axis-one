@@ -157,6 +157,13 @@ if (grade === "F") return "red";
 return "white";
 }
 
+function stateAccent(state: AxisState): "white" | "green" | "yellow" | "red" {
+if (state === "CENTER") return "green";
+if (state === "SHIFT") return "yellow";
+if (state === "DROP") return "red";
+return "white";
+}
+
 export default function AxisCameraPage() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const overlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -168,7 +175,7 @@ const poseRef = useRef<PoseLandmarkerInstance | null>(null);
 const mountedRef = useRef(false);
 const modelReadyRef = useRef(false);
 const runningRef = useRef(false);
-const usingFrontCameraRef = useRef(true);
+const usingFrontCameraRef = useRef(false);
 
 const lastUiUpdateRef = useRef(0);
 const lastGoodDetectionRef = useRef(0);
@@ -201,10 +208,9 @@ const historyRef = useRef<UiSnapshot[]>([]);
 
 const [ui, setUi] = useState<UiSnapshot>(INITIAL_UI);
 const [status, setStatus] = useState("Loading camera");
-const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Front View");
+const [cameraLabel, setCameraLabel] = useState<"Front View" | "Back View">("Back View");
 const [recording, setRecording] = useState(false);
 
-const scoreGrade = useMemo(() => gradeFromScore(ui.score), [ui.score]);
 const stabilityGrade = useMemo(
 () => (ui.live ? gradeFromScore(ui.stability) : "--"),
 [ui.live, ui.stability]
@@ -340,29 +346,80 @@ streamRef.current = null;
 }
 }, []);
 
-const startCamera = useCallback(async () => {
+const openCameraStream = useCallback(async (front: boolean) => {
 const video = videoRef.current;
-if (!video) return;
+if (!video) throw new Error("Video element missing");
 
-try {
-stopCamera();
-setStatus("Starting camera");
-
-const stream = await navigator.mediaDevices.getUserMedia({
+const constraintsList: MediaStreamConstraints[] = front
+? [
+{
 audio: false,
 video: {
-facingMode: usingFrontCameraRef.current ? "user" : { ideal: "environment" },
+facingMode: "user",
 width: { ideal: 1080 },
 height: { ideal: 1920 },
 },
-});
+},
+{
+audio: false,
+video: true,
+},
+]
+: [
+{
+audio: false,
+video: {
+facingMode: { ideal: "environment" },
+width: { ideal: 1080 },
+height: { ideal: 1920 },
+},
+},
+{
+audio: false,
+video: {
+facingMode: "environment",
+},
+},
+{
+audio: false,
+video: true,
+},
+];
 
+let lastError: unknown = null;
+
+for (const constraints of constraintsList) {
+try {
+const stream = await navigator.mediaDevices.getUserMedia(constraints);
 streamRef.current = stream;
 video.srcObject = stream;
 await video.play();
 
-video.width = video.videoWidth;
-video.height = video.videoHeight;
+video.width = video.videoWidth || 720;
+video.height = video.videoHeight || 1280;
+
+return stream;
+} catch (error) {
+lastError = error;
+}
+}
+
+throw lastError ?? new Error("Unable to open camera");
+}, []);
+
+const startCamera = useCallback(async () => {
+try {
+stopCamera();
+setStatus("Starting camera");
+
+try {
+await openCameraStream(usingFrontCameraRef.current);
+} catch (firstError) {
+console.warn("Preferred camera failed, trying fallback", firstError);
+
+usingFrontCameraRef.current = !usingFrontCameraRef.current;
+await openCameraStream(usingFrontCameraRef.current);
+}
 
 runningRef.current = true;
 setCameraLabel(usingFrontCameraRef.current ? "Front View" : "Back View");
@@ -370,9 +427,14 @@ setStatus(modelReadyRef.current ? "Live measurement active" : "Loading pose mode
 } catch (error) {
 console.error(error);
 setStatus("Camera failed to start");
-setUi((prev) => ({ ...prev, live: false, status: "Camera failed" }));
+setUi((prev) => ({
+...prev,
+live: false,
+status: "Camera failed",
+state: "ENTER FRAME",
+}));
 }
-}, [stopCamera]);
+}, [openCameraStream, stopCamera]);
 
 const loadPoseModel = useCallback(async () => {
 if (modelReadyRef.current || poseRef.current) return;
@@ -520,7 +582,6 @@ targetStability,
 geometry.lean
 );
 const targetScore = targetCenterScore * 100;
-const targetState = stateFromCenterScore(targetCenterScore);
 
 smoothedRef.current.alignment = lerp(smoothedRef.current.alignment, targetAlignment, 0.14);
 smoothedRef.current.stability = lerp(smoothedRef.current.stability, targetStability, 0.16);
@@ -815,11 +876,4 @@ active
 {children}
 </button>
 );
-}
-
-function stateAccent(state: AxisState): "white" | "green" | "yellow" | "red" {
-if (state === "CENTER") return "green";
-if (state === "SHIFT") return "yellow";
-if (state === "DROP") return "red";
-return "white";
 }
