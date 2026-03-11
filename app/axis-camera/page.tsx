@@ -122,12 +122,6 @@ if (score >= 70) return "OK";
 return "LOW";
 }
 
-function qualityTone(score: number): EventTone {
-if (score >= 85) return "green";
-if (score >= 70) return "yellow";
-return "blue";
-}
-
 function toneClass(tone: EventTone) {
 if (tone === "green") return "text-[#7CFF9E] border-[#7CFF9E]/20 bg-[#7CFF9E]/8";
 if (tone === "blue") return "text-[#59A8FF] border-[#59A8FF]/20 bg-[#59A8FF]/8";
@@ -245,8 +239,8 @@ velocity: 0,
 
 const publishedRef = useRef({
 stability: 76,
-windowMs: 640,
 tilt: 8,
+windowMs: 640,
 quality: 82,
 velocity: 0,
 });
@@ -416,7 +410,6 @@ const cy = height / 2;
 
 ctx.save();
 
-// field grid
 ctx.strokeStyle = "rgba(255,255,255,0.04)";
 ctx.lineWidth = 1;
 
@@ -436,7 +429,6 @@ ctx.lineTo(x, height);
 ctx.stroke();
 }
 
-// main instrument marks
 ctx.strokeStyle = "rgba(255,255,255,0.12)";
 ctx.lineWidth = 1.8;
 
@@ -450,7 +442,6 @@ ctx.moveTo(0, cy);
 ctx.lineTo(width, cy);
 ctx.stroke();
 
-// center marker, not scope circles
 const mark = 18;
 ctx.strokeStyle = "rgba(255,255,255,0.08)";
 ctx.lineWidth = 1.2;
@@ -480,12 +471,16 @@ const center = toCanvas(body.center);
 
 ctx.save();
 
-const isAligned = stateStableRef.current.current === "ALIGNED";
-const isShift = stateStableRef.current.current === "SHIFT";
+const currentState = stateStableRef.current.current;
 const stroke =
-isAligned ? "rgba(124,255,158,0.88)" : isShift ? "rgba(232,199,92,0.86)" : "rgba(89,168,255,0.86)";
+currentState === "ALIGNED"
+? "rgba(124,255,158,0.88)"
+: currentState === "SHIFT"
+? "rgba(232,199,92,0.86)"
+: currentState === "DROP"
+? "rgba(89,168,255,0.86)"
+: "rgba(255,255,255,0.5)";
 
-// center spine
 ctx.strokeStyle = stroke;
 ctx.lineWidth = 2.2;
 ctx.beginPath();
@@ -493,14 +488,12 @@ ctx.moveTo(shoulderMid.x, shoulderMid.y);
 ctx.lineTo(hipMid.x, hipMid.y);
 ctx.stroke();
 
-// shoulder bar
 ctx.lineWidth = 4;
 ctx.beginPath();
 ctx.moveTo(ls.x, ls.y);
 ctx.lineTo(rs.x, rs.y);
 ctx.stroke();
 
-// trail line
 if (trailRef.current.length > 1) {
 ctx.beginPath();
 trailRef.current.forEach((p, i) => {
@@ -508,13 +501,18 @@ const c = toCanvas(p);
 if (i === 0) ctx.moveTo(c.x, c.y);
 else ctx.lineTo(c.x, c.y);
 });
-ctx.strokeStyle = stroke.replace("0.86", "0.2").replace("0.88", "0.2");
+ctx.strokeStyle = stroke
+.replace("0.88", "0.2")
+.replace("0.86", "0.2")
+.replace("0.5", "0.18");
 ctx.lineWidth = 2;
 ctx.stroke();
 }
 
-// center dot
-ctx.fillStyle = stroke.replace("0.86", "1").replace("0.88", "1");
+ctx.fillStyle = stroke
+.replace("0.88", "1")
+.replace("0.86", "1")
+.replace("0.5", "0.85");
 ctx.beginPath();
 ctx.arc(center.x, center.y, 7, 0, Math.PI * 2);
 ctx.fill();
@@ -555,8 +553,16 @@ previousCenterRef.current = body.center;
 smoothedRef.current.velocity = lerp(smoothedRef.current.velocity, body.velocity, SMOOTH_VELOCITY);
 smoothedRef.current.stability = lerp(smoothedRef.current.stability, body.stability * 100, SMOOTH_STABILITY);
 smoothedRef.current.tilt = lerp(smoothedRef.current.tilt, body.tiltDegrees, SMOOTH_TILT);
-smoothedRef.current.windowMs = lerp(smoothedRef.current.windowMs, 540 + body.centerScore * 240, SMOOTH_WINDOW);
-smoothedRef.current.quality = lerp(smoothedRef.current.quality, body.centerScore * 100, SMOOTH_QUALITY);
+smoothedRef.current.windowMs = lerp(
+smoothedRef.current.windowMs,
+540 + body.centerScore * 240,
+SMOOTH_WINDOW
+);
+smoothedRef.current.quality = lerp(
+smoothedRef.current.quality,
+body.centerScore * 100,
+SMOOTH_QUALITY
+);
 
 const nextState = body.state;
 const stable = stateStableRef.current;
@@ -604,11 +610,25 @@ publishedRef.current.velocity = pVelocity;
 trailRef.current.push({ x: body.center.x, y: body.center.y });
 if (trailRef.current.length > MAX_TRAIL_POINTS) trailRef.current.shift();
 
-const stableState = stable.current;
+const stableState: AxisState = stable.current;
+
 if (stableState !== previousStateRef.current) {
-if (stableState !== "ENTER FRAME" && stableState !== "LOST") {
-pushEvent(stableState, `${stableState === "ALIGNED" ? "Window" : stableState === "SHIFT" ? "Tilt" : "Velocity"} ${stableState === "ALIGNED" ? pWindow + " ms" : stableState === "SHIFT" ? pTilt.toFixed(1) + "°" : pVelocity.toFixed(4)}`, stateTone(stableState));
+switch (stableState) {
+case "ALIGNED":
+pushEvent("ALIGNED", `Window ${pWindow} ms`, stateTone("ALIGNED"));
+break;
+case "SHIFT":
+pushEvent("SHIFT", `Tilt ${pTilt.toFixed(1)}°`, stateTone("SHIFT"));
+break;
+case "DROP":
+pushEvent("DROP", `Velocity ${pVelocity.toFixed(4)}`, stateTone("DROP"));
+break;
+case "LOST":
+case "ENTER FRAME":
+default:
+break;
 }
+
 previousStateRef.current = stableState;
 }
 
@@ -721,15 +741,15 @@ since: null,
 };
 publishedRef.current = {
 stability: 76,
-windowMs: 640,
 tilt: 8,
+windowMs: 640,
 quality: 82,
 velocity: 0,
 };
 smoothedRef.current = {
 stability: 76,
-windowMs: 640,
 tilt: 8,
+windowMs: 640,
 quality: 82,
 velocity: 0,
 };
