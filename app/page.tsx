@@ -1,1044 +1,1244 @@
-"use client";
+'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-DrawingUtils,
-FilesetResolver,
-PoseLandmarker,
-} from "@mediapipe/tasks-vision";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 
-type AxisState = "ENTER FRAME" | "LOCK" | "LOAD" | "SHIFT" | "DROP" | "OFF AXIS";
+type AxisState = 'ALIGNED' | 'SHIFT' | 'DROP' | 'LOST';
 
-type Metrics = {
+type AxisEvent = {
+id: string;
+at: string;
 state: AxisState;
+tilt: number;
 stability: number;
-alignment: number;
-lean: number;
-driftX: number;
-driftY: number;
-axisScore: number;
-stabilityGrade: string;
-alignmentGrade: string;
-leanGrade: string;
+velocity: number;
+windowMs: number;
+comDriftPx: number;
 };
 
-type PosePoint = {
-x: number;
-y: number;
-z?: number;
-visibility?: number;
+type Point = { x: number; y: number };
+
+type Calibration = {
+leftBoundary: Point | null;
+rightBoundary: Point | null;
+target: Point | null;
+playerStart: Point | null;
 };
 
-const STATE_COLORS: Record<AxisState, string> = {
-"ENTER FRAME": "#c9d1d9",
-LOCK: "#7CFF5B",
-LOAD: "#63A7FF",
-SHIFT: "#FFD24D",
-DROP: "#FF6B6B",
-"OFF AXIS": "#FF9B5E",
-};
+const BG = '#0B0B0B';
+const SURFACE = '#101010';
+const TEXT = '#F5F5F5';
+const MUTED = '#8D8D8D';
+const LINE = '#2A2A2A';
+const AXIS_GREEN = '#39FF14';
+const ALIGNED = '#00FF9C';
+const SHIFT = '#FFD400';
+const DROP = '#3FA7FF';
+const LOST = '#7A7A7A';
 
-const INITIAL_METRICS: Metrics = {
-state: "ENTER FRAME",
-stability: 0,
-alignment: 0,
-lean: 0,
-driftX: 0,
-driftY: 0,
-axisScore: 0,
-stabilityGrade: "--",
-alignmentGrade: "--",
-leanGrade: "--",
-};
+const HOLD_MS_TO_START = 180;
+const MAX_HISTORY = 24;
+const CLEAN_WINDOW_MIN_MS = 350;
+
+const STACK_ALIGNED_PX = 22;
+const STACK_SHIFT_PX = 46;
+const COM_ALIGNED_PX = 26;
+const COM_SHIFT_PX = 54;
+const BODY_AXIS_SHIFT_DEG = 7;
+const BODY_AXIS_DROP_DEG = 16;
+const DOWNWARD_DROP_VELOCITY = 20;
 
 function clamp(value: number, min: number, max: number) {
-return Math.max(min, Math.min(max, value));
+return Math.min(max, Math.max(min, value));
 }
 
-function round(value: number, digits = 2) {
-return Number(value.toFixed(digits));
+function dist(a: Point, b: Point) {
+return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function averagePoint(points: PosePoint[]): PosePoint {
-const valid = points.filter(Boolean);
-const count = Math.max(valid.length, 1);
+function mean(values: number[]) {
+if (!values.length) return 0;
+return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+function formatNow() {
+return new Date().toLocaleTimeString([], {
+hour: 'numeric',
+minute: '2-digit',
+second: '2-digit',
+});
+}
+
+function stateColor(state: AxisState) {
+switch (state) {
+case 'ALIGNED':
+return ALIGNED;
+case 'SHIFT':
+return SHIFT;
+case 'DROP':
+return DROP;
+case 'LOST':
+default:
+return LOST;
+}
+}
+
+function labelForEvent(event: AxisEvent) {
+if (event.state === 'LOST') return 'Tracking lost';
+return `Velocity ${event.velocity.toFixed(4)} • Drift ${event.comDriftPx.toFixed(1)} px`;
+}
+
+function midpoint(a?: { x: number; y: number }, b?: { x: number; y: number }): Point | null {
+if (!a || !b) return null;
+return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+}
+
+function toPx(point: Point, width: number, height: number): Point {
+return { x: point.x * width, y: point.y * height };
+}
+
+function safePointAverage(points: Array<Point | null>): Point | null {
+const valid = points.filter(Boolean) as Point[];
+if (!valid.length) return null;
 return {
-x: valid.reduce((sum, p) => sum + p.x, 0) / count,
-y: valid.reduce((sum, p) => sum + p.y, 0) / count,
-z: valid.reduce((sum, p) => sum + (p.z ?? 0), 0) / count,
-visibility:
-valid.reduce((sum, p) => sum + (p.visibility ?? 1), 0) / count,
-};
-}
-
-function dist(a: PosePoint, b: PosePoint) {
-const dx = a.x - b.x;
-const dy = a.y - b.y;
-return Math.sqrt(dx * dx + dy * dy);
-}
-
-function toGrade(value: number) {
-if (value >= 97) return "A+";
-if (value >= 93) return "A";
-if (value >= 90) return "A-";
-if (value >= 87) return "B+";
-if (value >= 83) return "B";
-if (value >= 80) return "B-";
-if (value >= 77) return "C+";
-if (value >= 73) return "C";
-if (value >= 70) return "C-";
-if (value >= 67) return "D+";
-if (value >= 63) return "D";
-if (value >= 60) return "D-";
-return "F";
-}
-
-function gradeColor(grade: string) {
-if (grade.startsWith("A")) return "#7CFF5B";
-if (grade.startsWith("B")) return "#9FE870";
-if (grade.startsWith("C")) return "#FFD24D";
-if (grade.startsWith("D")) return "#FF9B5E";
-if (grade === "--") return "#ffffff";
-return "#FF6B6B";
-}
-
-function classifyPose(landmarks: PosePoint[]): Metrics {
-const nose = landmarks[0];
-const leftShoulder = landmarks[11];
-const rightShoulder = landmarks[12];
-const leftHip = landmarks[23];
-const rightHip = landmarks[24];
-const leftKnee = landmarks[25];
-const rightKnee = landmarks[26];
-const leftAnkle = landmarks[27];
-const rightAnkle = landmarks[28];
-
-const shoulderCenter = averagePoint([leftShoulder, rightShoulder]);
-const hipCenter = averagePoint([leftHip, rightHip]);
-const kneeCenter = averagePoint([leftKnee, rightKnee]);
-const ankleCenter = averagePoint([leftAnkle, rightAnkle]);
-
-const shoulderWidth = Math.max(dist(leftShoulder, rightShoulder), 0.02);
-const hipWidth = Math.max(dist(leftHip, rightHip), 0.02);
-const baseWidth = Math.max(dist(leftAnkle, rightAnkle), 0.04);
-
-const bodyDx = shoulderCenter.x - hipCenter.x;
-const bodyDy = Math.max(Math.abs(shoulderCenter.y - hipCenter.y), 0.001);
-const lean = Math.abs(bodyDx) / bodyDy;
-
-const headDriftX = nose.x - ankleCenter.x;
-const torsoDriftX = hipCenter.x - ankleCenter.x;
-const driftX = (headDriftX + torsoDriftX) / 2;
-const driftY = hipCenter.y - kneeCenter.y;
-
-const kneeBend =
-((leftKnee.y - leftHip.y) + (rightKnee.y - rightHip.y)) / 2 -
-((leftAnkle.y - leftKnee.y) + (rightAnkle.y - rightKnee.y)) / 2 * 0.45;
-
-const bendScore = clamp((kneeBend + 0.08) / 0.22, 0, 1);
-
-const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y);
-const hipTilt = Math.abs(leftHip.y - rightHip.y);
-
-const axisOffset =
-Math.abs(shoulderCenter.x - hipCenter.x) +
-Math.abs(hipCenter.x - ankleCenter.x);
-
-const alignmentRaw =
-1 -
-clamp(
-lean * 0.85 +
-Math.abs(driftX) * 1.35 +
-shoulderTilt * 1.2 +
-hipTilt * 1.0 +
-axisOffset * 1.0,
-0,
-1,
-);
-
-const stabilityRaw =
-1 -
-clamp(
-lean * 0.6 +
-Math.abs(driftX) * 0.95 +
-shoulderTilt * 0.8 +
-hipTilt * 0.7,
-0,
-1,
-);
-
-const alignment = clamp(Math.round(alignmentRaw * 100), 0, 100);
-const stability = clamp(Math.round(stabilityRaw * 100), 0, 100);
-
-const driftThreshold = Math.max(baseWidth * 0.18, 0.045);
-const offAxisThreshold = Math.max(shoulderWidth * 0.22, 0.05);
-const dropThreshold = 0.22;
-
-let state: AxisState = "LOCK";
-
-const isDrop =
-lean > dropThreshold ||
-alignment < 45 ||
-Math.abs(driftX) > baseWidth * 0.36;
-
-const isOffAxis =
-axisOffset > offAxisThreshold ||
-shoulderTilt > shoulderWidth * 0.18 ||
-hipTilt > hipWidth * 0.18;
-
-const isLoad =
-bendScore > 0.45 &&
-lean < 0.2 &&
-Math.abs(driftX) < baseWidth * 0.24 &&
-alignment > 52;
-
-const isShift = Math.abs(driftX) > driftThreshold && !isDrop && !isOffAxis;
-
-if (isDrop) {
-state = "DROP";
-} else if (isOffAxis) {
-state = "OFF AXIS";
-} else if (isLoad) {
-state = "LOAD";
-} else if (isShift) {
-state = "SHIFT";
-} else {
-state = "LOCK";
-}
-
-const leanScore = clamp(Math.round(100 - lean * 220), 0, 100);
-const axisScore = clamp(
-Math.round(stability * 0.45 + alignment * 0.4 + leanScore * 0.15),
-0,
-100,
-);
-
-return {
-state,
-stability,
-alignment,
-lean: round(lean, 2),
-driftX: round(driftX, 2),
-driftY: round(driftY, 2),
-axisScore,
-stabilityGrade: toGrade(stability),
-alignmentGrade: toGrade(alignment),
-leanGrade: toGrade(leanScore),
+x: valid.reduce((sum, p) => sum + p.x, 0) / valid.length,
+y: valid.reduce((sum, p) => sum + p.y, 0) / valid.length,
 };
 }
 
 export default function Page() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
-const overlayRef = useRef<HTMLCanvasElement | null>(null);
-const outputRef = useRef<HTMLCanvasElement | null>(null);
-const streamRef = useRef<MediaStream | null>(null);
+const canvasRef = useRef<HTMLCanvasElement | null>(null);
+const wrapRef = useRef<HTMLDivElement | null>(null);
 const poseRef = useRef<PoseLandmarker | null>(null);
 const rafRef = useRef<number | null>(null);
-const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-const chunksRef = useRef<Blob[]>([]);
-const holdTimeoutRef = useRef<number | null>(null);
-const clipStartRef = useRef<number | null>(null);
+const streamRef = useRef<MediaStream | null>(null);
+const holdTimerRef = useRef<number | null>(null);
 
-const [cameraFacing, setCameraFacing] = useState<"user" | "environment">(
-"environment",
+const lastComRef = useRef<Point | null>(null);
+const lastStateRef = useRef<AxisState>('LOST');
+const alignedStartRef = useRef<number | null>(null);
+const lastAlignedEventAtRef = useRef<number>(0);
+
+const recentTiltRef = useRef<number[]>([]);
+const recentDriftRef = useRef<number[]>([]);
+const recentStackRef = useRef<number[]>([]);
+
+const currentMetricsRef = useRef({
+state: 'LOST' as AxisState,
+tilt: 0,
+stability: 0,
+velocity: 0,
+windowMs: 0,
+comDriftPx: 0,
+});
+
+const [ready, setReady] = useState(false);
+const [cameraLive, setCameraLive] = useState(false);
+const [isHolding, setIsHolding] = useState(false);
+const [isCapturing, setIsCapturing] = useState(false);
+const [quality, setQuality] = useState<'GOOD' | 'LOW' | 'NO SIGNAL'>('NO SIGNAL');
+const [axisState, setAxisState] = useState<AxisState>('LOST');
+const [tilt, setTilt] = useState(0);
+const [stability, setStability] = useState(0);
+const [velocity, setVelocity] = useState(0);
+const [windowMs, setWindowMs] = useState(0);
+const [comDriftPx, setComDriftPx] = useState(0);
+const [history, setHistory] = useState<AxisEvent[]>([]);
+const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+const [selectedPoint, setSelectedPoint] = useState<keyof Calibration | null>('leftBoundary');
+const [calibration, setCalibration] = useState<Calibration>({
+leftBoundary: null,
+rightBoundary: null,
+target: null,
+playerStart: null,
+});
+
+const selectedEvent = useMemo(
+() => history.find((item) => item.id === selectedEventId) ?? history[0] ?? null,
+[history, selectedEventId]
 );
-const [cameraReady, setCameraReady] = useState(false);
-const [running, setRunning] = useState(false);
-const [recording, setRecording] = useState(false);
-const [metrics, setMetrics] = useState<Metrics>(INITIAL_METRICS);
-const [clipUrl, setClipUrl] = useState<string>("");
-const [statusText, setStatusText] = useState("Idle");
-const [error, setError] = useState("");
 
-const stateColor = useMemo(() => STATE_COLORS[metrics.state], [metrics.state]);
+const axisShape = useMemo(() => history.slice(0, 10).reverse(), [history]);
 
-const cleanupStream = useCallback(() => {
-if (streamRef.current) {
-streamRef.current.getTracks().forEach((track) => track.stop());
-streamRef.current = null;
-}
+const pushEvent = useCallback((event: AxisEvent) => {
+setHistory((prev) => [event, ...prev].slice(0, MAX_HISTORY));
+setSelectedEventId(event.id);
 }, []);
 
+const syncMetricsToState = useCallback((next: {
+state: AxisState;
+tilt: number;
+stability: number;
+velocity: number;
+windowMs: number;
+comDriftPx: number;
+}) => {
+currentMetricsRef.current = next;
+setAxisState(next.state);
+setTilt(next.tilt);
+setStability(next.stability);
+setVelocity(next.velocity);
+setWindowMs(next.windowMs);
+setComDriftPx(next.comDriftPx);
+}, []);
+
+const drawReticle = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
+const cx = w / 2;
+const cy = h / 2;
+
+ctx.save();
+ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+ctx.lineWidth = 1;
+
+[0.12, 0.22, 0.34].forEach((ratio) => {
+ctx.beginPath();
+ctx.arc(cx, cy, Math.min(w, h) * ratio, 0, Math.PI * 2);
+ctx.stroke();
+});
+
+ctx.beginPath();
+ctx.moveTo(cx - 90, cy);
+ctx.lineTo(cx + 90, cy);
+ctx.stroke();
+
+ctx.beginPath();
+ctx.moveTo(cx, cy - 90);
+ctx.lineTo(cx, cy + 90);
+ctx.stroke();
+
+ctx.restore();
+}, []);
+
+const drawCalibration = useCallback(
+(ctx: CanvasRenderingContext2D) => {
+const points: Array<[keyof Calibration, string]> = [
+['leftBoundary', 'L'],
+['rightBoundary', 'R'],
+['target', 'T'],
+['playerStart', 'S'],
+];
+
+points.forEach(([key, label]) => {
+const point = calibration[key];
+if (!point) return;
+
+ctx.save();
+ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+ctx.fillStyle = 'rgba(11,11,11,0.82)';
+ctx.lineWidth = 1;
+ctx.beginPath();
+ctx.arc(point.x, point.y, 8, 0, Math.PI * 2);
+ctx.fill();
+ctx.stroke();
+ctx.font = '12px Inter, Arial, sans-serif';
+ctx.fillStyle = '#FFFFFF';
+ctx.fillText(label, point.x + 12, point.y + 4);
+ctx.restore();
+});
+},
+[calibration]
+);
+
+const drawInstrument = useCallback(
+(
+poseLandmarks: Array<{ x: number; y: number; visibility?: number }> | null,
+bodyAxisPoints: Point[] | null,
+com: Point | null,
+state: AxisState,
+driftPx: number
+) => {
+const canvas = canvasRef.current;
+const wrap = wrapRef.current;
+if (!canvas || !wrap) return;
+
+const rect = wrap.getBoundingClientRect();
+const dpr = window.devicePixelRatio || 1;
+
+canvas.width = rect.width * dpr;
+canvas.height = rect.height * dpr;
+canvas.style.width = `${rect.width}px`;
+canvas.style.height = `${rect.height}px`;
+
+const ctx = canvas.getContext('2d');
+if (!ctx) return;
+
+ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+ctx.clearRect(0, 0, rect.width, rect.height);
+
+drawReticle(ctx, rect.width, rect.height);
+drawCalibration(ctx);
+
+const axisX = calibration.playerStart?.x ?? rect.width / 2;
+const axisColor = state === 'ALIGNED' ? AXIS_GREEN : stateColor(state);
+
+ctx.save();
+ctx.strokeStyle = axisColor;
+ctx.globalAlpha = state === 'ALIGNED' ? 0.95 : 0.68;
+ctx.lineWidth = 2;
+ctx.beginPath();
+ctx.moveTo(axisX, 0);
+ctx.lineTo(axisX, rect.height);
+ctx.stroke();
+ctx.restore();
+
+if (poseLandmarks) {
+const pairs = [
+[11, 12],
+[11, 23],
+[12, 24],
+[23, 24],
+[23, 25],
+[24, 26],
+[25, 27],
+[26, 28],
+];
+
+ctx.save();
+ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+ctx.lineWidth = 1.15;
+
+pairs.forEach(([a, b]) => {
+const pa = poseLandmarks[a];
+const pb = poseLandmarks[b];
+if (!pa || !pb) return;
+ctx.beginPath();
+ctx.moveTo(pa.x * rect.width, pa.y * rect.height);
+ctx.lineTo(pb.x * rect.width, pb.y * rect.height);
+ctx.stroke();
+});
+
+ctx.restore();
+}
+
+if (bodyAxisPoints && bodyAxisPoints.length >= 2) {
+ctx.save();
+ctx.strokeStyle = axisColor;
+ctx.lineWidth = 3;
+ctx.globalAlpha = 0.9;
+ctx.beginPath();
+ctx.moveTo(bodyAxisPoints[0].x, bodyAxisPoints[0].y);
+for (let i = 1; i < bodyAxisPoints.length; i += 1) {
+ctx.lineTo(bodyAxisPoints[i].x, bodyAxisPoints[i].y);
+}
+ctx.stroke();
+ctx.restore();
+
+ctx.save();
+ctx.fillStyle = axisColor;
+bodyAxisPoints.forEach((p) => {
+ctx.beginPath();
+ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+ctx.fill();
+});
+ctx.restore();
+}
+
+if (com) {
+const pulse = 6 + Math.min(12, driftPx * 0.12);
+
+ctx.save();
+ctx.fillStyle = stateColor(state);
+ctx.shadowBlur = state === 'ALIGNED' ? 18 : 10;
+ctx.shadowColor = stateColor(state);
+ctx.beginPath();
+ctx.arc(com.x, com.y, pulse, 0, Math.PI * 2);
+ctx.fill();
+ctx.restore();
+
+ctx.save();
+ctx.strokeStyle = stateColor(state);
+ctx.globalAlpha = 0.8;
+ctx.lineWidth = 1;
+ctx.beginPath();
+ctx.moveTo(axisX, com.y);
+ctx.lineTo(com.x, com.y);
+ctx.stroke();
+ctx.restore();
+}
+},
+[calibration, drawCalibration, drawReticle]
+);
+
+const addStateEventIfNeeded = useCallback(
+(
+state: AxisState,
+tiltValue: number,
+stabilityValue: number,
+velocityValue: number,
+windowValue: number,
+driftValue: number
+) => {
+const previous = lastStateRef.current;
+
+if (!isCapturing || previous === state) {
+lastStateRef.current = state;
+return;
+}
+
+lastStateRef.current = state;
+
+pushEvent({
+id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+at: formatNow(),
+state,
+tilt: tiltValue,
+stability: stabilityValue,
+velocity: velocityValue,
+windowMs: windowValue,
+comDriftPx: driftValue,
+});
+},
+[isCapturing, pushEvent]
+);
+
+const computeCom = useCallback((landmarks: Array<{ x: number; y: number }>, width: number, height: number) => {
+const weightedPoints = [
+{ idx: 11, w: 0.08 },
+{ idx: 12, w: 0.08 },
+{ idx: 23, w: 0.22 },
+{ idx: 24, w: 0.22 },
+{ idx: 25, w: 0.10 },
+{ idx: 26, w: 0.10 },
+{ idx: 27, w: 0.10 },
+{ idx: 28, w: 0.10 },
+];
+
+let sumW = 0;
+let sumX = 0;
+let sumY = 0;
+
+weightedPoints.forEach(({ idx, w }) => {
+const lm = landmarks[idx];
+if (!lm) return;
+sumW += w;
+sumX += lm.x * width * w;
+sumY += lm.y * height * w;
+});
+
+if (!sumW) return null;
+
+return {
+x: sumX / sumW,
+y: sumY / sumW,
+};
+}, []);
+
+const inferState = useCallback(
+(bodyAxisDeg: number, stackSpread: number, comDrift: number, bodyVelocity: number): AxisState => {
+if (
+bodyAxisDeg <= BODY_AXIS_SHIFT_DEG &&
+stackSpread <= STACK_ALIGNED_PX &&
+comDrift <= COM_ALIGNED_PX
+) {
+return 'ALIGNED';
+}
+
+if (
+bodyVelocity >= DOWNWARD_DROP_VELOCITY ||
+bodyAxisDeg >= BODY_AXIS_DROP_DEG ||
+stackSpread >= STACK_SHIFT_PX ||
+comDrift >= COM_SHIFT_PX
+) {
+return 'DROP';
+}
+
+return 'SHIFT';
+},
+[]
+);
+
+const processFrame = useCallback(async () => {
+const video = videoRef.current;
+const pose = poseRef.current;
+const wrap = wrapRef.current;
+
+if (!video || !pose || !wrap || video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) {
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+return;
+}
+
+const nowMs = performance.now();
+
+let result: ReturnType<PoseLandmarker['detectForVideo']>;
+try {
+result = pose.detectForVideo(video, nowMs);
+} catch (error) {
+console.error('detectForVideo failed', error);
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+return;
+}
+
+if (!result) {
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+return;
+}
+
+const landmarks = result.landmarks?.[0] ?? null;
+const width = wrap.clientWidth;
+const height = wrap.clientHeight;
+
+if (!landmarks) {
+setQuality('NO SIGNAL');
+
+syncMetricsToState({
+state: 'LOST',
+tilt: 0,
+stability: 0,
+velocity: 0,
+windowMs: 0,
+comDriftPx: 0,
+});
+
+drawInstrument(null, null, null, 'LOST', 0);
+addStateEventIfNeeded('LOST', 0, 0, 0, 0, 0);
+
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+return;
+}
+
+const shoulderMidNorm = midpoint(landmarks[11], landmarks[12]);
+const hipMidNorm = midpoint(landmarks[23], landmarks[24]);
+const kneeMidNorm = midpoint(landmarks[25], landmarks[26]);
+const ankleMidNorm = midpoint(landmarks[27], landmarks[28]);
+
+if (!shoulderMidNorm || !hipMidNorm || !kneeMidNorm || !ankleMidNorm) {
+setQuality('LOW');
+
+syncMetricsToState({
+state: 'LOST',
+tilt: 0,
+stability: 0,
+velocity: 0,
+windowMs: 0,
+comDriftPx: 0,
+});
+
+drawInstrument(landmarks, null, null, 'LOST', 0);
+addStateEventIfNeeded('LOST', 0, 0, 0, 0, 0);
+
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+return;
+}
+
+const shoulderMid = toPx(shoulderMidNorm, width, height);
+const hipMid = toPx(hipMidNorm, width, height);
+const kneeMid = toPx(kneeMidNorm, width, height);
+const ankleMid = toPx(ankleMidNorm, width, height);
+
+const bodyAxisPoints = [shoulderMid, hipMid, kneeMid, ankleMid];
+
+const dx = shoulderMid.x - ankleMid.x;
+const dy = ankleMid.y - shoulderMid.y;
+const bodyAxisDeg = Math.abs((Math.atan2(dx, Math.max(1, dy)) * 180) / Math.PI);
+
+const stackSpread = Math.max(
+Math.abs(shoulderMid.x - ankleMid.x),
+Math.abs(hipMid.x - ankleMid.x),
+Math.abs(kneeMid.x - ankleMid.x)
+);
+
+const com = computeCom(landmarks, width, height);
+const axisX = calibration.playerStart?.x ?? width / 2;
+const drift = com ? Math.abs(com.x - axisX) : 0;
+
+const bodyMid = safePointAverage([shoulderMid, hipMid, kneeMid, ankleMid]);
+let nextVelocity = 0;
+if (bodyMid && lastComRef.current) {
+nextVelocity = dist(bodyMid, lastComRef.current);
+}
+lastComRef.current = bodyMid;
+
+recentTiltRef.current = [...recentTiltRef.current.slice(-24), bodyAxisDeg];
+recentDriftRef.current = [...recentDriftRef.current.slice(-24), drift];
+recentStackRef.current = [...recentStackRef.current.slice(-24), stackSpread];
+
+const driftVariance = mean(
+recentDriftRef.current.map((v) => Math.abs(v - mean(recentDriftRef.current)))
+);
+const stackVariance = mean(
+recentStackRef.current.map((v) => Math.abs(v - mean(recentStackRef.current)))
+);
+const avgAxisTilt = mean(recentTiltRef.current);
+
+const nextStability = clamp(
+100 - driftVariance * 1.2 - stackVariance * 1.1 - avgAxisTilt * 1.7,
+0,
+100
+);
+
+const nextState = inferState(bodyAxisDeg, stackSpread, drift, nextVelocity);
+
+let nextWindow = 0;
+if (nextState === 'ALIGNED') {
+if (alignedStartRef.current === null) alignedStartRef.current = nowMs;
+nextWindow = nowMs - alignedStartRef.current;
+} else {
+alignedStartRef.current = null;
+}
+
+setQuality(nextStability > 35 ? 'GOOD' : 'LOW');
+
+syncMetricsToState({
+state: nextState,
+tilt: bodyAxisDeg,
+stability: nextStability,
+velocity: nextVelocity,
+windowMs: nextWindow,
+comDriftPx: drift,
+});
+
+drawInstrument(landmarks, bodyAxisPoints, com, nextState, drift);
+addStateEventIfNeeded(nextState, bodyAxisDeg, nextStability, nextVelocity, nextWindow, drift);
+
+if (isCapturing && nextState === 'ALIGNED' && nextWindow >= CLEAN_WINDOW_MIN_MS) {
+const now = Date.now();
+if (now - lastAlignedEventAtRef.current > 900) {
+lastAlignedEventAtRef.current = now;
+
+pushEvent({
+id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+at: formatNow(),
+state: 'ALIGNED',
+tilt: bodyAxisDeg,
+stability: nextStability,
+velocity: nextVelocity,
+windowMs: nextWindow,
+comDriftPx: drift,
+});
+}
+}
+
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+}, [
+addStateEventIfNeeded,
+calibration.playerStart,
+computeCom,
+drawInstrument,
+inferState,
+isCapturing,
+pushEvent,
+syncMetricsToState,
+]);
+
 const stopLoop = useCallback(() => {
-if (rafRef.current !== null) {
+if (rafRef.current) {
 cancelAnimationFrame(rafRef.current);
 rafRef.current = null;
 }
 }, []);
 
-const drawRoundedRect = (
-ctx: CanvasRenderingContext2D,
-x: number,
-y: number,
-w: number,
-h: number,
-r: number,
-) => {
-ctx.beginPath();
-ctx.moveTo(x + r, y);
-ctx.arcTo(x + w, y, x + w, y + h, r);
-ctx.arcTo(x + w, y + h, x, y + h, r);
-ctx.arcTo(x, y + h, x, y, r);
-ctx.arcTo(x, y, x + w, y, r);
-ctx.closePath();
-};
-
-const drawMeasurementReticle = useCallback(
-(
-ctx: CanvasRenderingContext2D,
-width: number,
-height: number,
-activeState: AxisState,
-) => {
-const zoneW = width * 0.44;
-const zoneH = height * 0.62;
-const x = (width - zoneW) / 2;
-const y = (height - zoneH) / 2;
-const lineColor =
-activeState === "LOCK"
-? "rgba(124,255,91,0.55)"
-: activeState === "ENTER FRAME"
-? "rgba(255,255,255,0.26)"
-: "rgba(255,255,255,0.18)";
-
-ctx.save();
-ctx.strokeStyle = lineColor;
-ctx.lineWidth = 2;
-ctx.setLineDash([10, 12]);
-drawRoundedRect(ctx, x, y, zoneW, zoneH, 28);
-ctx.stroke();
-
-ctx.setLineDash([]);
-ctx.strokeStyle = "rgba(255,255,255,0.12)";
-ctx.lineWidth = 1;
-
-const midX = width / 2;
-const midY = height / 2;
-
-ctx.beginPath();
-ctx.moveTo(midX, y - 24);
-ctx.lineTo(midX, y + 18);
-ctx.moveTo(midX, y + zoneH - 18);
-ctx.lineTo(midX, y + zoneH + 24);
-ctx.moveTo(x - 24, midY);
-ctx.lineTo(x + 18, midY);
-ctx.moveTo(x + zoneW - 18, midY);
-ctx.lineTo(x + zoneW + 24, midY);
-ctx.stroke();
-
-if (activeState === "ENTER FRAME") {
-ctx.fillStyle = "rgba(255,255,255,0.76)";
-ctx.font = "700 16px Inter, Arial, sans-serif";
-ctx.textAlign = "center";
-ctx.fillText("ENTER FRAME", width / 2, y - 14);
-}
-
-ctx.restore();
-},
-[],
-);
-
-const drawInstrument = useCallback(
-(
-video: HTMLVideoElement,
-poseCanvas: HTMLCanvasElement,
-outputCanvas: HTMLCanvasElement,
-liveMetrics: Metrics,
-) => {
-const width = video.videoWidth || 1280;
-const height = video.videoHeight || 720;
-if (!width || !height) return;
-
-poseCanvas.width = width;
-poseCanvas.height = height;
-outputCanvas.width = width;
-outputCanvas.height = height;
-
-const octx = outputCanvas.getContext("2d");
-if (!octx) return;
-
-octx.clearRect(0, 0, width, height);
-octx.drawImage(video, 0, 0, width, height);
-octx.drawImage(poseCanvas, 0, 0, width, height);
-
-octx.fillStyle = "rgba(4, 6, 10, 0.12)";
-octx.fillRect(0, 0, width, height);
-
-drawMeasurementReticle(octx, width, height, liveMetrics.state);
-
-const isWide = width >= 900;
-const pad = Math.max(18, width * 0.02);
-
-octx.save();
-octx.fillStyle = "rgba(10, 12, 16, 0.32)";
-octx.strokeStyle = "rgba(255,255,255,0.10)";
-octx.lineWidth = 1.2;
-drawRoundedRect(octx, pad, pad, isWide ? 265 : 220, 82, 22);
-octx.fill();
-octx.stroke();
-
-octx.fillStyle = "rgba(255,255,255,0.70)";
-octx.font = "600 11px Inter, Arial, sans-serif";
-octx.fillText("AXIS CAMERA", pad + 16, pad + 22);
-
-octx.fillStyle = "rgba(255,255,255,0.92)";
-octx.font = "600 16px Inter, Arial, sans-serif";
-octx.fillText("Measurement Instrument", pad + 16, pad + 44);
-
-octx.fillStyle = stateColor;
-octx.font = isWide
-? "900 28px Inter, Arial, sans-serif"
-: "900 24px Inter, Arial, sans-serif";
-octx.fillText(liveMetrics.state, pad + 16, pad + 73);
-octx.restore();
-
-const statusW = isWide ? 190 : 160;
-const statusX = width - pad - statusW;
-
-octx.save();
-octx.fillStyle = "rgba(10, 12, 16, 0.32)";
-octx.strokeStyle = "rgba(255,255,255,0.10)";
-octx.lineWidth = 1.2;
-drawRoundedRect(octx, statusX, pad, statusW, 82, 22);
-octx.fill();
-octx.stroke();
-
-octx.textAlign = "right";
-octx.fillStyle = "rgba(255,255,255,0.68)";
-octx.font = "600 11px Inter, Arial, sans-serif";
-octx.fillText("STATUS", statusX + statusW - 16, pad + 22);
-
-octx.fillStyle = recording ? "#ff6b6b" : "rgba(255,255,255,0.92)";
-octx.font = "700 14px Inter, Arial, sans-serif";
-octx.fillText(
-recording ? "RECORDING" : "LIVE",
-statusX + statusW - 16,
-pad + 47,
-);
-
-octx.fillStyle = "rgba(255,255,255,0.70)";
-octx.font = "600 12px Inter, Arial, sans-serif";
-octx.fillText(
-`SCORE ${liveMetrics.axisScore}`,
-statusX + statusW - 16,
-pad + 69,
-);
-octx.textAlign = "left";
-octx.restore();
-
-const cards = [
-{ label: "AXIS SCORE", value: String(liveMetrics.axisScore), color: "#ffffff" },
-{ label: "STABILITY", value: liveMetrics.stabilityGrade, color: gradeColor(liveMetrics.stabilityGrade) },
-{ label: "ALIGNMENT", value: liveMetrics.alignmentGrade, color: gradeColor(liveMetrics.alignmentGrade) },
-{ label: "LEAN", value: liveMetrics.leanGrade, color: gradeColor(liveMetrics.leanGrade) },
-];
-
-if (isWide) {
-const sideW = Math.min(240, width * 0.2);
-const cardH = 70;
-const gap = 10;
-const totalH = cards.length * cardH + (cards.length - 1) * gap;
-const sideX = width - pad - sideW;
-const sideY = Math.max((height - totalH) / 2, 120);
-
-cards.forEach((card, index) => {
-const y = sideY + index * (cardH + gap);
-
-octx.save();
-octx.fillStyle = "rgba(12, 14, 18, 0.28)";
-octx.strokeStyle = "rgba(255,255,255,0.10)";
-octx.lineWidth = 1.1;
-drawRoundedRect(octx, sideX, y, sideW, cardH, 18);
-octx.fill();
-octx.stroke();
-
-octx.fillStyle = "rgba(255,255,255,0.58)";
-octx.font = "600 10px Inter, Arial, sans-serif";
-octx.fillText(card.label, sideX + 14, y + 20);
-
-octx.fillStyle = card.color;
-octx.font = "900 28px Inter, Arial, sans-serif";
-octx.fillText(card.value, sideX + 14, y + 53);
-octx.restore();
-});
-} else {
-const rowW = width - pad * 2;
-const rowH = 80;
-
-octx.save();
-octx.fillStyle = "rgba(12, 14, 18, 0.30)";
-octx.strokeStyle = "rgba(255,255,255,0.10)";
-octx.lineWidth = 1.1;
-drawRoundedRect(octx, pad, height - pad - rowH, rowW, rowH, 20);
-octx.fill();
-octx.stroke();
-
-const colW = rowW / 4;
-cards.forEach((card, index) => {
-const x = pad + index * colW;
-octx.fillStyle = "rgba(255,255,255,0.52)";
-octx.font = "600 10px Inter, Arial, sans-serif";
-octx.fillText(card.label, x + 12, height - pad - 52);
-
-octx.fillStyle = card.color;
-octx.font = "900 24px Inter, Arial, sans-serif";
-octx.fillText(card.value, x + 12, height - pad - 18);
-});
-
-octx.restore();
-}
-
-if (recording) {
-octx.save();
-octx.fillStyle = "#FF4D4D";
-octx.beginPath();
-octx.arc(pad + 8, height - pad - 104, 7, 0, Math.PI * 2);
-octx.fill();
-
-octx.fillStyle = "rgba(255,255,255,0.92)";
-octx.font = "700 14px Inter, Arial, sans-serif";
-octx.fillText("RECORDING", pad + 22, height - pad - 99);
-octx.restore();
-}
-},
-[drawMeasurementReticle, recording, stateColor],
-);
-
-const loadPose = useCallback(async () => {
-if (poseRef.current) return poseRef.current;
-
-const vision = await FilesetResolver.forVisionTasks(
-"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm",
-);
-
-const pose = await PoseLandmarker.createFromOptions(vision, {
-baseOptions: {
-modelAssetPath:
-"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
-},
-runningMode: "VIDEO",
-numPoses: 1,
-minPoseDetectionConfidence: 0.5,
-minPosePresenceConfidence: 0.5,
-minTrackingConfidence: 0.5,
-outputSegmentationMasks: false,
-});
-
-poseRef.current = pose;
-return pose;
-}, []);
-
-const renderFrame = useCallback(async () => {
-const video = videoRef.current;
-const overlayCanvas = overlayRef.current;
-const outputCanvas = outputRef.current;
-const pose = poseRef.current;
-
-if (!video || !overlayCanvas || !outputCanvas || !pose) {
-rafRef.current = requestAnimationFrame(renderFrame);
-return;
-}
-
-if (video.readyState < 2 || !running) {
-rafRef.current = requestAnimationFrame(renderFrame);
-return;
-}
-
-const width = video.videoWidth || 1280;
-const height = video.videoHeight || 720;
-
-overlayCanvas.width = width;
-overlayCanvas.height = height;
-
-const ctx = overlayCanvas.getContext("2d");
-if (!ctx) {
-rafRef.current = requestAnimationFrame(renderFrame);
-return;
-}
-
-ctx.clearRect(0, 0, width, height);
-
-const result = pose.detectForVideo(video, performance.now());
-const landmarks = result.landmarks?.[0];
-
-if (landmarks && landmarks.length > 28) {
-const liveMetrics = classifyPose(landmarks as PosePoint[]);
-setMetrics(liveMetrics);
-
-ctx.save();
-
-if (cameraFacing === "user") {
-ctx.translate(width, 0);
-ctx.scale(-1, 1);
-}
-
-const drawingUtils = new DrawingUtils(ctx);
-
-drawingUtils.drawConnectors(
-landmarks,
-PoseLandmarker.POSE_CONNECTIONS,
-{
-color: STATE_COLORS[liveMetrics.state],
-lineWidth: Math.max(3, width * 0.003),
-},
-);
-
-drawingUtils.drawLandmarks(landmarks, {
-color: STATE_COLORS[liveMetrics.state],
-radius: 4,
-});
-
-const shoulderCenter = averagePoint([
-landmarks[11] as PosePoint,
-landmarks[12] as PosePoint,
-]);
-const hipCenter = averagePoint([
-landmarks[23] as PosePoint,
-landmarks[24] as PosePoint,
-]);
-const ankleCenter = averagePoint([
-landmarks[27] as PosePoint,
-landmarks[28] as PosePoint,
-]);
-
-const axisX = ((shoulderCenter.x + hipCenter.x + ankleCenter.x) / 3) * width;
-
-ctx.save();
-ctx.strokeStyle =
-liveMetrics.state === "LOCK"
-? "rgba(124,255,91,0.55)"
-: "rgba(255,255,255,0.22)";
-ctx.lineWidth = 2;
-ctx.setLineDash([8, 10]);
-ctx.beginPath();
-ctx.moveTo(axisX, height * 0.08);
-ctx.lineTo(axisX, height * 0.94);
-ctx.stroke();
-ctx.restore();
-
-// Axis Shape
-ctx.save();
-ctx.strokeStyle = STATE_COLORS[liveMetrics.state];
-ctx.lineWidth = Math.max(4, width * 0.0035);
-ctx.lineCap = "round";
-ctx.beginPath();
-ctx.moveTo(shoulderCenter.x * width, shoulderCenter.y * height);
-ctx.lineTo(hipCenter.x * width, hipCenter.y * height);
-ctx.lineTo(ankleCenter.x * width, ankleCenter.y * height);
-ctx.stroke();
-
-ctx.fillStyle = "rgba(255,255,255,0.92)";
-ctx.font = "700 12px Inter, Arial, sans-serif";
-ctx.fillText(
-"AXIS SHAPE",
-shoulderCenter.x * width + 12,
-shoulderCenter.y * height - 12,
-);
-ctx.restore();
-
-ctx.restore();
-
-drawInstrument(video, overlayCanvas, outputCanvas, liveMetrics);
-} else {
-const emptyMetrics = {
-...INITIAL_METRICS,
-state: "ENTER FRAME" as AxisState,
-};
-setMetrics(emptyMetrics);
-drawInstrument(video, overlayCanvas, outputCanvas, emptyMetrics);
-}
-
-rafRef.current = requestAnimationFrame(renderFrame);
-}, [cameraFacing, drawInstrument, running]);
-
 const startCamera = useCallback(async () => {
 try {
-setError("");
-setStatusText("Starting camera");
-stopLoop();
-cleanupStream();
-
-const pose = await loadPose();
-
 const stream = await navigator.mediaDevices.getUserMedia({
-audio: false,
 video: {
-facingMode: { ideal: cameraFacing },
+facingMode: 'user',
 width: { ideal: 1280 },
 height: { ideal: 720 },
 },
+audio: false,
 });
 
 streamRef.current = stream;
-
 const video = videoRef.current;
 if (!video) return;
 
 video.srcObject = stream;
 await video.play();
-
-poseRef.current = pose;
-setCameraReady(true);
-setRunning(true);
-setStatusText("Live");
-rafRef.current = requestAnimationFrame(renderFrame);
-} catch (err) {
-console.error(err);
-setError("Camera or pose model failed to start.");
-setStatusText("Start failed");
-}
-}, [cameraFacing, cleanupStream, loadPose, renderFrame, stopLoop]);
-
-const stopCamera = useCallback(() => {
-if (recording) {
-const recorder = mediaRecorderRef.current;
-if (recorder && recorder.state !== "inactive") recorder.stop();
-setRecording(false);
-}
-
-setRunning(false);
-setCameraReady(false);
-setStatusText("Stopped");
-stopLoop();
-cleanupStream();
-}, [cleanupStream, recording, stopLoop]);
-
-const startRecording = useCallback(() => {
-const outputCanvas = outputRef.current;
-if (!outputCanvas || recording || !running) return;
-
-setClipUrl("");
-chunksRef.current = [];
-clipStartRef.current = Date.now();
-
-const stream = outputCanvas.captureStream(30);
-const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-? "video/webm;codecs=vp9"
-: "video/webm";
-
-const recorder = new MediaRecorder(stream, { mimeType });
-
-recorder.ondataavailable = (event) => {
-if (event.data.size > 0) {
-chunksRef.current.push(event.data);
-}
-};
-
-recorder.onstop = () => {
-const clipLength = clipStartRef.current
-? Date.now() - clipStartRef.current
-: 0;
-
-clipStartRef.current = null;
-
-if (clipLength < 500) {
-setRecording(false);
-setStatusText("Live");
-return;
-}
-
-const blob = new Blob(chunksRef.current, { type: "video/webm" });
-const url = URL.createObjectURL(blob);
-setClipUrl(url);
-setRecording(false);
-setStatusText("Clip ready");
-};
-
-mediaRecorderRef.current = recorder;
-recorder.start(200);
-setRecording(true);
-setStatusText("Recording");
-}, [recording, running]);
-
-const stopRecording = useCallback(() => {
-if (holdTimeoutRef.current) {
-window.clearTimeout(holdTimeoutRef.current);
-holdTimeoutRef.current = null;
-}
-
-const recorder = mediaRecorderRef.current;
-if (recorder && recorder.state !== "inactive") {
-recorder.stop();
+setCameraLive(true);
+} catch (error) {
+console.error('Camera start failed', error);
+setCameraLive(false);
 }
 }, []);
 
-const beginHoldRecord = useCallback(() => {
-if (!running || !cameraReady || recording) return;
-
-holdTimeoutRef.current = window.setTimeout(() => {
-startRecording();
-}, 120);
-}, [cameraReady, recording, running, startRecording]);
-
-const endHoldRecord = useCallback(() => {
-if (holdTimeoutRef.current) {
-window.clearTimeout(holdTimeoutRef.current);
-holdTimeoutRef.current = null;
-}
-
-if (recording) {
-stopRecording();
-}
-}, [recording, stopRecording]);
-
-useEffect(() => {
-return () => {
+const stopCamera = useCallback(() => {
+streamRef.current?.getTracks().forEach((track) => track.stop());
+streamRef.current = null;
+setCameraLive(false);
 stopLoop();
-cleanupStream();
+}, [stopLoop]);
 
-if (holdTimeoutRef.current) {
-window.clearTimeout(holdTimeoutRef.current);
-}
+const boot = useCallback(async () => {
+if (ready) return;
 
-if (clipUrl) URL.revokeObjectURL(clipUrl);
+const vision = await FilesetResolver.forVisionTasks('/wasm');
 
-if (poseRef.current) {
-poseRef.current.close();
-poseRef.current = null;
-}
-};
-}, [cleanupStream, clipUrl, stopLoop]);
+poseRef.current = await PoseLandmarker.createFromOptions(vision, {
+baseOptions: {
+modelAssetPath: '/models/pose_landmarker_full.task',
+delegate: 'GPU',
+},
+runningMode: 'VIDEO',
+numPoses: 1,
+minPoseDetectionConfidence: 0.5,
+minPosePresenceConfidence: 0.5,
+minTrackingConfidence: 0.5,
+});
+
+setReady(true);
+await startCamera();
+}, [ready, startCamera]);
 
 useEffect(() => {
-if (running) {
-startCamera();
+void boot();
+
+return () => {
+stopCamera();
+poseRef.current?.close();
+};
+}, [boot, stopCamera]);
+
+useEffect(() => {
+if (!cameraLive || !ready) return;
+
+stopLoop();
+rafRef.current = requestAnimationFrame(() => {
+void processFrame();
+});
+}, [cameraLive, processFrame, ready, stopLoop]);
+
+const beginCapture = useCallback(() => {
+setIsCapturing(true);
+lastStateRef.current = currentMetricsRef.current.state;
+}, []);
+
+const endCapture = useCallback(() => {
+setIsHolding(false);
+
+if (holdTimerRef.current) {
+window.clearTimeout(holdTimerRef.current);
+holdTimerRef.current = null;
 }
-}, [cameraFacing, running, startCamera]);
+
+if (!isCapturing) return;
+
+setIsCapturing(false);
+
+const snapshot = currentMetricsRef.current;
+pushEvent({
+id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+at: formatNow(),
+state: snapshot.state,
+tilt: snapshot.tilt,
+stability: snapshot.stability,
+velocity: snapshot.velocity,
+windowMs: snapshot.windowMs,
+comDriftPx: snapshot.comDriftPx,
+});
+}, [isCapturing, pushEvent]);
+
+const onHoldStart = useCallback(() => {
+setIsHolding(true);
+
+if (holdTimerRef.current) {
+window.clearTimeout(holdTimerRef.current);
+}
+
+holdTimerRef.current = window.setTimeout(() => {
+beginCapture();
+}, HOLD_MS_TO_START);
+}, [beginCapture]);
+
+const resetSession = useCallback(() => {
+setHistory([]);
+setSelectedEventId(null);
+setIsCapturing(false);
+setIsHolding(false);
+alignedStartRef.current = null;
+recentTiltRef.current = [];
+recentDriftRef.current = [];
+recentStackRef.current = [];
+lastComRef.current = null;
+lastStateRef.current = 'LOST';
+lastAlignedEventAtRef.current = 0;
+
+syncMetricsToState({
+state: 'LOST',
+tilt: 0,
+stability: 0,
+velocity: 0,
+windowMs: 0,
+comDriftPx: 0,
+});
+}, [syncMetricsToState]);
+
+const nextCalibrationKey = useMemo(() => {
+if (!calibration.leftBoundary) return 'leftBoundary';
+if (!calibration.rightBoundary) return 'rightBoundary';
+if (!calibration.target) return 'target';
+if (!calibration.playerStart) return 'playerStart';
+return null;
+}, [calibration]);
+
+const handleCanvasTap = useCallback(
+(event: React.MouseEvent<HTMLCanvasElement>) => {
+const key = selectedPoint ?? nextCalibrationKey;
+if (!key) return;
+
+const rect = event.currentTarget.getBoundingClientRect();
+const point = {
+x: event.clientX - rect.left,
+y: event.clientY - rect.top,
+};
+
+setCalibration((prev) => ({ ...prev, [key]: point }));
+setSelectedPoint(null);
+},
+[nextCalibrationKey, selectedPoint]
+);
 
 return (
-<main className="min-h-screen bg-[#05070a] text-white">
-<div className="relative h-screen w-full overflow-hidden bg-black">
+<main
+style={{
+minHeight: '100vh',
+background: BG,
+color: TEXT,
+fontFamily: 'Inter, Arial, sans-serif',
+}}
+>
+<div
+style={{
+width: '100%',
+maxWidth: 980,
+margin: '0 auto',
+padding: '18px 14px 48px',
+}}
+>
+<section
+style={{
+border: `1px solid ${LINE}`,
+background: SURFACE,
+}}
+>
+<div
+ref={wrapRef}
+style={{
+position: 'relative',
+aspectRatio: '9 / 16',
+background: '#050505',
+overflow: 'hidden',
+}}
+>
 <video
 ref={videoRef}
-className={`absolute inset-0 h-full w-full object-cover ${
-cameraFacing === "user" ? "scale-x-[-1]" : ""
-}`}
-muted
 playsInline
+muted
 autoPlay
-/>
-
-<canvas
-ref={overlayRef}
-className="pointer-events-none absolute inset-0 h-full w-full"
-/>
-
-<canvas
-ref={outputRef}
-className="pointer-events-none absolute -left-[99999px] top-0"
-/>
-
-<div className="pointer-events-none absolute left-3 right-3 top-3 z-20 flex items-start justify-between md:left-5 md:right-5 md:top-5">
-<div className="rounded-[22px] border border-white/10 bg-black/25 px-4 py-3 backdrop-blur-xl">
-<div className="text-[10px] uppercase tracking-[0.32em] text-white/60">
-Axis Camera
-</div>
-<div className="mt-1 text-sm font-medium text-white/90 md:text-base">
-Measurement Instrument
-</div>
-<div
-className="mt-1 text-2xl font-black leading-none md:text-4xl"
-style={{ color: stateColor }}
->
-{metrics.state}
-</div>
-</div>
-
-<div className="rounded-[22px] border border-white/10 bg-black/25 px-4 py-3 text-right backdrop-blur-xl">
-<div className="text-[10px] uppercase tracking-[0.32em] text-white/60">
-Status
-</div>
-<div className="mt-1 text-xs text-white/88 md:text-sm">
-{recording ? "Recording" : statusText}
-</div>
-<div className="mt-1 text-[11px] text-white/58 md:text-xs">
-SCORE {metrics.axisScore}
-</div>
-</div>
-</div>
-
-<div className="absolute right-4 top-1/2 z-30 hidden w-[220px] -translate-y-1/2 md:block">
-<div className="space-y-3 rounded-[24px] border border-white/10 bg-black/22 p-3 backdrop-blur-xl">
-<GradeCard label="Axis Score" value={String(metrics.axisScore)} color="#ffffff" />
-<GradeCard label="Stability" value={metrics.stabilityGrade} color={gradeColor(metrics.stabilityGrade)} />
-<GradeCard label="Alignment" value={metrics.alignmentGrade} color={gradeColor(metrics.alignmentGrade)} />
-<GradeCard label="Lean" value={metrics.leanGrade} color={gradeColor(metrics.leanGrade)} />
-</div>
-</div>
-
-<div className="absolute bottom-28 left-4 right-4 z-30 md:hidden">
-<div className="grid grid-cols-2 gap-3 rounded-[24px] border border-white/10 bg-black/24 p-3 backdrop-blur-xl">
-<GradeCard label="Axis Score" value={String(metrics.axisScore)} color="#ffffff" compact />
-<GradeCard label="Stability" value={metrics.stabilityGrade} color={gradeColor(metrics.stabilityGrade)} compact />
-<GradeCard label="Alignment" value={metrics.alignmentGrade} color={gradeColor(metrics.alignmentGrade)} compact />
-<GradeCard label="Lean" value={metrics.leanGrade} color={gradeColor(metrics.leanGrade)} compact />
-</div>
-</div>
-
-<div className="absolute bottom-5 left-4 right-4 z-40 md:left-5 md:right-5">
-<div className="rounded-[28px] border border-white/10 bg-black/35 p-3 backdrop-blur-xl">
-<div className="grid grid-cols-3 gap-3">
-{!running ? (
-<ActionButton onClick={startCamera}>Start Camera</ActionButton>
-) : (
-<ActionButton onClick={stopCamera}>End Session</ActionButton>
-)}
-
-<ActionButton
-onClick={() =>
-setCameraFacing((prev) =>
-prev === "environment" ? "user" : "environment",
-)
-}
->
-Flip Camera
-</ActionButton>
-
-<HoldButton
-disabled={!cameraReady || !running}
-recording={recording}
-onHoldStart={beginHoldRecord}
-onHoldEnd={endHoldRecord}
->
-Record
-</HoldButton>
-</div>
-
-{clipUrl ? (
-<div className="mt-3 grid grid-cols-2 gap-3">
-<a
-href={clipUrl}
-download={`instrument-clip-${Date.now()}.webm`}
-className="rounded-[18px] border border-white/10 bg-white/[0.07] px-4 py-3 text-center text-sm font-semibold text-white transition hover:bg-white/[0.12]"
->
-Save Clip
-</a>
-
-<button
-onClick={async () => {
-try {
-const res = await fetch(clipUrl);
-const blob = await res.blob();
-const file = new File([blob], "axis-instrument-clip.webm", {
-type: blob.type || "video/webm",
-});
-
-if (
-navigator.share &&
-"canShare" in navigator &&
-(navigator as Navigator & {
-canShare?: (data?: ShareData) => boolean;
-}).canShare?.({ files: [file] })
-) {
-await navigator.share({
-files: [file],
-title: "Axis Instrument Clip",
-});
-}
-} catch (err) {
-console.error(err);
-}
+style={{
+position: 'absolute',
+inset: 0,
+width: '100%',
+height: '100%',
+objectFit: 'cover',
+filter: 'brightness(0.42) contrast(1.05) saturate(0.78)',
+transform: 'scaleX(-1)',
 }}
-className="rounded-[18px] border border-white/10 bg-white/[0.07] px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/[0.12]"
+/>
+
+<canvas
+ref={canvasRef}
+onClick={handleCanvasTap}
+style={{
+position: 'absolute',
+inset: 0,
+width: '100%',
+height: '100%',
+cursor: nextCalibrationKey || selectedPoint ? 'crosshair' : 'default',
+}}
+/>
+
+<div
+style={{
+position: 'absolute',
+top: 12,
+left: 12,
+right: 12,
+display: 'flex',
+justifyContent: 'space-between',
+alignItems: 'center',
+pointerEvents: 'none',
+}}
 >
-Share
-</button>
+<div
+style={{
+color: stateColor(axisState),
+fontSize: 13,
+letterSpacing: '0.24em',
+}}
+>
+STATE
 </div>
-) : null}
 
-{error ? (
-<div className="mt-3 rounded-[18px] border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-{error}
+<div
+style={{
+color: quality === 'GOOD' ? ALIGNED : quality === 'LOW' ? SHIFT : LOST,
+fontSize: 12,
+letterSpacing: '0.18em',
+}}
+>
+QUALITY {quality}
 </div>
-) : null}
 </div>
-</div>
-</div>
-</main>
-);
-}
 
-function GradeCard({
-label,
-value,
-color,
-compact = false,
-}: {
-label: string;
-value: string;
-color: string;
-compact?: boolean;
-}) {
-return (
-<div className="rounded-[18px] border border-white/10 bg-white/[0.05] px-4 py-3 backdrop-blur-xl">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/55">
+<div
+style={{
+position: 'absolute',
+left: 16,
+bottom: 16,
+display: 'grid',
+gap: 4,
+}}
+>
+<div
+style={{
+color: stateColor(axisState),
+fontSize: 42,
+lineHeight: 1,
+fontWeight: 700,
+letterSpacing: '-0.04em',
+}}
+>
+{axisState}
+</div>
+
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.28em',
+}}
+>
+AXIS LINE ACTIVE
+</div>
+</div>
+</div>
+
+<div
+style={{
+borderTop: `1px solid ${LINE}`,
+display: 'grid',
+gridTemplateColumns: '1fr 1fr',
+}}
+>
+{[
+['STABILITY', `${Math.round(stability)}%`],
+['WINDOW', `${Math.round(windowMs)} ms`],
+['BODY AXIS', `${tilt.toFixed(1)}°`],
+['COM DRIFT', `${comDriftPx.toFixed(1)} px`],
+].map(([label, value], index) => (
+<div
+key={label}
+style={{
+padding: '18px 14px',
+borderRight: index % 2 === 0 ? `1px solid ${LINE}` : undefined,
+borderBottom: index < 2 ? `1px solid ${LINE}` : undefined,
+}}
+>
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.24em',
+marginBottom: 8,
+}}
+>
 {label}
 </div>
+<div style={{ fontSize: 28, letterSpacing: '-0.04em' }}>{value}</div>
+</div>
+))}
+</div>
+
 <div
-className={`mt-1 font-black leading-none ${compact ? "text-2xl" : "text-3xl"}`}
-style={{ color }}
+style={{
+borderTop: `1px solid ${LINE}`,
+padding: 14,
+display: 'grid',
+gap: 12,
+}}
 >
-{value}
-</div>
-</div>
-);
-}
-
-function ActionButton({
-children,
-onClick,
-disabled,
-}: {
-children: React.ReactNode;
-onClick: () => void;
-disabled?: boolean;
-}) {
-return (
 <button
-onClick={onClick}
-disabled={disabled}
-className="rounded-[18px] border border-white/10 bg-white/[0.07] px-4 py-4 text-sm font-semibold text-white transition hover:bg-white/[0.12] disabled:cursor-not-allowed disabled:opacity-40"
->
-{children}
-</button>
-);
-}
-
-function HoldButton({
-children,
-onHoldStart,
-onHoldEnd,
-disabled,
-recording,
-}: {
-children: React.ReactNode;
-onHoldStart: () => void;
-onHoldEnd: () => void;
-disabled?: boolean;
-recording?: boolean;
-}) {
-return (
-<button
-disabled={disabled}
 onMouseDown={onHoldStart}
-onMouseUp={onHoldEnd}
-onMouseLeave={onHoldEnd}
-onTouchStart={(e) => {
-e.preventDefault();
-onHoldStart();
+onMouseUp={endCapture}
+onMouseLeave={endCapture}
+onTouchStart={onHoldStart}
+onTouchEnd={endCapture}
+style={{
+appearance: 'none',
+border: `1px solid ${isCapturing || isHolding ? AXIS_GREEN : LINE}`,
+background: isCapturing ? 'rgba(57,255,20,0.08)' : 'transparent',
+color: TEXT,
+padding: '18px 16px',
+fontSize: 18,
+letterSpacing: '0.18em',
 }}
-onTouchEnd={(e) => {
-e.preventDefault();
-onHoldEnd();
-}}
-onTouchCancel={onHoldEnd}
-className={`rounded-[18px] border px-4 py-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
-recording
-? "border-red-400/30 bg-red-500/15 text-red-100"
-: "border-white/10 bg-white/[0.07] text-white hover:bg-white/[0.12]"
-}`}
 >
-{recording ? "Recording" : children}
+{isCapturing ? 'CAPTURING' : 'HOLD TO CAPTURE'}
 </button>
+
+<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+<button
+onClick={resetSession}
+style={{
+appearance: 'none',
+border: `1px solid ${LINE}`,
+background: 'transparent',
+color: TEXT,
+padding: '16px 14px',
+fontSize: 14,
+letterSpacing: '0.12em',
+}}
+>
+RESET SESSION
+</button>
+
+<button
+onClick={() => setSelectedPoint(nextCalibrationKey ?? 'leftBoundary')}
+style={{
+appearance: 'none',
+border: `1px solid ${LINE}`,
+background: 'transparent',
+color: TEXT,
+padding: '16px 14px',
+fontSize: 14,
+letterSpacing: '0.12em',
+}}
+>
+{nextCalibrationKey
+? `SET ${nextCalibrationKey.replace(/([A-Z])/g, ' $1').toUpperCase()}`
+: 'EDIT CALIBRATION'}
+</button>
+</div>
+
+<div
+style={{
+color: MUTED,
+fontSize: 12,
+letterSpacing: '0.08em',
+lineHeight: 1.7,
+}}
+>
+LEFT BOUNDARY • RIGHT BOUNDARY • TARGET • PLAYER START
+</div>
+</div>
+</section>
+
+<section
+style={{
+marginTop: 18,
+border: `1px solid ${LINE}`,
+background: SURFACE,
+}}
+>
+<div
+style={{
+padding: '16px 14px',
+borderBottom: `1px solid ${LINE}`,
+display: 'flex',
+justifyContent: 'space-between',
+alignItems: 'center',
+}}
+>
+<div>
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.28em',
+marginBottom: 6,
+}}
+>
+SESSION
+</div>
+<div style={{ fontSize: 28, letterSpacing: '-0.04em' }}>AXIS HISTORY</div>
+</div>
+
+<div
+style={{
+color: stateColor(axisState),
+fontSize: 13,
+letterSpacing: '0.22em',
+}}
+>
+{axisState}
+</div>
+</div>
+
+<div style={{ padding: 14, borderBottom: `1px solid ${LINE}` }}>
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.28em',
+marginBottom: 10,
+}}
+>
+AXIS SHAPE
+</div>
+
+<div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+{axisShape.length ? (
+axisShape.map((item) => (
+<button
+key={item.id}
+onClick={() => setSelectedEventId(item.id)}
+style={{
+appearance: 'none',
+border: `1px solid ${stateColor(item.state)}`,
+background: 'transparent',
+color: stateColor(item.state),
+padding: '10px 12px',
+fontSize: 12,
+letterSpacing: '0.16em',
+}}
+>
+{item.state}
+</button>
+))
+) : (
+<div style={{ color: MUTED, fontSize: 14 }}>No movement captured yet.</div>
+)}
+</div>
+</div>
+
+<div style={{ padding: 14, borderBottom: `1px solid ${LINE}` }}>
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.28em',
+marginBottom: 10,
+}}
+>
+RECAP
+</div>
+
+{selectedEvent ? (
+<div style={{ display: 'grid', gap: 8 }}>
+<div
+style={{
+fontSize: 26,
+color: stateColor(selectedEvent.state),
+letterSpacing: '-0.04em',
+}}
+>
+{selectedEvent.state}
+</div>
+
+<div style={{ color: MUTED, fontSize: 14 }}>{selectedEvent.at}</div>
+
+<div
+style={{
+display: 'grid',
+gridTemplateColumns: '1fr 1fr',
+gap: 8,
+marginTop: 6,
+}}
+>
+{[
+['Body Axis', `${selectedEvent.tilt.toFixed(1)}°`],
+['Stability', `${Math.round(selectedEvent.stability)}%`],
+['Window', `${Math.round(selectedEvent.windowMs)} ms`],
+['COM Drift', `${selectedEvent.comDriftPx.toFixed(1)} px`],
+].map(([label, value]) => (
+<div
+key={label}
+style={{
+border: `1px solid ${LINE}`,
+padding: 12,
+}}
+>
+<div
+style={{
+color: MUTED,
+fontSize: 11,
+letterSpacing: '0.18em',
+marginBottom: 6,
+}}
+>
+{label}
+</div>
+<div style={{ fontSize: 20 }}>{value}</div>
+</div>
+))}
+</div>
+</div>
+) : (
+<div style={{ color: MUTED }}>Capture a session to generate recap.</div>
+)}
+</div>
+
+<div style={{ padding: 14, display: 'grid', gap: 10 }}>
+{history.length ? (
+history.map((item) => (
+<button
+key={item.id}
+onClick={() => setSelectedEventId(item.id)}
+style={{
+appearance: 'none',
+textAlign: 'left',
+width: '100%',
+border: `1px solid ${LINE}`,
+background: 'transparent',
+color: TEXT,
+padding: 14,
+}}
+>
+<div
+style={{
+display: 'flex',
+justifyContent: 'space-between',
+alignItems: 'center',
+marginBottom: 10,
+}}
+>
+<div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+<span
+style={{
+width: 10,
+height: 10,
+borderRadius: '50%',
+display: 'inline-block',
+background: stateColor(item.state),
+}}
+/>
+<span style={{ fontSize: 18 }}>{item.state}</span>
+</div>
+
+<span
+style={{
+color: stateColor(item.state),
+fontSize: 12,
+letterSpacing: '0.16em',
+}}
+>
+{item.state}
+</span>
+</div>
+
+<div style={{ color: MUTED, fontSize: 13, marginBottom: 10 }}>{item.at}</div>
+<div style={{ color: TEXT, fontSize: 15 }}>{labelForEvent(item)}</div>
+</button>
+))
+) : (
+<div style={{ color: MUTED, padding: '4px 0 10px' }}>Axis History will appear here.</div>
+)}
+</div>
+</section>
+</div>
+</main>
 );
 }
