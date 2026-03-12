@@ -1,5 +1,5 @@
-import AxisLiveClient from "@/app/axis/ui/axis-live-client";
+import AxisCameraInstrument from "@/components/axis/axis-camera-instrument";
 
-export default function AxisPage() {
-return <AxisLiveClient />;
+export default function HomePage() {
+return <AxisCameraInstrument />;
 }
