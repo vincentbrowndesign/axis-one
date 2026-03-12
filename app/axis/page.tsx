@@ -1,5 +1,5 @@
-import AxisInstrument from '@/components/AxisInstrument';
+import AxisInstrument from "@/components/AxisInstrument";
 
-export default function AxisPage() {
+export default function Page() {
 return <AxisInstrument />;
 }
