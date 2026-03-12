@@ -20,6 +20,7 @@ const MAX_HISTORY = 24;
 const CLEAN_WINDOW_MIN_MS = 350;
 
 type CameraFacing = 'user' | 'environment';
+type CalibrationKey = 'leftBoundary' | 'rightBoundary' | 'target' | 'playerStart';
 
 export function useAxisEngine() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -64,7 +65,7 @@ const [driftPx, setDriftPx] = useState(0);
 
 const [history, setHistory] = useState<AxisEvent[]>([]);
 const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
-const [selectedPoint, setSelectedPoint] = useState<keyof Calibration | null>('leftBoundary');
+const [selectedPoint, setSelectedPoint] = useState<CalibrationKey | null>('leftBoundary');
 const [calibration, setCalibration] = useState<Calibration>({
 leftBoundary: null,
 rightBoundary: null,
@@ -148,10 +149,12 @@ const stopCamera = useCallback(() => {
 stopLoop();
 streamRef.current?.getTracks().forEach((track) => track.stop());
 streamRef.current = null;
+
 if (videoRef.current) {
 videoRef.current.pause();
 videoRef.current.srcObject = null;
 }
+
 setCameraLive(false);
 }, [stopLoop]);
 
@@ -200,13 +203,13 @@ const vision = await FilesetResolver.forVisionTasks('/wasm');
 poseRef.current = await PoseLandmarker.createFromOptions(vision, {
 baseOptions: {
 modelAssetPath: '/models/pose_landmarker_full.task',
-delegate: 'GPU',
+delegate: 'CPU',
 },
 runningMode: 'VIDEO',
 numPoses: 1,
-minPoseDetectionConfidence: 0.45,
-minPosePresenceConfidence: 0.45,
-minTrackingConfidence: 0.45,
+minPoseDetectionConfidence: 0.2,
+minPosePresenceConfidence: 0.2,
+minTrackingConfidence: 0.2,
 });
 
 setReady(true);
@@ -265,6 +268,7 @@ const pairs = [
 ctx.save();
 ctx.strokeStyle = 'rgba(255,255,255,0.22)';
 ctx.lineWidth = 1.05;
+
 pairs.forEach(([a, b]) => {
 const pa = poseLandmarks[a];
 const pb = poseLandmarks[b];
@@ -274,6 +278,7 @@ ctx.moveTo(pa.x * rect.width, pa.y * rect.height);
 ctx.lineTo(pb.x * rect.width, pb.y * rect.height);
 ctx.stroke();
 });
+
 ctx.restore();
 }
 
@@ -315,7 +320,7 @@ ctx.fill();
 ctx.restore();
 }
 
-const points: Array<[keyof Calibration, string]> = [
+const points: Array<[CalibrationKey, string]> = [
 ['leftBoundary', 'L'],
 ['rightBoundary', 'R'],
 ['target', 'T'],
@@ -356,9 +361,12 @@ return;
 
 const nowMs = performance.now();
 
-let result: any;
+let result: { landmarks?: Array<Array<{ x: number; y: number; visibility?: number }>> } | null = null;
+
 try {
-result = pose.detectForVideo(video, nowMs);
+result = pose.detectForVideo(video, nowMs) as {
+landmarks?: Array<Array<{ x: number; y: number; visibility?: number }>>;
+};
 } catch (error) {
 console.error('detectForVideo failed', error);
 rafRef.current = requestAnimationFrame(() => {
@@ -368,6 +376,16 @@ return;
 }
 
 const landmarks = result?.landmarks?.[0] ?? null;
+
+console.log('axis debug', {
+hasResult: !!result,
+landmarkSets: result?.landmarks?.length ?? 0,
+landmarkCount: result?.landmarks?.[0]?.length ?? 0,
+videoReadyState: video?.readyState,
+videoWidth: video?.videoWidth,
+videoHeight: video?.videoHeight,
+});
+
 const width = wrap.clientWidth;
 const height = wrap.clientHeight;
 
