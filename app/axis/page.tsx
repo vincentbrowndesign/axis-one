@@ -1,5 +1,5 @@
-import AxisCameraInstrument from "@/components/axis/axis-camera-instrument";
+import AxisInstrument from '@/components/AxisInstrument';
 
 export default function AxisPage() {
-return <AxisCameraInstrument />;
+return <AxisInstrument />;
 }
