@@ -1,9 +1,5 @@
-import AxisRunInstrument from "@/components/axis/axis-run-instrument";
+import AxisCameraInstrument from "@/components/axis/axis-camera-instrument";
 
-
-
-export default function AxisRunPage() {
-
-  return <AxisRunInstrument />;
-
+export default function AxisRunInstrumentPage() {
+return <AxisCameraInstrument />;
 }
