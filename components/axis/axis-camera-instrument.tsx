@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 
 type AxisState = "aligned" | "shift" | "drop" | "recover";
+type LockState = "search" | "partial" | "locked";
 
 type Baseline = {
 shoulderTilt: number;
@@ -16,6 +17,21 @@ torsoLean: number;
 control: number;
 state: AxisState;
 visible: boolean;
+lockState: LockState;
+centered: boolean;
+bodyScale: number;
+shoulderY: number;
+hipY: number;
+shoulderMidX: number;
+hipMidX: number;
+leftShoulderX: number;
+rightShoulderX: number;
+leftShoulderY: number;
+rightShoulderY: number;
+leftHipX: number;
+rightHipX: number;
+leftHipY: number;
+rightHipY: number;
 };
 
 const STATE_LABELS: Record<AxisState, string> = {
@@ -30,6 +46,12 @@ aligned: "Body stacked and stable",
 shift: "Body drifting off center",
 drop: "Balance lost",
 recover: "Returning toward center",
+};
+
+const LOCK_LABELS: Record<LockState, string> = {
+search: "SEARCH",
+partial: "PARTIAL",
+locked: "LOCKED",
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -56,6 +78,21 @@ torsoLean: 0,
 control: 0,
 state: "drop",
 visible: false,
+lockState: "search",
+centered: false,
+bodyScale: 0,
+shoulderY: 0,
+hipY: 0,
+shoulderMidX: 0,
+hipMidX: 0,
+leftShoulderX: 0,
+rightShoulderX: 0,
+leftShoulderY: 0,
+rightShoulderY: 0,
+leftHipX: 0,
+rightHipX: 0,
+leftHipY: 0,
+rightHipY: 0,
 };
 }
 
@@ -71,14 +108,55 @@ torsoLean: 0,
 control: 0,
 state: "drop",
 visible: false,
+lockState: "search",
+centered: false,
+bodyScale: 0,
+shoulderY: 0,
+hipY: 0,
+shoulderMidX: 0,
+hipMidX: 0,
+leftShoulderX: 0,
+rightShoulderX: 0,
+leftShoulderY: 0,
+rightShoulderY: 0,
+leftHipX: 0,
+rightHipX: 0,
+leftHipY: 0,
+rightHipY: 0,
 };
 }
 
 const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
 const hipMidX = (leftHip.x + rightHip.x) / 2;
+const shoulderMidY = (leftShoulder.y + rightShoulder.y) / 2;
+const hipMidY = (leftHip.y + rightHip.y) / 2;
 
 const shoulderTiltRaw = Math.abs(leftShoulder.y - rightShoulder.y) * 100;
 const torsoLeanRaw = Math.abs(shoulderMidX - hipMidX) * 100;
+
+const bodyWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+const bodyHeight = Math.abs(shoulderMidY - hipMidY);
+const bodyScale = bodyWidth + bodyHeight;
+
+const centered =
+shoulderMidX > 0.32 &&
+shoulderMidX < 0.68 &&
+hipMidX > 0.28 &&
+hipMidX < 0.72;
+
+const torsoPresent =
+shoulderMidY > 0.12 &&
+shoulderMidY < 0.72 &&
+hipMidY > 0.26 &&
+hipMidY < 0.9;
+
+let lockState: LockState = "search";
+
+if (bodyScale > 0.34 && centered && torsoPresent) {
+lockState = "locked";
+} else if (bodyScale > 0.2 && torsoPresent) {
+lockState = "partial";
+}
 
 const shoulderTiltDelta = baseline
 ? Math.abs(shoulderTiltRaw - baseline.shoulderTilt)
@@ -88,20 +166,28 @@ const torsoLeanDelta = baseline
 ? Math.abs(torsoLeanRaw - baseline.torsoLean)
 : torsoLeanRaw;
 
-const control = clamp(
-100 - shoulderTiltDelta * 7 - torsoLeanDelta * 9,
-0,
-100
-);
+let control = clamp(100 - shoulderTiltDelta * 7 - torsoLeanDelta * 9, 0, 100);
+
+if (lockState === "partial") {
+control = Math.min(control, 45);
+}
+
+if (lockState === "search") {
+control = 0;
+}
 
 let state: AxisState = "drop";
 
+if (lockState === "locked") {
 if (control >= 84 && torsoLeanDelta < 2.5 && shoulderTiltDelta < 2.5) {
 state = "aligned";
 } else if (control >= 62 && torsoLeanDelta < 5.5 && shoulderTiltDelta < 5.5) {
 state = "shift";
 } else if (control >= 48) {
 state = "recover";
+} else {
+state = "drop";
+}
 } else {
 state = "drop";
 }
@@ -112,6 +198,21 @@ torsoLean: torsoLeanDelta,
 control,
 state,
 visible: true,
+lockState,
+centered,
+bodyScale,
+shoulderY: shoulderMidY,
+hipY: hipMidY,
+shoulderMidX,
+hipMidX,
+leftShoulderX: leftShoulder.x,
+rightShoulderX: rightShoulder.x,
+leftShoulderY: leftShoulder.y,
+rightShoulderY: rightShoulder.y,
+leftHipX: leftHip.x,
+rightHipX: rightHip.x,
+leftHipY: leftHip.y,
+rightHipY: rightHip.y,
 };
 }
 
@@ -130,6 +231,8 @@ const [error, setError] = useState("");
 
 const [baseline, setBaseline] = useState<Baseline | null>(null);
 const [subjectVisible, setSubjectVisible] = useState(false);
+const [lockState, setLockState] = useState<LockState>("search");
+const [lockReady, setLockReady] = useState(false);
 
 const [rawControl, setRawControl] = useState(0);
 const [rawState, setRawState] = useState<AxisState>("drop");
@@ -137,7 +240,6 @@ const [rawShoulderTilt, setRawShoulderTilt] = useState(0);
 const [rawTorsoLean, setRawTorsoLean] = useState(0);
 
 const [smoothControl, setSmoothControl] = useState(0);
-const [smoothShoulderTilt, setSmoothShoulderTilt] = useState(0);
 const [smoothTorsoLean, setSmoothTorsoLean] = useState(0);
 
 const [heldState, setHeldState] = useState<AxisState>("drop");
@@ -153,14 +255,21 @@ const candidateCountRef = useRef(0);
 useEffect(() => {
 const interval = window.setInterval(() => {
 setSmoothControl((prev) => prev + (rawControl - prev) * 0.18);
-setSmoothShoulderTilt((prev) => prev + (rawShoulderTilt - prev) * 0.18);
 setSmoothTorsoLean((prev) => prev + (rawTorsoLean - prev) * 0.18);
 }, 16);
 
 return () => window.clearInterval(interval);
-}, [rawControl, rawShoulderTilt, rawTorsoLean]);
+}, [rawControl, rawTorsoLean]);
 
 useEffect(() => {
+if (lockState !== "locked") {
+setHeldState("drop");
+setHeldControl(0);
+candidateRef.current = "drop";
+candidateCountRef.current = 0;
+return;
+}
+
 const next = rawState;
 
 if (candidateRef.current !== next) {
@@ -177,10 +286,10 @@ if (candidateCountRef.current >= threshold) {
 setHeldState(next);
 setHeldControl(round(smoothControl));
 }
-}, [rawState, smoothControl]);
+}, [rawState, smoothControl, lockState]);
 
 useEffect(() => {
-if (!cameraOn || sessionStartedAt === null) return;
+if (!cameraOn || sessionStartedAt === null || lockState !== "locked") return;
 
 const interval = window.setInterval(() => {
 if (candidateRef.current === "aligned") {
@@ -191,7 +300,7 @@ setBestControl((prev) => Math.max(prev, round(smoothControl)));
 }, 250);
 
 return () => window.clearInterval(interval);
-}, [cameraOn, sessionStartedAt, smoothControl]);
+}, [cameraOn, sessionStartedAt, smoothControl, lockState]);
 
 useEffect(() => {
 return () => {
@@ -203,7 +312,20 @@ const totalMs =
 sessionStartedAt === null ? 1 : Math.max(Date.now() - sessionStartedAt, 1);
 
 const alignedPct = clamp((alignedMs / totalMs) * 100, 0, 100);
-const meaningText = useMemo(() => STATE_MEANING[heldState], [heldState]);
+
+const displayStateText =
+lockState === "search"
+? "SEARCH"
+: lockState === "partial"
+? "PARTIAL"
+: STATE_LABELS[heldState];
+
+const meaningText =
+lockState === "search"
+? "Find torso in frame"
+: lockState === "partial"
+? "Move subject into lock zone"
+: STATE_MEANING[heldState];
 
 async function ensurePoseLandmarker() {
 if (poseRef.current) return poseRef.current;
@@ -269,6 +391,9 @@ const result = pose.detectForVideo(video, performance.now());
 const metrics = computeMetrics(result, baseline);
 
 setSubjectVisible(metrics.visible);
+setLockState(metrics.lockState);
+setLockReady(metrics.lockState === "locked");
+
 setRawControl(metrics.control);
 setRawState(metrics.state);
 setRawShoulderTilt(metrics.shoulderTilt);
@@ -279,57 +404,70 @@ ctx.clearRect(0, 0, canvas.width, canvas.height);
 if (showCamera) {
 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-const leftShoulder = lm(result, 11);
-const rightShoulder = lm(result, 12);
-const leftHip = lm(result, 23);
-const rightHip = lm(result, 24);
+const lockBoxX = canvas.width * 0.24;
+const lockBoxY = canvas.height * 0.18;
+const lockBoxW = canvas.width * 0.52;
+const lockBoxH = canvas.height * 0.58;
 
-if (
-metrics.visible &&
-leftShoulder &&
-rightShoulder &&
-leftHip &&
-rightHip
-) {
-const shoulderMidX =
-((leftShoulder.x + rightShoulder.x) / 2) * canvas.width;
-const shoulderMidY =
-((leftShoulder.y + rightShoulder.y) / 2) * canvas.height;
-const hipMidX = ((leftHip.x + rightHip.x) / 2) * canvas.width;
-const hipMidY = ((leftHip.y + rightHip.y) / 2) * canvas.height;
-
-ctx.strokeStyle = "rgba(255,255,255,0.92)";
-ctx.lineWidth = 3;
-
-ctx.beginPath();
-ctx.moveTo(
-leftShoulder.x * canvas.width,
-leftShoulder.y * canvas.height
-);
-ctx.lineTo(
-rightShoulder.x * canvas.width,
-rightShoulder.y * canvas.height
-);
+ctx.strokeStyle =
+metrics.lockState === "locked"
+? "rgba(52,211,153,0.9)"
+: metrics.lockState === "partial"
+? "rgba(252,211,77,0.8)"
+: "rgba(255,255,255,0.15)";
+ctx.lineWidth = metrics.lockState === "locked" ? 3 : 2;
+roundedRect(ctx, lockBoxX, lockBoxY, lockBoxW, lockBoxH, 24);
 ctx.stroke();
 
-ctx.beginPath();
-ctx.moveTo(leftHip.x * canvas.width, leftHip.y * canvas.height);
-ctx.lineTo(rightHip.x * canvas.width, rightHip.y * canvas.height);
-ctx.stroke();
-
-ctx.strokeStyle = "rgba(255,255,255,0.55)";
-ctx.beginPath();
-ctx.moveTo(shoulderMidX, shoulderMidY);
-ctx.lineTo(hipMidX, hipMidY);
-ctx.stroke();
-
-ctx.strokeStyle = "rgba(255,255,255,0.2)";
+ctx.strokeStyle = "rgba(255,255,255,0.18)";
 ctx.lineWidth = 1;
 ctx.beginPath();
 ctx.moveTo(canvas.width / 2, 0);
 ctx.lineTo(canvas.width / 2, canvas.height);
 ctx.stroke();
+
+if (metrics.visible) {
+ctx.strokeStyle = "rgba(255,255,255,0.9)";
+ctx.lineWidth = 3;
+
+ctx.beginPath();
+ctx.moveTo(
+metrics.leftShoulderX * canvas.width,
+metrics.leftShoulderY * canvas.height
+);
+ctx.lineTo(
+metrics.rightShoulderX * canvas.width,
+metrics.rightShoulderY * canvas.height
+);
+ctx.stroke();
+
+ctx.beginPath();
+ctx.moveTo(metrics.leftHipX * canvas.width, metrics.leftHipY * canvas.height);
+ctx.lineTo(metrics.rightHipX * canvas.width, metrics.rightHipY * canvas.height);
+ctx.stroke();
+
+ctx.strokeStyle = "rgba(255,255,255,0.55)";
+ctx.beginPath();
+ctx.moveTo(
+metrics.shoulderMidX * canvas.width,
+metrics.shoulderY * canvas.height
+);
+ctx.lineTo(metrics.hipMidX * canvas.width, metrics.hipY * canvas.height);
+ctx.stroke();
 }
+
+ctx.fillStyle =
+metrics.lockState === "locked"
+? "rgba(52,211,153,0.95)"
+: metrics.lockState === "partial"
+? "rgba(252,211,77,0.95)"
+: "rgba(255,255,255,0.45)";
+ctx.font = "600 16px system-ui";
+ctx.fillText(
+`LOCK ${LOCK_LABELS[metrics.lockState]}`,
+24,
+34
+);
 }
 
 rafRef.current = window.requestAnimationFrame(loop);
@@ -361,9 +499,13 @@ videoRef.current.srcObject = null;
 }
 
 setCameraOn(false);
+setLockState("search");
+setLockReady(false);
 }
 
 function calibrateAlign() {
+if (!lockReady) return;
+
 const currentBaseline: Baseline = {
 shoulderTilt: rawShoulderTilt,
 torsoLean: rawTorsoLean,
@@ -406,7 +548,12 @@ className="rounded-full border border-white/20 px-5 py-3 text-sm tracking-[0.18e
 <>
 <button
 onClick={calibrateAlign}
-className="rounded-full border border-white/20 px-5 py-3 text-sm tracking-[0.18em] text-white transition hover:border-white/40 hover:bg-white/5"
+disabled={!lockReady}
+className={`rounded-full border px-5 py-3 text-sm tracking-[0.18em] transition ${
+lockReady
+? "border-white/20 text-white hover:border-white/40 hover:bg-white/5"
+: "border-white/8 text-white/25"
+}`}
 >
 CALIBRATE ALIGN
 </button>
@@ -429,7 +576,7 @@ END SESSION
 
 <Pill label={baseline ? "BASELINE LOCKED" : "NO BASELINE"} />
 <Pill label={subjectVisible ? "SUBJECT VISIBLE" : "SUBJECT NOT FOUND"} />
-<Pill label={cameraOn ? "LIVE READ ACTIVE" : "LIVE READ OFF"} />
+<Pill label={`LOCK ${LOCK_LABELS[lockState]}`} />
 </div>
 
 {error ? (
@@ -444,10 +591,10 @@ END SESSION
 <div className="flex items-center justify-between gap-4">
 <div>
 <div className="text-[10px] uppercase tracking-[0.35em] text-white/30">
-Camera Lock Point
+Camera Lock Chamber
 </div>
 <div className="mt-2 text-sm text-white/50">
-Keep the kid centered from hips to shoulders.
+Fit shoulders and hips inside the lock box.
 </div>
 </div>
 
@@ -466,13 +613,13 @@ className={`h-auto w-full ${showCamera ? "opacity-100" : "opacity-0"} transition
 <div className="mt-4 grid gap-3 sm:grid-cols-3">
 <AssistCard
 label="Lock"
-value={subjectVisible ? "FOUND" : "SEARCH"}
-sublabel="Subject presence in frame"
+value={LOCK_LABELS[lockState]}
+sublabel="Target certainty"
 />
 <AssistCard
 label="Calibrate"
-value={baseline ? "READY" : "SET"}
-sublabel="Capture clean aligned stance"
+value={lockReady ? "READY" : "WAIT"}
+sublabel="Only available on strong lock"
 />
 <AssistCard
 label="Flow"
@@ -488,9 +635,9 @@ State
 </div>
 
 <div className="mt-4 flex items-center gap-4">
-<SignalDot state={heldState} />
+<SignalDot state={lockState === "locked" ? heldState : "drop"} lockState={lockState} />
 <div className="text-5xl font-semibold tracking-[0.18em] sm:text-7xl">
-{STATE_LABELS[heldState]}
+{displayStateText}
 </div>
 </div>
 
@@ -501,7 +648,7 @@ State
 <div className="mt-8 grid gap-0 sm:grid-cols-2">
 <Metric
 label="Control"
-value={round(heldControl || smoothControl)}
+value={lockState === "locked" ? round(heldControl || smoothControl) : 0}
 sublabel="How organized the body is"
 />
 <Metric
@@ -518,7 +665,7 @@ topBorder
 />
 <Metric
 label="Body Drift"
-value={round(smoothTorsoLean)}
+value={lockState === "locked" ? round(smoothTorsoLean) : 0}
 sublabel="Torso movement off center"
 withBorder
 topBorder
@@ -532,6 +679,27 @@ topBorder
 );
 }
 
+function roundedRect(
+ctx: CanvasRenderingContext2D,
+x: number,
+y: number,
+width: number,
+height: number,
+radius: number
+) {
+ctx.beginPath();
+ctx.moveTo(x + radius, y);
+ctx.lineTo(x + width - radius, y);
+ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+ctx.lineTo(x + width, y + height - radius);
+ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+ctx.lineTo(x + radius, y + height);
+ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+ctx.lineTo(x, y + radius);
+ctx.quadraticCurveTo(x, y, x + radius, y);
+ctx.closePath();
+}
+
 function Pill({ label }: { label: string }) {
 return (
 <div className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/45">
@@ -540,9 +708,19 @@ return (
 );
 }
 
-function SignalDot({ state }: { state: AxisState }) {
+function SignalDot({
+state,
+lockState,
+}: {
+state: AxisState;
+lockState: LockState;
+}) {
 const dotClass =
-state === "aligned"
+lockState === "search"
+? "bg-white/35 shadow-[0_0_14px_rgba(255,255,255,0.12)]"
+: lockState === "partial"
+? "bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.35)]"
+: state === "aligned"
 ? "bg-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.45)]"
 : state === "shift"
 ? "bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.35)]"
