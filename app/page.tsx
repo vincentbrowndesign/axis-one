@@ -4,16 +4,18 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FilesetResolver, PoseLandmarker } from '@mediapipe/tasks-vision';
 
 type AxisState = 'ALIGNED' | 'SHIFT' | 'DROP' | 'LOST';
+type DetectionMode = 'FULL BODY' | 'MID BODY' | 'UPPER BODY' | 'LOST';
 
 type AxisEvent = {
 id: string;
 at: string;
 state: AxisState;
+mode: DetectionMode;
 tilt: number;
 stability: number;
 velocity: number;
 windowMs: number;
-comDriftPx: number;
+driftPx: number;
 };
 
 type Point = { x: number; y: number };
@@ -39,14 +41,6 @@ const LOST = '#7A7A7A';
 const HOLD_MS_TO_START = 180;
 const MAX_HISTORY = 24;
 const CLEAN_WINDOW_MIN_MS = 350;
-
-const STACK_ALIGNED_PX = 22;
-const STACK_SHIFT_PX = 46;
-const COM_ALIGNED_PX = 26;
-const COM_SHIFT_PX = 54;
-const BODY_AXIS_SHIFT_DEG = 7;
-const BODY_AXIS_DROP_DEG = 16;
-const DOWNWARD_DROP_VELOCITY = 20;
 
 function clamp(value: number, min: number, max: number) {
 return Math.min(max, Math.max(min, value));
@@ -83,9 +77,23 @@ return LOST;
 }
 }
 
+function modeLabel(mode: DetectionMode) {
+switch (mode) {
+case 'FULL BODY':
+return 'FULL';
+case 'MID BODY':
+return 'MID';
+case 'UPPER BODY':
+return 'UPPER';
+case 'LOST':
+default:
+return 'NO SIGNAL';
+}
+}
+
 function labelForEvent(event: AxisEvent) {
 if (event.state === 'LOST') return 'Tracking lost';
-return `Velocity ${event.velocity.toFixed(4)} • Drift ${event.comDriftPx.toFixed(1)} px`;
+return `${event.mode} • Velocity ${event.velocity.toFixed(4)} • Drift ${event.driftPx.toFixed(1)} px`;
 }
 
 function midpoint(a?: { x: number; y: number }, b?: { x: number; y: number }): Point | null {
@@ -97,7 +105,7 @@ function toPx(point: Point, width: number, height: number): Point {
 return { x: point.x * width, y: point.y * height };
 }
 
-function safePointAverage(points: Array<Point | null>): Point | null {
+function avgPoints(points: Array<Point | null>): Point | null {
 const valid = points.filter(Boolean) as Point[];
 if (!valid.length) return null;
 return {
@@ -105,6 +113,16 @@ x: valid.reduce((sum, p) => sum + p.x, 0) / valid.length,
 y: valid.reduce((sum, p) => sum + p.y, 0) / valid.length,
 };
 }
+
+type ModeMetrics = {
+mode: DetectionMode;
+state: AxisState;
+axisPoints: Point[] | null;
+tiltDeg: number;
+stackSpread: number;
+driftPx: number;
+bodyCenter: Point | null;
+};
 
 export default function Page() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -115,7 +133,7 @@ const rafRef = useRef<number | null>(null);
 const streamRef = useRef<MediaStream | null>(null);
 const holdTimerRef = useRef<number | null>(null);
 
-const lastComRef = useRef<Point | null>(null);
+const lastCenterRef = useRef<Point | null>(null);
 const lastStateRef = useRef<AxisState>('LOST');
 const alignedStartRef = useRef<number | null>(null);
 const lastAlignedEventAtRef = useRef<number>(0);
@@ -126,24 +144,27 @@ const recentStackRef = useRef<number[]>([]);
 
 const currentMetricsRef = useRef({
 state: 'LOST' as AxisState,
+mode: 'LOST' as DetectionMode,
 tilt: 0,
 stability: 0,
 velocity: 0,
 windowMs: 0,
-comDriftPx: 0,
+driftPx: 0,
 });
 
 const [ready, setReady] = useState(false);
 const [cameraLive, setCameraLive] = useState(false);
 const [isHolding, setIsHolding] = useState(false);
 const [isCapturing, setIsCapturing] = useState(false);
-const [quality, setQuality] = useState<'GOOD' | 'LOW' | 'NO SIGNAL'>('NO SIGNAL');
+
 const [axisState, setAxisState] = useState<AxisState>('LOST');
+const [detectionMode, setDetectionMode] = useState<DetectionMode>('LOST');
 const [tilt, setTilt] = useState(0);
 const [stability, setStability] = useState(0);
 const [velocity, setVelocity] = useState(0);
 const [windowMs, setWindowMs] = useState(0);
-const [comDriftPx, setComDriftPx] = useState(0);
+const [driftPx, setDriftPx] = useState(0);
+
 const [history, setHistory] = useState<AxisEvent[]>([]);
 const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
 const [selectedPoint, setSelectedPoint] = useState<keyof Calibration | null>('leftBoundary');
@@ -168,19 +189,21 @@ setSelectedEventId(event.id);
 
 const syncMetricsToState = useCallback((next: {
 state: AxisState;
+mode: DetectionMode;
 tilt: number;
 stability: number;
 velocity: number;
 windowMs: number;
-comDriftPx: number;
+driftPx: number;
 }) => {
 currentMetricsRef.current = next;
 setAxisState(next.state);
+setDetectionMode(next.mode);
 setTilt(next.tilt);
 setStability(next.stability);
 setVelocity(next.velocity);
 setWindowMs(next.windowMs);
-setComDriftPx(next.comDriftPx);
+setDriftPx(next.driftPx);
 }, []);
 
 const drawReticle = useCallback((ctx: CanvasRenderingContext2D, w: number, h: number) => {
@@ -206,7 +229,6 @@ ctx.beginPath();
 ctx.moveTo(cx, cy - 90);
 ctx.lineTo(cx, cy + 90);
 ctx.stroke();
-
 ctx.restore();
 }, []);
 
@@ -222,7 +244,6 @@ const points: Array<[keyof Calibration, string]> = [
 points.forEach(([key, label]) => {
 const point = calibration[key];
 if (!point) return;
-
 ctx.save();
 ctx.strokeStyle = 'rgba(255,255,255,0.5)';
 ctx.fillStyle = 'rgba(11,11,11,0.82)';
@@ -243,10 +264,11 @@ ctx.restore();
 const drawInstrument = useCallback(
 (
 poseLandmarks: Array<{ x: number; y: number; visibility?: number }> | null,
-bodyAxisPoints: Point[] | null,
-com: Point | null,
+axisPoints: Point[] | null,
+bodyCenter: Point | null,
 state: AxisState,
-driftPx: number
+mode: DetectionMode,
+nextDriftPx: number
 ) => {
 const canvas = canvasRef.current;
 const wrap = wrapRef.current;
@@ -254,7 +276,6 @@ if (!canvas || !wrap) return;
 
 const rect = wrap.getBoundingClientRect();
 const dpr = window.devicePixelRatio || 1;
-
 canvas.width = rect.width * dpr;
 canvas.height = rect.height * dpr;
 canvas.style.width = `${rect.width}px`;
@@ -274,7 +295,7 @@ const axisColor = state === 'ALIGNED' ? AXIS_GREEN : stateColor(state);
 
 ctx.save();
 ctx.strokeStyle = axisColor;
-ctx.globalAlpha = state === 'ALIGNED' ? 0.95 : 0.68;
+ctx.globalAlpha = mode === 'LOST' ? 0.25 : state === 'ALIGNED' ? 0.95 : 0.68;
 ctx.lineWidth = 2;
 ctx.beginPath();
 ctx.moveTo(axisX, 0);
@@ -295,9 +316,8 @@ const pairs = [
 ];
 
 ctx.save();
-ctx.strokeStyle = 'rgba(255,255,255,0.30)';
-ctx.lineWidth = 1.15;
-
+ctx.strokeStyle = 'rgba(255,255,255,0.26)';
+ctx.lineWidth = 1.1;
 pairs.forEach(([a, b]) => {
 const pa = poseLandmarks[a];
 const pb = poseLandmarks[b];
@@ -307,26 +327,25 @@ ctx.moveTo(pa.x * rect.width, pa.y * rect.height);
 ctx.lineTo(pb.x * rect.width, pb.y * rect.height);
 ctx.stroke();
 });
-
 ctx.restore();
 }
 
-if (bodyAxisPoints && bodyAxisPoints.length >= 2) {
+if (axisPoints && axisPoints.length >= 2) {
 ctx.save();
 ctx.strokeStyle = axisColor;
 ctx.lineWidth = 3;
 ctx.globalAlpha = 0.9;
 ctx.beginPath();
-ctx.moveTo(bodyAxisPoints[0].x, bodyAxisPoints[0].y);
-for (let i = 1; i < bodyAxisPoints.length; i += 1) {
-ctx.lineTo(bodyAxisPoints[i].x, bodyAxisPoints[i].y);
+ctx.moveTo(axisPoints[0].x, axisPoints[0].y);
+for (let i = 1; i < axisPoints.length; i += 1) {
+ctx.lineTo(axisPoints[i].x, axisPoints[i].y);
 }
 ctx.stroke();
 ctx.restore();
 
 ctx.save();
 ctx.fillStyle = axisColor;
-bodyAxisPoints.forEach((p) => {
+axisPoints.forEach((p) => {
 ctx.beginPath();
 ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
 ctx.fill();
@@ -334,15 +353,14 @@ ctx.fill();
 ctx.restore();
 }
 
-if (com) {
-const pulse = 6 + Math.min(12, driftPx * 0.12);
-
+if (bodyCenter) {
+const pulse = 6 + Math.min(12, nextDriftPx * 0.12);
 ctx.save();
 ctx.fillStyle = stateColor(state);
 ctx.shadowBlur = state === 'ALIGNED' ? 18 : 10;
 ctx.shadowColor = stateColor(state);
 ctx.beginPath();
-ctx.arc(com.x, com.y, pulse, 0, Math.PI * 2);
+ctx.arc(bodyCenter.x, bodyCenter.y, pulse, 0, Math.PI * 2);
 ctx.fill();
 ctx.restore();
 
@@ -351,8 +369,8 @@ ctx.strokeStyle = stateColor(state);
 ctx.globalAlpha = 0.8;
 ctx.lineWidth = 1;
 ctx.beginPath();
-ctx.moveTo(axisX, com.y);
-ctx.lineTo(com.x, com.y);
+ctx.moveTo(axisX, bodyCenter.y);
+ctx.lineTo(bodyCenter.x, bodyCenter.y);
 ctx.stroke();
 ctx.restore();
 }
@@ -363,11 +381,12 @@ ctx.restore();
 const addStateEventIfNeeded = useCallback(
 (
 state: AxisState,
+mode: DetectionMode,
 tiltValue: number,
 stabilityValue: number,
 velocityValue: number,
 windowValue: number,
-driftValue: number
+nextDriftPx: number
 ) => {
 const previous = lastStateRef.current;
 
@@ -382,70 +401,118 @@ pushEvent({
 id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 at: formatNow(),
 state,
+mode,
 tilt: tiltValue,
 stability: stabilityValue,
 velocity: velocityValue,
 windowMs: windowValue,
-comDriftPx: driftValue,
+driftPx: nextDriftPx,
 });
 },
 [isCapturing, pushEvent]
 );
 
-const computeCom = useCallback((landmarks: Array<{ x: number; y: number }>, width: number, height: number) => {
-const weightedPoints = [
-{ idx: 11, w: 0.08 },
-{ idx: 12, w: 0.08 },
-{ idx: 23, w: 0.22 },
-{ idx: 24, w: 0.22 },
-{ idx: 25, w: 0.10 },
-{ idx: 26, w: 0.10 },
-{ idx: 27, w: 0.10 },
-{ idx: 28, w: 0.10 },
-];
+const evaluateMode = useCallback(
+(landmarks: Array<{ x: number; y: number }>, width: number, height: number): ModeMetrics => {
+const shoulderMidNorm = midpoint(landmarks[11], landmarks[12]);
+const hipMidNorm = midpoint(landmarks[23], landmarks[24]);
+const kneeMidNorm = midpoint(landmarks[25], landmarks[26]);
+const ankleMidNorm = midpoint(landmarks[27], landmarks[28]);
 
-let sumW = 0;
-let sumX = 0;
-let sumY = 0;
+const shoulderMid = shoulderMidNorm ? toPx(shoulderMidNorm, width, height) : null;
+const hipMid = hipMidNorm ? toPx(hipMidNorm, width, height) : null;
+const kneeMid = kneeMidNorm ? toPx(kneeMidNorm, width, height) : null;
+const ankleMid = ankleMidNorm ? toPx(ankleMidNorm, width, height) : null;
 
-weightedPoints.forEach(({ idx, w }) => {
-const lm = landmarks[idx];
-if (!lm) return;
-sumW += w;
-sumX += lm.x * width * w;
-sumY += lm.y * height * w;
-});
+const axisX = calibration.playerStart?.x ?? width / 2;
 
-if (!sumW) return null;
+const makeTilt = (top: Point, bottom: Point) => {
+const dx = top.x - bottom.x;
+const dy = bottom.y - top.y;
+return Math.abs((Math.atan2(dx, Math.max(1, dy)) * 180) / Math.PI);
+};
+
+if (shoulderMid && hipMid && kneeMid && ankleMid) {
+const bodyCenter = avgPoints([shoulderMid, hipMid, kneeMid, ankleMid]);
+const stackSpread = Math.max(
+Math.abs(shoulderMid.x - ankleMid.x),
+Math.abs(hipMid.x - ankleMid.x),
+Math.abs(kneeMid.x - ankleMid.x)
+);
+const nextDriftPx = bodyCenter ? Math.abs(bodyCenter.x - axisX) : 0;
+const tiltDeg = makeTilt(shoulderMid, ankleMid);
+
+let state: AxisState = 'SHIFT';
+if (tiltDeg <= 7 && stackSpread <= 22 && nextDriftPx <= 26) state = 'ALIGNED';
+else if (tiltDeg >= 16 || stackSpread >= 46 || nextDriftPx >= 54) state = 'DROP';
 
 return {
-x: sumX / sumW,
-y: sumY / sumW,
+mode: 'FULL BODY',
+state,
+axisPoints: [shoulderMid, hipMid, kneeMid, ankleMid],
+tiltDeg,
+stackSpread,
+driftPx: nextDriftPx,
+bodyCenter,
 };
-}, []);
-
-const inferState = useCallback(
-(bodyAxisDeg: number, stackSpread: number, comDrift: number, bodyVelocity: number): AxisState => {
-if (
-bodyAxisDeg <= BODY_AXIS_SHIFT_DEG &&
-stackSpread <= STACK_ALIGNED_PX &&
-comDrift <= COM_ALIGNED_PX
-) {
-return 'ALIGNED';
 }
 
-if (
-bodyVelocity >= DOWNWARD_DROP_VELOCITY ||
-bodyAxisDeg >= BODY_AXIS_DROP_DEG ||
-stackSpread >= STACK_SHIFT_PX ||
-comDrift >= COM_SHIFT_PX
-) {
-return 'DROP';
+if (shoulderMid && hipMid && kneeMid) {
+const bodyCenter = avgPoints([shoulderMid, hipMid, kneeMid]);
+const stackSpread = Math.max(
+Math.abs(shoulderMid.x - kneeMid.x),
+Math.abs(hipMid.x - kneeMid.x)
+);
+const nextDriftPx = bodyCenter ? Math.abs(bodyCenter.x - axisX) : 0;
+const tiltDeg = makeTilt(shoulderMid, kneeMid);
+
+let state: AxisState = 'SHIFT';
+if (tiltDeg <= 9 && stackSpread <= 28 && nextDriftPx <= 34) state = 'ALIGNED';
+else if (tiltDeg >= 20 || stackSpread >= 56 || nextDriftPx >= 62) state = 'DROP';
+
+return {
+mode: 'MID BODY',
+state,
+axisPoints: [shoulderMid, hipMid, kneeMid],
+tiltDeg,
+stackSpread,
+driftPx: nextDriftPx,
+bodyCenter,
+};
 }
 
-return 'SHIFT';
+if (shoulderMid && hipMid) {
+const bodyCenter = avgPoints([shoulderMid, hipMid]);
+const stackSpread = Math.abs(shoulderMid.x - hipMid.x);
+const nextDriftPx = bodyCenter ? Math.abs(bodyCenter.x - axisX) : 0;
+const tiltDeg = makeTilt(shoulderMid, hipMid);
+
+let state: AxisState = 'SHIFT';
+if (tiltDeg <= 11 && stackSpread <= 34 && nextDriftPx <= 42) state = 'ALIGNED';
+else if (tiltDeg >= 26 || stackSpread >= 72 || nextDriftPx >= 84) state = 'DROP';
+
+return {
+mode: 'UPPER BODY',
+state,
+axisPoints: [shoulderMid, hipMid],
+tiltDeg,
+stackSpread,
+driftPx: nextDriftPx,
+bodyCenter,
+};
+}
+
+return {
+mode: 'LOST',
+state: 'LOST',
+axisPoints: null,
+tiltDeg: 0,
+stackSpread: 0,
+driftPx: 0,
+bodyCenter: null,
+};
 },
-[]
+[calibration.playerStart]
 );
 
 const processFrame = useCallback(async () => {
@@ -485,19 +552,18 @@ const width = wrap.clientWidth;
 const height = wrap.clientHeight;
 
 if (!landmarks) {
-setQuality('NO SIGNAL');
-
 syncMetricsToState({
 state: 'LOST',
+mode: 'LOST',
 tilt: 0,
 stability: 0,
 velocity: 0,
 windowMs: 0,
-comDriftPx: 0,
+driftPx: 0,
 });
 
-drawInstrument(null, null, null, 'LOST', 0);
-addStateEventIfNeeded('LOST', 0, 0, 0, 0, 0);
+drawInstrument(null, null, null, 'LOST', 'LOST', 0);
+addStateEventIfNeeded('LOST', 'LOST', 0, 0, 0, 0, 0);
 
 rafRef.current = requestAnimationFrame(() => {
 void processFrame();
@@ -505,116 +571,88 @@ void processFrame();
 return;
 }
 
-const shoulderMidNorm = midpoint(landmarks[11], landmarks[12]);
-const hipMidNorm = midpoint(landmarks[23], landmarks[24]);
-const kneeMidNorm = midpoint(landmarks[25], landmarks[26]);
-const ankleMidNorm = midpoint(landmarks[27], landmarks[28]);
+const evaluated = evaluateMode(landmarks, width, height);
 
-if (!shoulderMidNorm || !hipMidNorm || !kneeMidNorm || !ankleMidNorm) {
-setQuality('LOW');
-
-syncMetricsToState({
-state: 'LOST',
-tilt: 0,
-stability: 0,
-velocity: 0,
-windowMs: 0,
-comDriftPx: 0,
-});
-
-drawInstrument(landmarks, null, null, 'LOST', 0);
-addStateEventIfNeeded('LOST', 0, 0, 0, 0, 0);
-
-rafRef.current = requestAnimationFrame(() => {
-void processFrame();
-});
-return;
-}
-
-const shoulderMid = toPx(shoulderMidNorm, width, height);
-const hipMid = toPx(hipMidNorm, width, height);
-const kneeMid = toPx(kneeMidNorm, width, height);
-const ankleMid = toPx(ankleMidNorm, width, height);
-
-const bodyAxisPoints = [shoulderMid, hipMid, kneeMid, ankleMid];
-
-const dx = shoulderMid.x - ankleMid.x;
-const dy = ankleMid.y - shoulderMid.y;
-const bodyAxisDeg = Math.abs((Math.atan2(dx, Math.max(1, dy)) * 180) / Math.PI);
-
-const stackSpread = Math.max(
-Math.abs(shoulderMid.x - ankleMid.x),
-Math.abs(hipMid.x - ankleMid.x),
-Math.abs(kneeMid.x - ankleMid.x)
-);
-
-const com = computeCom(landmarks, width, height);
-const axisX = calibration.playerStart?.x ?? width / 2;
-const drift = com ? Math.abs(com.x - axisX) : 0;
-
-const bodyMid = safePointAverage([shoulderMid, hipMid, kneeMid, ankleMid]);
 let nextVelocity = 0;
-if (bodyMid && lastComRef.current) {
-nextVelocity = dist(bodyMid, lastComRef.current);
+if (evaluated.bodyCenter && lastCenterRef.current) {
+nextVelocity = dist(evaluated.bodyCenter, lastCenterRef.current);
 }
-lastComRef.current = bodyMid;
+lastCenterRef.current = evaluated.bodyCenter;
 
-recentTiltRef.current = [...recentTiltRef.current.slice(-24), bodyAxisDeg];
-recentDriftRef.current = [...recentDriftRef.current.slice(-24), drift];
-recentStackRef.current = [...recentStackRef.current.slice(-24), stackSpread];
+if (evaluated.mode === 'FULL BODY' && nextVelocity >= 20 && evaluated.state !== 'ALIGNED') {
+evaluated.state = 'DROP';
+} else if (evaluated.mode === 'MID BODY' && nextVelocity >= 24 && evaluated.state !== 'ALIGNED') {
+evaluated.state = 'DROP';
+} else if (evaluated.mode === 'UPPER BODY' && nextVelocity >= 30 && evaluated.tiltDeg >= 18) {
+evaluated.state = 'DROP';
+}
 
-const driftVariance = mean(
-recentDriftRef.current.map((v) => Math.abs(v - mean(recentDriftRef.current)))
-);
-const stackVariance = mean(
-recentStackRef.current.map((v) => Math.abs(v - mean(recentStackRef.current)))
-);
-const avgAxisTilt = mean(recentTiltRef.current);
+recentTiltRef.current = [...recentTiltRef.current.slice(-24), evaluated.tiltDeg];
+recentDriftRef.current = [...recentDriftRef.current.slice(-24), evaluated.driftPx];
+recentStackRef.current = [...recentStackRef.current.slice(-24), evaluated.stackSpread];
 
-const nextStability = clamp(
-100 - driftVariance * 1.2 - stackVariance * 1.1 - avgAxisTilt * 1.7,
-0,
-100
-);
+const avgTilt = mean(recentTiltRef.current);
+const avgDrift = mean(recentDriftRef.current);
+const avgStack = mean(recentStackRef.current);
+const driftVariance = mean(recentDriftRef.current.map((v) => Math.abs(v - avgDrift)));
+const stackVariance = mean(recentStackRef.current.map((v) => Math.abs(v - avgStack)));
 
-const nextState = inferState(bodyAxisDeg, stackSpread, drift, nextVelocity);
+const nextStability =
+evaluated.mode === 'LOST'
+? 0
+: clamp(100 - avgTilt * 1.5 - driftVariance * 1.2 - stackVariance * 1.0, 0, 100);
 
 let nextWindow = 0;
-if (nextState === 'ALIGNED') {
+if (evaluated.state === 'ALIGNED') {
 if (alignedStartRef.current === null) alignedStartRef.current = nowMs;
 nextWindow = nowMs - alignedStartRef.current;
 } else {
 alignedStartRef.current = null;
 }
 
-setQuality(nextStability > 35 ? 'GOOD' : 'LOW');
-
 syncMetricsToState({
-state: nextState,
-tilt: bodyAxisDeg,
+state: evaluated.state,
+mode: evaluated.mode,
+tilt: evaluated.tiltDeg,
 stability: nextStability,
 velocity: nextVelocity,
 windowMs: nextWindow,
-comDriftPx: drift,
+driftPx: evaluated.driftPx,
 });
 
-drawInstrument(landmarks, bodyAxisPoints, com, nextState, drift);
-addStateEventIfNeeded(nextState, bodyAxisDeg, nextStability, nextVelocity, nextWindow, drift);
+drawInstrument(
+landmarks,
+evaluated.axisPoints,
+evaluated.bodyCenter,
+evaluated.state,
+evaluated.mode,
+evaluated.driftPx
+);
 
-if (isCapturing && nextState === 'ALIGNED' && nextWindow >= CLEAN_WINDOW_MIN_MS) {
+addStateEventIfNeeded(
+evaluated.state,
+evaluated.mode,
+evaluated.tiltDeg,
+nextStability,
+nextVelocity,
+nextWindow,
+evaluated.driftPx
+);
+
+if (isCapturing && evaluated.state === 'ALIGNED' && nextWindow >= CLEAN_WINDOW_MIN_MS) {
 const now = Date.now();
 if (now - lastAlignedEventAtRef.current > 900) {
 lastAlignedEventAtRef.current = now;
-
 pushEvent({
 id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 at: formatNow(),
 state: 'ALIGNED',
-tilt: bodyAxisDeg,
+mode: evaluated.mode,
+tilt: evaluated.tiltDeg,
 stability: nextStability,
 velocity: nextVelocity,
 windowMs: nextWindow,
-comDriftPx: drift,
+driftPx: evaluated.driftPx,
 });
 }
 }
@@ -622,16 +660,7 @@ comDriftPx: drift,
 rafRef.current = requestAnimationFrame(() => {
 void processFrame();
 });
-}, [
-addStateEventIfNeeded,
-calibration.playerStart,
-computeCom,
-drawInstrument,
-inferState,
-isCapturing,
-pushEvent,
-syncMetricsToState,
-]);
+}, [addStateEventIfNeeded, drawInstrument, evaluateMode, isCapturing, pushEvent, syncMetricsToState]);
 
 const stopLoop = useCallback(() => {
 if (rafRef.current) {
@@ -732,11 +761,12 @@ pushEvent({
 id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
 at: formatNow(),
 state: snapshot.state,
+mode: snapshot.mode,
 tilt: snapshot.tilt,
 stability: snapshot.stability,
 velocity: snapshot.velocity,
 windowMs: snapshot.windowMs,
-comDriftPx: snapshot.comDriftPx,
+driftPx: snapshot.driftPx,
 });
 }, [isCapturing, pushEvent]);
 
@@ -761,17 +791,18 @@ alignedStartRef.current = null;
 recentTiltRef.current = [];
 recentDriftRef.current = [];
 recentStackRef.current = [];
-lastComRef.current = null;
+lastCenterRef.current = null;
 lastStateRef.current = 'LOST';
 lastAlignedEventAtRef.current = 0;
 
 syncMetricsToState({
 state: 'LOST',
+mode: 'LOST',
 tilt: 0,
 stability: 0,
 velocity: 0,
 windowMs: 0,
-comDriftPx: 0,
+driftPx: 0,
 });
 }, [syncMetricsToState]);
 
@@ -884,12 +915,12 @@ STATE
 
 <div
 style={{
-color: quality === 'GOOD' ? ALIGNED : quality === 'LOW' ? SHIFT : LOST,
+color: detectionMode === 'LOST' ? LOST : ALIGNED,
 fontSize: 12,
 letterSpacing: '0.18em',
 }}
 >
-QUALITY {quality}
+QUALITY {modeLabel(detectionMode)}
 </div>
 </div>
 
@@ -921,7 +952,7 @@ fontSize: 11,
 letterSpacing: '0.28em',
 }}
 >
-AXIS LINE ACTIVE
+{detectionMode}
 </div>
 </div>
 </div>
@@ -937,7 +968,7 @@ gridTemplateColumns: '1fr 1fr',
 ['STABILITY', `${Math.round(stability)}%`],
 ['WINDOW', `${Math.round(windowMs)} ms`],
 ['BODY AXIS', `${tilt.toFixed(1)}°`],
-['COM DRIFT', `${comDriftPx.toFixed(1)} px`],
+['DRIFT', `${driftPx.toFixed(1)} px`],
 ].map(([label, value], index) => (
 <div
 key={label}
@@ -1139,6 +1170,7 @@ letterSpacing: '-0.04em',
 </div>
 
 <div style={{ color: MUTED, fontSize: 14 }}>{selectedEvent.at}</div>
+<div style={{ color: MUTED, fontSize: 13, letterSpacing: '0.14em' }}>{selectedEvent.mode}</div>
 
 <div
 style={{
@@ -1152,7 +1184,7 @@ marginTop: 6,
 ['Body Axis', `${selectedEvent.tilt.toFixed(1)}°`],
 ['Stability', `${Math.round(selectedEvent.stability)}%`],
 ['Window', `${Math.round(selectedEvent.windowMs)} ms`],
-['COM Drift', `${selectedEvent.comDriftPx.toFixed(1)} px`],
+['Drift', `${selectedEvent.driftPx.toFixed(1)} px`],
 ].map(([label, value]) => (
 <div
 key={label}
