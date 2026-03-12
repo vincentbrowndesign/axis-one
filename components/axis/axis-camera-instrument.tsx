@@ -70,6 +70,27 @@ function hasPose(result: any) {
 return Boolean(result?.landmarks?.[0]?.length);
 }
 
+function roundedRect(
+ctx: CanvasRenderingContext2D,
+x: number,
+y: number,
+width: number,
+height: number,
+radius: number
+) {
+ctx.beginPath();
+ctx.moveTo(x + radius, y);
+ctx.lineTo(x + width - radius, y);
+ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
+ctx.lineTo(x + width, y + height - radius);
+ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
+ctx.lineTo(x + radius, y + height);
+ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
+ctx.lineTo(x, y + radius);
+ctx.quadraticCurveTo(x, y, x + radius, y);
+ctx.closePath();
+}
+
 function computeMetrics(result: any, baseline: Baseline | null): PoseMetrics {
 if (!hasPose(result)) {
 return {
@@ -139,20 +160,20 @@ const bodyHeight = Math.abs(shoulderMidY - hipMidY);
 const bodyScale = bodyWidth + bodyHeight;
 
 const centered =
-shoulderMidX > 0.32 &&
-shoulderMidX < 0.68 &&
-hipMidX > 0.28 &&
-hipMidX < 0.72;
+shoulderMidX > 0.36 &&
+shoulderMidX < 0.64 &&
+hipMidX > 0.34 &&
+hipMidX < 0.66;
 
 const torsoPresent =
 shoulderMidY > 0.12 &&
-shoulderMidY < 0.72 &&
-hipMidY > 0.26 &&
-hipMidY < 0.9;
+shoulderMidY < 0.68 &&
+hipMidY > 0.28 &&
+hipMidY < 0.88;
 
 let lockState: LockState = "search";
 
-if (bodyScale > 0.34 && centered && torsoPresent) {
+if (bodyScale > 0.3 && bodyScale < 0.75 && centered && torsoPresent) {
 lockState = "locked";
 } else if (bodyScale > 0.2 && torsoPresent) {
 lockState = "partial";
@@ -188,8 +209,6 @@ state = "recover";
 } else {
 state = "drop";
 }
-} else {
-state = "drop";
 }
 
 return {
@@ -295,7 +314,6 @@ const interval = window.setInterval(() => {
 if (candidateRef.current === "aligned") {
 setAlignedMs((prev) => prev + 250);
 }
-
 setBestControl((prev) => Math.max(prev, round(smoothControl)));
 }, 250);
 
@@ -326,6 +344,15 @@ lockState === "search"
 : lockState === "partial"
 ? "Move subject into lock zone"
 : STATE_MEANING[heldState];
+
+const coachingText =
+lockState === "search"
+? "Find the frame"
+: lockState === "partial"
+? "Center shoulders and hips"
+: smoothTorsoLean < 2
+? "Hold alignment"
+: "Stabilize body";
 
 async function ensurePoseLandmarker() {
 if (poseRef.current) return poseRef.current;
@@ -404,17 +431,30 @@ ctx.clearRect(0, 0, canvas.width, canvas.height);
 if (showCamera) {
 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-const lockBoxX = canvas.width * 0.24;
-const lockBoxY = canvas.height * 0.18;
-const lockBoxW = canvas.width * 0.52;
-const lockBoxH = canvas.height * 0.58;
+const grad = ctx.createRadialGradient(
+canvas.width / 2,
+canvas.height / 2,
+canvas.width * 0.3,
+canvas.width / 2,
+canvas.height / 2,
+canvas.width * 0.9
+);
+grad.addColorStop(0, "rgba(0,0,0,0)");
+grad.addColorStop(1, "rgba(0,0,0,0.55)");
+ctx.fillStyle = grad;
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+const lockBoxX = canvas.width * 0.32;
+const lockBoxY = canvas.height * 0.22;
+const lockBoxW = canvas.width * 0.36;
+const lockBoxH = canvas.height * 0.44;
 
 ctx.strokeStyle =
 metrics.lockState === "locked"
-? "rgba(52,211,153,0.9)"
+? "rgba(52,211,153,0.92)"
 : metrics.lockState === "partial"
-? "rgba(252,211,77,0.8)"
-: "rgba(255,255,255,0.15)";
+? "rgba(252,211,77,0.88)"
+: "rgba(255,255,255,0.18)";
 ctx.lineWidth = metrics.lockState === "locked" ? 3 : 2;
 roundedRect(ctx, lockBoxX, lockBoxY, lockBoxW, lockBoxH, 24);
 ctx.stroke();
@@ -461,13 +501,9 @@ metrics.lockState === "locked"
 ? "rgba(52,211,153,0.95)"
 : metrics.lockState === "partial"
 ? "rgba(252,211,77,0.95)"
-: "rgba(255,255,255,0.45)";
+: "rgba(255,255,255,0.5)";
 ctx.font = "600 16px system-ui";
-ctx.fillText(
-`LOCK ${LOCK_LABELS[metrics.lockState]}`,
-24,
-34
-);
+ctx.fillText(`LOCK ${LOCK_LABELS[metrics.lockState]}`, 24, 34);
 }
 
 rafRef.current = window.requestAnimationFrame(loop);
@@ -645,6 +681,10 @@ State
 {meaningText}
 </div>
 
+<div className="mt-3 text-sm uppercase tracking-[0.28em] text-white/38">
+{coachingText}
+</div>
+
 <div className="mt-8 grid gap-0 sm:grid-cols-2">
 <Metric
 label="Control"
@@ -677,27 +717,6 @@ topBorder
 </div>
 </main>
 );
-}
-
-function roundedRect(
-ctx: CanvasRenderingContext2D,
-x: number,
-y: number,
-width: number,
-height: number,
-radius: number
-) {
-ctx.beginPath();
-ctx.moveTo(x + radius, y);
-ctx.lineTo(x + width - radius, y);
-ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-ctx.lineTo(x + width, y + height - radius);
-ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-ctx.lineTo(x + radius, y + height);
-ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-ctx.lineTo(x, y + radius);
-ctx.quadraticCurveTo(x, y, x + radius, y);
-ctx.closePath();
 }
 
 function Pill({ label }: { label: string }) {
