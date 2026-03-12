@@ -221,7 +221,8 @@ ctx.clearRect(0, 0, rect.width, rect.height);
 const axisX = calibration.playerStart?.x ?? rect.width / 2;
 
 ctx.save();
-ctx.strokeStyle = state === 'ALIGNED' ? '#39FF14' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
+ctx.strokeStyle =
+state === 'ALIGNED' ? '#39FF14' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
 ctx.globalAlpha = mode === 'LOST' ? 0.25 : 0.9;
 ctx.lineWidth = 2;
 ctx.beginPath();
@@ -259,7 +260,8 @@ ctx.restore();
 
 if (axisPoints && axisPoints.length >= 2) {
 ctx.save();
-ctx.strokeStyle = state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
+ctx.strokeStyle =
+state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
 ctx.lineWidth = 3;
 ctx.globalAlpha = 0.95;
 ctx.beginPath();
@@ -271,7 +273,8 @@ ctx.stroke();
 ctx.restore();
 
 ctx.save();
-ctx.fillStyle = state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
+ctx.fillStyle =
+state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
 axisPoints.forEach((p) => {
 ctx.beginPath();
 ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
@@ -283,7 +286,8 @@ ctx.restore();
 if (bodyCenter) {
 const pulse = 6 + Math.min(12, nextDriftPx * 0.12);
 ctx.save();
-ctx.fillStyle = state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
+ctx.fillStyle =
+state === 'ALIGNED' ? '#00FF9C' : state === 'SHIFT' ? '#FFD400' : state === 'DROP' ? '#3FA7FF' : '#7A7A7A';
 ctx.shadowBlur = 14;
 ctx.shadowColor = ctx.fillStyle as string;
 ctx.beginPath();

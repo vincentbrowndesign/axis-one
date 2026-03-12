@@ -22,16 +22,6 @@ target: Point | null;
 playerStart: Point | null;
 };
 
-export type EngineOutput = {
-mode: DetectionMode;
-state: AxisState;
-axisPoints: Point[] | null;
-bodyCenter: Point | null;
-tiltDeg: number;
-stackSpread: number;
-driftPx: number;
-};
-
 export function clamp(value: number, min: number, max: number) {
 return Math.min(max, Math.max(min, value));
 }
@@ -118,6 +108,16 @@ export function labelForEvent(event: AxisEvent) {
 if (event.state === 'LOST') return 'Tracking lost';
 return `${event.mode} • Velocity ${event.velocity.toFixed(4)} • Drift ${event.driftPx.toFixed(1)} px`;
 }
+
+export type EngineOutput = {
+mode: DetectionMode;
+state: AxisState;
+axisPoints: Point[] | null;
+bodyCenter: Point | null;
+tiltDeg: number;
+stackSpread: number;
+driftPx: number;
+};
 
 export function evaluateAxisFrame(
 landmarks: Array<{ x: number; y: number; visibility?: number }>,
