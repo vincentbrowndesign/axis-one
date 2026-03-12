@@ -1,19 +1,38 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-evaluateAxis,
-type AxisSample,
-type AxisState,
-} from "@/lib/axis/axisMovementModel";
+import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 
-type PermissionState = "idle" | "granted" | "denied" | "unsupported";
+type AxisState = "aligned" | "shift" | "drop" | "recover";
+
+type Baseline = {
+shoulderTilt: number;
+torsoLean: number;
+torsoWidth: number;
+};
+
+type PoseMetrics = {
+shoulderTilt: number;
+torsoLean: number;
+torsoWidth: number;
+control: number;
+state: AxisState;
+visible: boolean;
+};
 
 const STATE_LABELS: Record<AxisState, string> = {
 aligned: "ALIGNED",
 shift: "SHIFT",
 drop: "DROP",
 recover: "RECOVER",
+};
+
+const STATE_MEANING: Record<AxisState, string> = {
+aligned: "Body stacked and stable",
+shift: "Body drifting off center",
+drop: "Balance lost",
+recover: "Returning toward center",
 };
 
 function clamp(value: number, min: number, max: number) {
@@ -24,46 +43,136 @@ function round(value: number) {
 return Math.round(value);
 }
 
+function lm(result: any, index: number) {
+return result?.landmarks?.[0]?.[index];
+}
+
+function hasPose(result: any) {
+return Boolean(result?.landmarks?.[0]?.length);
+}
+
+function computeMetrics(result: any, baseline: Baseline | null): PoseMetrics {
+if (!hasPose(result)) {
+return {
+shoulderTilt: 0,
+torsoLean: 0,
+torsoWidth: 0,
+control: 0,
+state: "drop",
+visible: false,
+};
+}
+
+const leftShoulder = lm(result, 11);
+const rightShoulder = lm(result, 12);
+const leftHip = lm(result, 23);
+const rightHip = lm(result, 24);
+
+if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) {
+return {
+shoulderTilt: 0,
+torsoLean: 0,
+torsoWidth: 0,
+control: 0,
+state: "drop",
+visible: false,
+};
+}
+
+const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+const hipMidX = (leftHip.x + rightHip.x) / 2;
+
+const shoulderTiltRaw = Math.abs(leftShoulder.y - rightShoulder.y) * 100;
+const torsoLeanRaw = Math.abs(shoulderMidX - hipMidX) * 100;
+const torsoWidthRaw = Math.abs(leftShoulder.x - rightShoulder.x) * 100;
+
+const shoulderTiltDelta = baseline
+? Math.abs(shoulderTiltRaw - baseline.shoulderTilt)
+: shoulderTiltRaw;
+
+const torsoLeanDelta = baseline
+? Math.abs(torsoLeanRaw - baseline.torsoLean)
+: torsoLeanRaw;
+
+const torsoWidthDelta = baseline
+? Math.abs(torsoWidthRaw - baseline.torsoWidth)
+: 0;
+
+const control = clamp(
+100 - shoulderTiltDelta * 7 - torsoLeanDelta * 8 - torsoWidthDelta * 2,
+0,
+100
+);
+
+let state: AxisState = "drop";
+
+if (control >= 84 && torsoLeanDelta < 2.5 && shoulderTiltDelta < 2.5) {
+state = "aligned";
+} else if (control >= 62 && torsoLeanDelta < 5.5 && shoulderTiltDelta < 5.5) {
+state = "shift";
+} else if (control >= 48) {
+state = "recover";
+} else {
+state = "drop";
+}
+
+return {
+shoulderTilt: shoulderTiltDelta,
+torsoLean: torsoLeanDelta,
+torsoWidth: torsoWidthDelta,
+control,
+state,
+visible: true,
+};
+}
+
 export default function AxisCameraInstrument() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
+const canvasRef = useRef<HTMLCanvasElement | null>(null);
+const poseRef = useRef<PoseLandmarker | null>(null);
 const streamRef = useRef<MediaStream | null>(null);
+const rafRef = useRef<number | null>(null);
+const runningRef = useRef(false);
 
 const [cameraOn, setCameraOn] = useState(false);
-const [permission, setPermission] = useState<PermissionState>("idle");
+const [loading, setLoading] = useState(false);
+const [showCamera, setShowCamera] = useState(true);
 const [error, setError] = useState("");
 
-const [rawTilt, setRawTilt] = useState(0);
-const [rawRotation, setRawRotation] = useState(0);
+const [baseline, setBaseline] = useState<Baseline | null>(null);
 
-const [smoothTilt, setSmoothTilt] = useState(0);
-const [smoothRotation, setSmoothRotation] = useState(0);
+const [rawControl, setRawControl] = useState(0);
+const [rawState, setRawState] = useState<AxisState>("drop");
+const [rawShoulderTilt, setRawShoulderTilt] = useState(0);
+const [rawTorsoLean, setRawTorsoLean] = useState(0);
+const [subjectVisible, setSubjectVisible] = useState(false);
+
+const [smoothControl, setSmoothControl] = useState(0);
+const [smoothShoulderTilt, setSmoothShoulderTilt] = useState(0);
+const [smoothTorsoLean, setSmoothTorsoLean] = useState(0);
 
 const [heldState, setHeldState] = useState<AxisState>("drop");
-const [heldScore, setHeldScore] = useState(0);
+const [heldControl, setHeldControl] = useState(0);
+
+const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
+const [alignedMs, setAlignedMs] = useState(0);
+const [bestControl, setBestControl] = useState(0);
 
 const candidateRef = useRef<AxisState>("drop");
 const candidateCountRef = useRef(0);
 
 useEffect(() => {
 const interval = window.setInterval(() => {
-setSmoothTilt((prev) => prev + (rawTilt - prev) * 0.18);
-setSmoothRotation((prev) => prev + (rawRotation - prev) * 0.18);
+setSmoothControl((prev) => prev + (rawControl - prev) * 0.18);
+setSmoothShoulderTilt((prev) => prev + (rawShoulderTilt - prev) * 0.18);
+setSmoothTorsoLean((prev) => prev + (rawTorsoLean - prev) * 0.18);
 }, 16);
 
 return () => window.clearInterval(interval);
-}, [rawTilt, rawRotation]);
-
-const sample: AxisSample = useMemo(() => {
-return {
-tilt: Math.abs(smoothTilt),
-rotation: Math.abs(smoothRotation),
-};
-}, [smoothTilt, smoothRotation]);
-
-const reading = useMemo(() => evaluateAxis(sample), [sample]);
+}, [rawControl, rawShoulderTilt, rawTorsoLean]);
 
 useEffect(() => {
-const next = reading.state;
+const next = rawState;
 
 if (candidateRef.current !== next) {
 candidateRef.current = next;
@@ -73,13 +182,27 @@ return;
 
 candidateCountRef.current += 1;
 
-const threshold = next === "aligned" ? 4 : 6;
+const threshold = next === "aligned" ? 3 : 5;
 
 if (candidateCountRef.current >= threshold) {
 setHeldState(next);
-setHeldScore(reading.stability);
+setHeldControl(round(smoothControl));
 }
-}, [reading.state, reading.stability]);
+}, [rawState, smoothControl]);
+
+useEffect(() => {
+if (!cameraOn || sessionStartedAt === null) return;
+
+const interval = window.setInterval(() => {
+if (candidateRef.current === "aligned") {
+setAlignedMs((prev) => prev + 250);
+}
+
+setBestControl((prev) => Math.max(prev, round(smoothControl)));
+}, 250);
+
+return () => window.clearInterval(interval);
+}, [cameraOn, sessionStartedAt, smoothControl]);
 
 useEffect(() => {
 return () => {
@@ -87,88 +210,42 @@ stopCamera();
 };
 }, []);
 
-useEffect(() => {
-if (typeof window === "undefined") return;
+const totalMs =
+sessionStartedAt === null ? 1 : Math.max(Date.now() - sessionStartedAt, 1);
 
-const onOrientation = (event: DeviceOrientationEvent) => {
-const beta = typeof event.beta === "number" ? event.beta : 0;
-const gamma = typeof event.gamma === "number" ? event.gamma : 0;
+const alignedPct = clamp((alignedMs / totalMs) * 100, 0, 100);
 
-setRawTilt(clamp(beta / 10, -12, 12));
-setRawRotation(clamp(gamma * 2, -90, 90));
-};
+const meaningText = useMemo(() => STATE_MEANING[heldState], [heldState]);
 
-window.addEventListener("deviceorientation", onOrientation, true);
+async function ensurePoseLandmarker() {
+if (poseRef.current) return poseRef.current;
 
-return () => {
-window.removeEventListener("deviceorientation", onOrientation, true);
-};
-}, []);
+const vision = await FilesetResolver.forVisionTasks(
+"https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+);
 
-async function requestMotionPermission() {
-try {
-if (typeof window === "undefined") return;
+poseRef.current = await PoseLandmarker.createFromOptions(vision, {
+baseOptions: {
+modelAssetPath:
+"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",
+},
+runningMode: "VIDEO",
+numPoses: 1,
+});
 
-const DeviceMotionEventAny = DeviceMotionEvent as typeof DeviceMotionEvent & {
-requestPermission?: () => Promise<"granted" | "denied">;
-};
-
-const DeviceOrientationEventAny =
-DeviceOrientationEvent as typeof DeviceOrientationEvent & {
-requestPermission?: () => Promise<"granted" | "denied">;
-};
-
-const motionNeedsPermission =
-typeof DeviceMotionEventAny !== "undefined" &&
-typeof DeviceMotionEventAny.requestPermission === "function";
-
-const orientationNeedsPermission =
-typeof DeviceOrientationEventAny !== "undefined" &&
-typeof DeviceOrientationEventAny.requestPermission === "function";
-
-if (!motionNeedsPermission && !orientationNeedsPermission) {
-setPermission("granted");
-return;
-}
-
-const results: string[] = [];
-
-if (motionNeedsPermission && DeviceMotionEventAny.requestPermission) {
-results.push(await DeviceMotionEventAny.requestPermission());
-}
-
-if (
-orientationNeedsPermission &&
-DeviceOrientationEventAny.requestPermission
-) {
-results.push(await DeviceOrientationEventAny.requestPermission());
-}
-
-const granted = results.every((result) => result === "granted");
-setPermission(granted ? "granted" : "denied");
-
-if (!granted) {
-setError("Motion permission was denied.");
-}
-} catch {
-setPermission("denied");
-setError("Could not request motion permission.");
-}
+return poseRef.current;
 }
 
 async function startCamera() {
 try {
+setLoading(true);
 setError("");
 
-if (!navigator.mediaDevices?.getUserMedia) {
-setPermission("unsupported");
-setError("Camera is not supported on this device.");
-return;
-}
+const pose = await ensurePoseLandmarker();
 
 const stream = await navigator.mediaDevices.getUserMedia({
 video: {
-facingMode: "user",
+facingMode: { ideal: "environment" },
 width: { ideal: 1280 },
 height: { ideal: 720 },
 },
@@ -177,23 +254,97 @@ audio: false,
 
 streamRef.current = stream;
 
-if (videoRef.current) {
+if (!videoRef.current) return;
+
 videoRef.current.srcObject = stream;
 await videoRef.current.play();
-}
 
+runningRef.current = true;
 setCameraOn(true);
+setSessionStartedAt(Date.now());
+setAlignedMs(0);
+setBestControl(0);
 
-if (permission === "idle") {
-await requestMotionPermission();
+const loop = () => {
+if (!runningRef.current || !videoRef.current || !canvasRef.current) return;
+
+const video = videoRef.current;
+const canvas = canvasRef.current;
+const ctx = canvas.getContext("2d");
+
+if (!ctx) return;
+
+canvas.width = video.videoWidth || 640;
+canvas.height = video.videoHeight || 480;
+
+const result = pose.detectForVideo(video, performance.now());
+const metrics = computeMetrics(result, baseline);
+
+setSubjectVisible(metrics.visible);
+setRawControl(metrics.control);
+setRawState(metrics.state);
+setRawShoulderTilt(metrics.shoulderTilt);
+setRawTorsoLean(metrics.torsoLean);
+
+if (showCamera) {
+ctx.clearRect(0, 0, canvas.width, canvas.height);
+ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+if (metrics.visible) {
+const leftShoulder = lm(result, 11);
+const rightShoulder = lm(result, 12);
+const leftHip = lm(result, 23);
+const rightHip = lm(result, 24);
+
+if (leftShoulder && rightShoulder && leftHip && rightHip) {
+ctx.strokeStyle = "rgba(255,255,255,0.9)";
+ctx.lineWidth = 3;
+
+ctx.beginPath();
+ctx.moveTo(leftShoulder.x * canvas.width, leftShoulder.y * canvas.height);
+ctx.lineTo(rightShoulder.x * canvas.width, rightShoulder.y * canvas.height);
+ctx.stroke();
+
+ctx.beginPath();
+ctx.moveTo(leftHip.x * canvas.width, leftHip.y * canvas.height);
+ctx.lineTo(rightHip.x * canvas.width, rightHip.y * canvas.height);
+ctx.stroke();
+
+const shoulderMidX = ((leftShoulder.x + rightShoulder.x) / 2) * canvas.width;
+const shoulderMidY = ((leftShoulder.y + rightShoulder.y) / 2) * canvas.height;
+const hipMidX = ((leftHip.x + rightHip.x) / 2) * canvas.width;
+const hipMidY = ((leftHip.y + rightHip.y) / 2) * canvas.height;
+
+ctx.strokeStyle = "rgba(255,255,255,0.55)";
+ctx.beginPath();
+ctx.moveTo(shoulderMidX, shoulderMidY);
+ctx.lineTo(hipMidX, hipMidY);
+ctx.stroke();
 }
-} catch {
-setError("Camera access failed.");
-setCameraOn(false);
+}
+} else {
+ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+rafRef.current = window.requestAnimationFrame(loop);
+};
+
+rafRef.current = window.requestAnimationFrame(loop);
+} catch (e) {
+setError("Camera or pose model failed to start.");
+} finally {
+setLoading(false);
 }
 }
 
 function stopCamera() {
+runningRef.current = false;
+
+if (rafRef.current !== null) {
+window.cancelAnimationFrame(rafRef.current);
+rafRef.current = null;
+}
+
 if (streamRef.current) {
 streamRef.current.getTracks().forEach((track) => track.stop());
 streamRef.current = null;
@@ -206,192 +357,201 @@ videoRef.current.srcObject = null;
 setCameraOn(false);
 }
 
-function toggleCamera() {
-if (cameraOn) {
-stopCamera();
-} else {
-void startCamera();
-}
-}
+function calibrateAlign() {
+const currentBaseline: Baseline = {
+shoulderTilt: rawShoulderTilt,
+torsoLean: rawTorsoLean,
+torsoWidth: 0,
+};
 
-const stateText = STATE_LABELS[heldState];
-const tiltText = round(Math.abs(sample.tilt));
-const rotationText = round(Math.abs(sample.rotation));
-const stabilityText = round(heldScore || reading.stability);
+setBaseline(currentBaseline);
+setHeldState("aligned");
+setHeldControl(100);
+setBestControl(100);
+setAlignedMs(0);
+setSessionStartedAt(Date.now());
+candidateRef.current = "aligned";
+candidateCountRef.current = 0;
+}
 
 return (
 <main className="min-h-screen bg-black text-white">
-<div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-4 sm:px-6">
-<div className="mb-4 flex items-center justify-between">
-<div>
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/45">
-Axis Instrument
+<video ref={videoRef} playsInline muted autoPlay className="hidden" />
+
+<div className="mx-auto max-w-6xl px-5 py-8 sm:px-8">
+<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
+Axis Camera
 </div>
-<h1 className="mt-1 text-xl font-medium tracking-[0.18em] sm:text-2xl">
+
+<h1 className="mt-2 text-3xl font-semibold tracking-[0.18em] sm:text-5xl">
 HUMAN ALIGNMENT
 </h1>
-</div>
 
+<div className="mt-7 flex flex-wrap gap-3">
+{!cameraOn ? (
 <button
-onClick={toggleCamera}
-className="rounded-full border border-white/20 px-4 py-2 text-sm tracking-[0.2em] text-white/85 transition hover:border-white/40 hover:bg-white/5"
+onClick={() => void startCamera()}
+className="rounded-full border border-white/20 px-5 py-3 text-sm tracking-[0.18em] text-white transition hover:border-white/40 hover:bg-white/5"
 >
-{cameraOn ? "END SESSION" : "START SESSION"}
+{loading ? "STARTING..." : "START CAMERA"}
 </button>
-</div>
-
-<div className="grid flex-1 grid-cols-1 gap-4 lg:grid-cols-[1.4fr_0.8fr]">
-<section className="relative overflow-hidden rounded-[28px] border border-white/10 bg-white/5 shadow-2xl">
-<div className="absolute inset-0">
-<video
-ref={videoRef}
-playsInline
-muted
-autoPlay
-className="h-full w-full object-cover opacity-90"
-/>
-</div>
-
-<div className="absolute inset-0 bg-gradient-to-b from-black/30 via-black/10 to-black/60" />
-
-<div className="absolute inset-0">
-<div className="absolute left-1/2 top-1/2 h-[68vmin] w-[68vmin] max-h-[640px] max-w-[640px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/10" />
-<div className="absolute left-1/2 top-1/2 h-[48vmin] w-[48vmin] max-h-[460px] max-w-[460px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/10" />
-<div className="absolute left-1/2 top-1/2 h-[28vmin] w-[28vmin] max-h-[280px] max-w-[280px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/15" />
-
-<div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-white/10" />
-<div className="absolute left-0 top-1/2 h-px w-full -translate-y-1/2 bg-white/10" />
-
-<div
-className="absolute left-1/2 top-1/2 h-[2px] w-[34vmin] max-w-[340px] -translate-y-1/2 bg-white/70 transition-transform duration-150"
-style={{
-transform: `translate(-50%, -50%) rotate(${smoothRotation}deg)`,
-transformOrigin: "center center",
-}}
-/>
-
-<div
-className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/70 bg-white/90 shadow-[0_0_30px_rgba(255,255,255,0.5)] transition-all duration-150"
-style={{
-marginTop: `${smoothTilt * 6}px`,
-}}
-/>
-</div>
-
-<div className="absolute bottom-0 left-0 right-0 flex items-end justify-between p-4 sm:p-6">
-<div>
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/45">
-State
-</div>
-<div className="mt-1 text-3xl font-semibold tracking-[0.22em] sm:text-5xl">
-{stateText}
-</div>
-</div>
-
-<div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 backdrop-blur">
-<div className="text-[10px] uppercase tracking-[0.3em] text-white/45">
-Stability
-</div>
-<div className="mt-1 text-2xl font-semibold tracking-[0.16em]">
-{stabilityText}
-</div>
-</div>
-</div>
-</section>
-
-<aside className="flex flex-col gap-4">
-<div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/45">
-Reading
-</div>
-
-<div className="mt-5 grid grid-cols-2 gap-3">
-<MetricCard label="Tilt" value={tiltText} />
-<MetricCard label="Rotation" value={rotationText} />
-<MetricCard
-label="Live State"
-value={STATE_LABELS[reading.state]}
-compact
-/>
-<MetricCard
-label="Motion"
-value={
-permission === "granted"
-? "READY"
-: permission === "denied"
-? "BLOCKED"
-: permission === "unsupported"
-? "UNSUPPORTED"
-: "PENDING"
-}
-compact
-/>
-</div>
-</div>
-
-<div className="rounded-[24px] border border-white/10 bg-white/5 p-5">
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/45">
-Session
-</div>
-
-<div className="mt-4 space-y-3 text-sm text-white/70">
-<p>Use the front camera and body position together.</p>
-<p>Small movement changes are smoothed so the state does not flicker.</p>
-<p>The held state waits a few frames before switching.</p>
-</div>
-
-<div className="mt-5 flex gap-3">
+) : (
+<>
 <button
-onClick={toggleCamera}
-className="rounded-full border border-white/20 px-4 py-2 text-xs tracking-[0.22em] text-white/85 transition hover:border-white/40 hover:bg-white/5"
+onClick={calibrateAlign}
+className="rounded-full border border-white/20 px-5 py-3 text-sm tracking-[0.18em] text-white transition hover:border-white/40 hover:bg-white/5"
 >
-{cameraOn ? "STOP" : "START"}
+CALIBRATE ALIGN
 </button>
 
 <button
-onClick={() => void requestMotionPermission()}
-className="rounded-full border border-white/10 px-4 py-2 text-xs tracking-[0.22em] text-white/60 transition hover:border-white/30 hover:text-white/80"
+onClick={() => setShowCamera((prev) => !prev)}
+className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/65 transition hover:border-white/30 hover:text-white"
 >
-ENABLE MOTION
+{showCamera ? "HIDE CAMERA" : "SHOW CAMERA"}
 </button>
+
+<button
+onClick={stopCamera}
+className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/65 transition hover:border-white/30 hover:text-white"
+>
+END SESSION
+</button>
+</>
+)}
+
+<div className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/45">
+{baseline ? "BASELINE LOCKED" : "NO BASELINE"}
+</div>
+
+<div className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/45">
+{subjectVisible ? "SUBJECT VISIBLE" : "SUBJECT NOT FOUND"}
+</div>
+
+<Link
+href="/"
+className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/45 transition hover:border-white/30 hover:text-white"
+>
+HOME
+</Link>
 </div>
 
 {error ? (
-<div className="mt-4 rounded-2xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
+<div className="mt-5 rounded-3xl border border-red-400/20 bg-red-400/10 px-5 py-4 text-sm text-red-200">
 {error}
 </div>
 ) : null}
+
+<div className="mt-8 grid gap-6 lg:grid-cols-[1.15fr_0.85fr]">
+<section className="overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.03]">
+<div className="border-b border-white/10 px-7 py-6">
+<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
+State
 </div>
-</aside>
+
+<div className="mt-4 flex items-center gap-4">
+<SignalDot state={heldState} />
+<div className="text-5xl font-semibold tracking-[0.18em] sm:text-7xl">
+{STATE_LABELS[heldState]}
+</div>
+</div>
+
+<div className="mt-4 text-base text-white/60 sm:text-lg">
+{meaningText}
+</div>
+</div>
+
+<div className="grid gap-0 sm:grid-cols-2">
+<StatBlock
+label="Control"
+value={round(heldControl || smoothControl)}
+sublabel="How organized the body is around the aligned baseline"
+/>
+<StatBlock
+label="Aligned Time"
+value={`${round(alignedPct)}%`}
+sublabel="Time spent organized and stable"
+withBorder
+/>
+<StatBlock
+label="Best Control"
+value={bestControl}
+sublabel="Best lock reached this session"
+topBorder
+/>
+<StatBlock
+label="Body Turn"
+value={round(smoothTorsoLean)}
+sublabel="How far the torso drifts off center"
+withBorder
+topBorder
+/>
+</div>
+</section>
+
+<section className="rounded-[32px] border border-white/10 bg-white/[0.03] p-5">
+<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
+Camera Assist
+</div>
+
+<div className="mt-4 overflow-hidden rounded-[24px] border border-white/10 bg-black">
+<canvas
+ref={canvasRef}
+className={`h-auto w-full ${showCamera ? "opacity-100" : "opacity-0"} transition-opacity`}
+/>
+</div>
+
+<div className="mt-4 space-y-3 text-sm text-white/50">
+<p>Use camera to sense the kid while you hold the phone.</p>
+<p>Calibrate once in a clean aligned stance.</p>
+<p>Keep the kid centered in frame from hips to shoulders.</p>
+</div>
+</section>
 </div>
 </div>
 </main>
 );
 }
 
-function MetricCard({
+function SignalDot({ state }: { state: AxisState }) {
+const dotClass =
+state === "aligned"
+? "bg-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.45)]"
+: state === "shift"
+? "bg-amber-300 shadow-[0_0_18px_rgba(252,211,77,0.35)]"
+: state === "recover"
+? "bg-sky-300 shadow-[0_0_18px_rgba(125,211,252,0.35)]"
+: "bg-red-400 shadow-[0_0_18px_rgba(248,113,113,0.35)]";
+
+return <div className={`h-4 w-4 rounded-full ${dotClass}`} />;
+}
+
+function StatBlock({
 label,
 value,
-compact = false,
+sublabel,
+withBorder = false,
+topBorder = false,
 }: {
 label: string;
 value: string | number;
-compact?: boolean;
+sublabel: string;
+withBorder?: boolean;
+topBorder?: boolean;
 }) {
 return (
-<div className="rounded-[20px] border border-white/10 bg-black/20 p-4">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
+<div
+className={[
+"px-7 py-7",
+withBorder ? "sm:border-l sm:border-white/10" : "",
+topBorder ? "border-t border-white/10" : "",
+].join(" ")}
+>
+<div className="text-[10px] uppercase tracking-[0.32em] text-white/35">
 {label}
 </div>
-<div
-className={
-compact
-? "mt-2 text-base font-semibold tracking-[0.14em]"
-: "mt-2 text-2xl font-semibold tracking-[0.14em]"
-}
->
-{value}
-</div>
+<div className="mt-3 text-4xl font-semibold tracking-[0.14em]">{value}</div>
+<div className="mt-2 text-sm text-white/45">{sublabel}</div>
 </div>
 );
 }
