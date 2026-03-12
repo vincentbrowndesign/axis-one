@@ -19,6 +19,8 @@ const HOLD_MS_TO_START = 180;
 const MAX_HISTORY = 24;
 const CLEAN_WINDOW_MIN_MS = 350;
 
+type CameraFacing = 'user' | 'environment';
+
 export function useAxisEngine() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -48,6 +50,7 @@ driftPx: 0,
 
 const [ready, setReady] = useState(false);
 const [cameraLive, setCameraLive] = useState(false);
+const [cameraFacing, setCameraFacing] = useState<CameraFacing>('environment');
 const [isHolding, setIsHolding] = useState(false);
 const [isCapturing, setIsCapturing] = useState(false);
 
@@ -141,11 +144,25 @@ rafRef.current = null;
 }
 }, []);
 
-const startCamera = useCallback(async () => {
+const stopCamera = useCallback(() => {
+stopLoop();
+streamRef.current?.getTracks().forEach((track) => track.stop());
+streamRef.current = null;
+if (videoRef.current) {
+videoRef.current.pause();
+videoRef.current.srcObject = null;
+}
+setCameraLive(false);
+}, [stopLoop]);
+
+const startCamera = useCallback(
+async (facing: CameraFacing = cameraFacing) => {
 try {
+stopCamera();
+
 const stream = await navigator.mediaDevices.getUserMedia({
 video: {
-facingMode: 'user',
+facingMode: { ideal: facing },
 width: { ideal: 1280 },
 height: { ideal: 720 },
 },
@@ -153,24 +170,27 @@ audio: false,
 });
 
 streamRef.current = stream;
+
 const video = videoRef.current;
 if (!video) return;
 
 video.srcObject = stream;
 await video.play();
+
+setCameraFacing(facing);
 setCameraLive(true);
 } catch (error) {
 console.error('Camera start failed', error);
 setCameraLive(false);
 }
-}, []);
+},
+[cameraFacing, stopCamera]
+);
 
-const stopCamera = useCallback(() => {
-streamRef.current?.getTracks().forEach((track) => track.stop());
-streamRef.current = null;
-setCameraLive(false);
-stopLoop();
-}, [stopLoop]);
+const flipCamera = useCallback(async () => {
+const nextFacing: CameraFacing = cameraFacing === 'user' ? 'environment' : 'user';
+await startCamera(nextFacing);
+}, [cameraFacing, startCamera]);
 
 const boot = useCallback(async () => {
 if (ready) return;
@@ -190,8 +210,7 @@ minTrackingConfidence: 0.45,
 });
 
 setReady(true);
-await startCamera();
-}, [ready, startCamera]);
+}, [ready]);
 
 const drawOverlay = useCallback(
 (
@@ -542,10 +561,10 @@ driftPx: 0,
 }, [syncMetricsToState]);
 
 const nextCalibrationKey = useMemo(() => {
-if (!calibration.leftBoundary) return 'leftBoundary';
-if (!calibration.rightBoundary) return 'rightBoundary';
-if (!calibration.target) return 'target';
-if (!calibration.playerStart) return 'playerStart';
+if (!calibration.leftBoundary) return 'leftBoundary' as const;
+if (!calibration.rightBoundary) return 'rightBoundary' as const;
+if (!calibration.target) return 'target' as const;
+if (!calibration.playerStart) return 'playerStart' as const;
 return null;
 }, [calibration]);
 
@@ -582,8 +601,13 @@ selectedEvent,
 axisShape,
 isHolding,
 isCapturing,
+cameraLive,
+cameraFacing,
 selectedPoint,
 nextCalibrationKey,
+startCamera,
+stopCamera,
+flipCamera,
 onHoldStart,
 endCapture,
 resetSession,

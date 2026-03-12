@@ -27,7 +27,11 @@ selectedEvent,
 axisShape,
 isHolding,
 isCapturing,
+cameraLive,
+cameraFacing,
 nextCalibrationKey,
+startCamera,
+flipCamera,
 onHoldStart,
 endCapture,
 resetSession,
@@ -80,7 +84,7 @@ width: '100%',
 height: '100%',
 objectFit: 'cover',
 filter: 'brightness(0.42) contrast(1.05) saturate(0.78)',
-transform: 'scaleX(-1)',
+transform: cameraFacing === 'user' ? 'scaleX(-1)' : 'none',
 }}
 />
 
@@ -206,6 +210,38 @@ display: 'grid',
 gap: 12,
 }}
 >
+<div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+<button
+onClick={() => startCamera(cameraFacing)}
+style={{
+appearance: 'none',
+border: `1px solid ${AXIS_GREEN}`,
+background: 'transparent',
+color: AXIS_GREEN,
+padding: '16px 14px',
+fontSize: 14,
+letterSpacing: '0.12em',
+}}
+>
+{cameraLive ? 'RESTART CAMERA' : 'START CAMERA'}
+</button>
+
+<button
+onClick={flipCamera}
+style={{
+appearance: 'none',
+border: `1px solid ${LINE}`,
+background: 'transparent',
+color: TEXT,
+padding: '16px 14px',
+fontSize: 14,
+letterSpacing: '0.12em',
+}}
+>
+FLIP CAMERA
+</button>
+</div>
+
 <button
 onMouseDown={onHoldStart}
 onMouseUp={endCapture}
@@ -242,15 +278,7 @@ RESET SESSION
 </button>
 
 <button
-onClick={() =>
-setSelectedPoint(
-(nextCalibrationKey ?? 'leftBoundary') as
-| 'leftBoundary'
-| 'rightBoundary'
-| 'target'
-| 'playerStart'
-)
-}
+onClick={() => setSelectedPoint(nextCalibrationKey ?? 'leftBoundary')}
 style={{
 appearance: 'none',
 border: `1px solid ${LINE}`,
