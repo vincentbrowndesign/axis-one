@@ -242,7 +242,15 @@ RESET SESSION
 </button>
 
 <button
-onClick={() => setSelectedPoint(nextCalibrationKey ?? 'leftBoundary')}
+onClick={() =>
+setSelectedPoint(
+(nextCalibrationKey ?? 'leftBoundary') as
+| 'leftBoundary'
+| 'rightBoundary'
+| 'target'
+| 'playerStart'
+)
+}
 style={{
 appearance: 'none',
 border: `1px solid ${LINE}`,
@@ -375,7 +383,9 @@ letterSpacing: '-0.04em',
 </div>
 
 <div style={{ color: MUTED, fontSize: 14 }}>{selectedEvent.at}</div>
-<div style={{ color: MUTED, fontSize: 13, letterSpacing: '0.14em' }}>{selectedEvent.mode}</div>
+<div style={{ color: MUTED, fontSize: 13, letterSpacing: '0.14em' }}>
+{selectedEvent.mode}
+</div>
 
 <div
 style={{
