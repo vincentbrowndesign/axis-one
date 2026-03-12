@@ -203,7 +203,6 @@ const totalMs =
 sessionStartedAt === null ? 1 : Math.max(Date.now() - sessionStartedAt, 1);
 
 const alignedPct = clamp((alignedMs / totalMs) * 100, 0, 100);
-
 const meaningText = useMemo(() => STATE_MEANING[heldState], [heldState]);
 
 async function ensurePoseLandmarker() {
@@ -280,24 +279,37 @@ ctx.clearRect(0, 0, canvas.width, canvas.height);
 if (showCamera) {
 ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-if (metrics.visible) {
 const leftShoulder = lm(result, 11);
 const rightShoulder = lm(result, 12);
 const leftHip = lm(result, 23);
 const rightHip = lm(result, 24);
 
-if (leftShoulder && rightShoulder && leftHip && rightHip) {
-const shoulderMidX = ((leftShoulder.x + rightShoulder.x) / 2) * canvas.width;
-const shoulderMidY = ((leftShoulder.y + rightShoulder.y) / 2) * canvas.height;
+if (
+metrics.visible &&
+leftShoulder &&
+rightShoulder &&
+leftHip &&
+rightHip
+) {
+const shoulderMidX =
+((leftShoulder.x + rightShoulder.x) / 2) * canvas.width;
+const shoulderMidY =
+((leftShoulder.y + rightShoulder.y) / 2) * canvas.height;
 const hipMidX = ((leftHip.x + rightHip.x) / 2) * canvas.width;
 const hipMidY = ((leftHip.y + rightHip.y) / 2) * canvas.height;
 
-ctx.strokeStyle = "rgba(255,255,255,0.9)";
+ctx.strokeStyle = "rgba(255,255,255,0.92)";
 ctx.lineWidth = 3;
 
 ctx.beginPath();
-ctx.moveTo(leftShoulder.x * canvas.width, leftShoulder.y * canvas.height);
-ctx.lineTo(rightShoulder.x * canvas.width, rightShoulder.y * canvas.height);
+ctx.moveTo(
+leftShoulder.x * canvas.width,
+leftShoulder.y * canvas.height
+);
+ctx.lineTo(
+rightShoulder.x * canvas.width,
+rightShoulder.y * canvas.height
+);
 ctx.stroke();
 
 ctx.beginPath();
@@ -317,7 +329,6 @@ ctx.beginPath();
 ctx.moveTo(canvas.width / 2, 0);
 ctx.lineTo(canvas.width / 2, canvas.height);
 ctx.stroke();
-}
 }
 }
 
@@ -372,8 +383,8 @@ return (
 <main className="min-h-screen bg-black text-white">
 <video ref={videoRef} playsInline muted autoPlay className="hidden" />
 
-<div className="mx-auto max-w-6xl px-5 pb-24 pt-8 sm:px-8">
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
+<div className="mx-auto max-w-6xl px-4 pb-20 pt-6 sm:px-6">
+<div className="text-[10px] uppercase tracking-[0.38em] text-white/28">
 Axis OS
 </div>
 
@@ -381,8 +392,8 @@ Axis OS
 HUMAN ALIGNMENT
 </h1>
 
-<section className="mt-6 overflow-hidden rounded-[32px] border border-white/10 bg-white/[0.03]">
-<div className="border-b border-white/10 px-5 py-5 sm:px-7">
+<section className="mt-6 overflow-hidden rounded-[34px] border border-white/10 bg-white/[0.03] shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+<div className="border-b border-white/10 px-4 py-4 sm:px-6">
 <div className="flex flex-wrap gap-3">
 {!cameraOn ? (
 <button
@@ -402,14 +413,14 @@ CALIBRATE ALIGN
 
 <button
 onClick={() => setShowCamera((prev) => !prev)}
-className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/65 transition hover:border-white/30 hover:text-white"
+className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/70 transition hover:border-white/30 hover:text-white"
 >
 {showCamera ? "HIDE CAMERA" : "SHOW CAMERA"}
 </button>
 
 <button
 onClick={stopCamera}
-className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/65 transition hover:border-white/30 hover:text-white"
+className="rounded-full border border-white/10 px-5 py-3 text-sm tracking-[0.18em] text-white/70 transition hover:border-white/30 hover:text-white"
 >
 END SESSION
 </button>
@@ -422,15 +433,57 @@ END SESSION
 </div>
 
 {error ? (
-<div className="mt-4 rounded-3xl border border-red-400/20 bg-red-400/10 px-5 py-4 text-sm text-red-200">
+<div className="mt-4 rounded-3xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-200">
 {error}
 </div>
 ) : null}
 </div>
 
-<div className="grid gap-0 lg:grid-cols-[0.95fr_1.05fr]">
-<div className="border-b border-white/10 px-5 py-6 lg:border-b-0 lg:border-r lg:border-white/10 sm:px-7">
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
+<div className="grid gap-0 lg:grid-cols-[1.05fr_0.95fr]">
+<div className="order-1 border-b border-white/10 px-4 py-5 lg:order-2 lg:border-b-0 lg:border-l lg:border-white/10 sm:px-6">
+<div className="flex items-center justify-between gap-4">
+<div>
+<div className="text-[10px] uppercase tracking-[0.35em] text-white/30">
+Camera Lock Point
+</div>
+<div className="mt-2 text-sm text-white/50">
+Keep the kid centered from hips to shoulders.
+</div>
+</div>
+
+<div className="rounded-full border border-white/10 px-4 py-2 text-xs tracking-[0.18em] text-white/45">
+{showCamera ? "VISIBLE" : "HIDDEN"}
+</div>
+</div>
+
+<div className="mt-5 overflow-hidden rounded-[28px] border border-white/10 bg-black">
+<canvas
+ref={canvasRef}
+className={`h-auto w-full ${showCamera ? "opacity-100" : "opacity-0"} transition-opacity`}
+/>
+</div>
+
+<div className="mt-4 grid gap-3 sm:grid-cols-3">
+<AssistCard
+label="Lock"
+value={subjectVisible ? "FOUND" : "SEARCH"}
+sublabel="Subject presence in frame"
+/>
+<AssistCard
+label="Calibrate"
+value={baseline ? "READY" : "SET"}
+sublabel="Capture clean aligned stance"
+/>
+<AssistCard
+label="Flow"
+value={cameraOn ? "LIVE" : "OFF"}
+sublabel="Instrument remains active"
+/>
+</div>
+</div>
+
+<div className="order-2 px-4 py-5 lg:order-1 sm:px-6">
+<div className="text-[10px] uppercase tracking-[0.35em] text-white/30">
 State
 </div>
 
@@ -469,48 +522,6 @@ value={round(smoothTorsoLean)}
 sublabel="Torso movement off center"
 withBorder
 topBorder
-/>
-</div>
-</div>
-
-<div className="px-5 py-6 sm:px-7">
-<div className="flex items-center justify-between gap-4">
-<div>
-<div className="text-[11px] uppercase tracking-[0.35em] text-white/35">
-Camera Lock Point
-</div>
-<div className="mt-2 text-sm text-white/50">
-Keep the kid centered from hips to shoulders.
-</div>
-</div>
-
-<div className="rounded-full border border-white/10 px-4 py-2 text-xs tracking-[0.18em] text-white/45">
-{showCamera ? "VISIBLE" : "HIDDEN"}
-</div>
-</div>
-
-<div className="mt-5 overflow-hidden rounded-[28px] border border-white/10 bg-black">
-<canvas
-ref={canvasRef}
-className={`h-auto w-full ${showCamera ? "opacity-100" : "opacity-0"} transition-opacity`}
-/>
-</div>
-
-<div className="mt-4 grid gap-3 sm:grid-cols-3">
-<AssistCard
-label="Lock"
-value={subjectVisible ? "FOUND" : "SEARCH"}
-sublabel="Subject presence in frame"
-/>
-<AssistCard
-label="Calibrate"
-value={baseline ? "READY" : "SET"}
-sublabel="Capture clean aligned stance"
-/>
-<AssistCard
-label="Flow"
-value={cameraOn ? "LIVE" : "OFF"}
-sublabel="Read remains active on page"
 />
 </div>
 </div>
@@ -558,12 +569,12 @@ topBorder?: boolean;
 return (
 <div
 className={[
-"px-0 py-6 sm:px-0",
+"px-0 py-6",
 withBorder ? "sm:border-l sm:border-white/10 sm:pl-6" : "",
 topBorder ? "border-t border-white/10 pt-6" : "",
 ].join(" ")}
 >
-<div className="text-[10px] uppercase tracking-[0.32em] text-white/35">
+<div className="text-[10px] uppercase tracking-[0.32em] text-white/30">
 {label}
 </div>
 <div className="mt-3 text-4xl font-semibold tracking-[0.14em]">{value}</div>
@@ -583,7 +594,7 @@ sublabel: string;
 }) {
 return (
 <div className="rounded-[22px] border border-white/10 bg-white/[0.02] p-4">
-<div className="text-[10px] uppercase tracking-[0.32em] text-white/35">
+<div className="text-[10px] uppercase tracking-[0.32em] text-white/30">
 {label}
 </div>
 <div className="mt-2 text-xl font-semibold tracking-[0.12em]">{value}</div>
