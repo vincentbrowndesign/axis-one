@@ -75,17 +75,32 @@ const MIN_PAIR_SCORE = 0.22;
 const CALIBRATION_MS = 1600;
 const AUTO_CAPTURE_COOLDOWN_MS = 1200;
 const TRUE_FLASH_MS = 550;
-const HOLD_MIN_MS = 90;
 
 const SHIFT_THRESHOLD = 45;
 const DROP_THRESHOLD = 70;
 const LOCK_THRESHOLD = 84;
 
-const SUBJECT_CONFIDENCE_MIN = 45;
+const READ_CONFIDENCE_MIN = 45;
 
 const AXIS_ANGLE_SMOOTH = 0.12;
 const AXIS_CENTER_SMOOTH = 0.16;
 const AXIS_LOW_CONFIDENCE_SMOOTH = 0.06;
+
+/**
+* HOLD / RELEASE TUNING
+*/
+const HOLD_READY_MIN = 72;
+const HOLD_QUIET_MOTION_MIN = 74;
+const HOLD_STABILITY_MIN = 44;
+const HOLD_ALIGNMENT_MIN = 58;
+const HOLD_MIN_MS = 180;
+const HOLD_DROP_GRACE_MS = 120;
+
+const RELEASE_CENTER_VELOCITY_MIN = 0.008;
+const RELEASE_TORSO_HEIGHT_DELTA_MIN = 0.016;
+const RELEASE_ANGLE_DELTA_MIN = 3.0;
+const RELEASE_MIN_FROM_HOLD_MS = 70;
+const RELEASE_REFRACTORY_MS = 650;
 
 const STATE_GLOW: Record<AxisState, string> = {
 LOST: "rgba(140,160,180,0.08)",
@@ -242,6 +257,9 @@ const calibrationStartedAtRef = useRef<number | null>(null);
 const calibrationSamplesRef = useRef<BaselineSample[]>([]);
 
 const holdStartedAtRef = useRef<number | null>(null);
+const holdLastGoodAtRef = useRef<number | null>(null);
+const lastReleaseAtRef = useRef<number>(0);
+
 const lastAutoCaptureAtRef = useRef<number>(0);
 const bestReadyRef = useRef<number>(0);
 const lastCenterNormRef = useRef<number | null>(null);
@@ -284,6 +302,8 @@ baselineRef.current = null;
 calibrationStartedAtRef.current = null;
 calibrationSamplesRef.current = [];
 holdStartedAtRef.current = null;
+holdLastGoodAtRef.current = null;
+lastReleaseAtRef.current = 0;
 lastAutoCaptureAtRef.current = 0;
 bestReadyRef.current = 0;
 lastCenterNormRef.current = null;
@@ -346,7 +366,8 @@ ctx.drawImage(video, dx, dy, dw, dh);
 [],
 );
 
-const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number, mode: ViewMode) => {
+const drawGrid = useCallback(
+(ctx: CanvasRenderingContext2D, width: number, height: number, mode: ViewMode) => {
 ctx.save();
 ctx.strokeStyle =
 mode === "SCAN" ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.055)";
@@ -369,10 +390,18 @@ ctx.stroke();
 }
 
 ctx.restore();
-}, []);
+},
+[],
+);
 
 const drawAmbientGlow = useCallback(
-(ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState, mode: ViewMode) => {
+(
+ctx: CanvasRenderingContext2D,
+width: number,
+height: number,
+state: AxisState,
+mode: ViewMode,
+) => {
 ctx.save();
 
 const radial = ctx.createRadialGradient(
@@ -694,18 +723,19 @@ ctx.fillText("AXIS READY", 40, 52);
 ctx.font =
 '700 38px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = scoreColor;
-const scoreText = mode === "SCAN" ? "··" : String(Math.round(metrics.axisReady)).padStart(2, "0");
+const scoreText =
+mode === "SCAN" || guide === "LOCK" ? "··" : String(Math.round(metrics.axisReady)).padStart(2, "0");
 ctx.fillText(scoreText, 40, 96);
 
 ctx.font =
 '600 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(255,255,255,0.86)";
-ctx.fillText(metrics.state, 108, 94);
+ctx.fillText(guide === "LOCK" ? "LOCK" : metrics.state, 108, 94);
 
 ctx.font =
 '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.64)";
-ctx.fillText(`CORE ${Math.round(metrics.axisCore)}`, width - 160, 54);
+ctx.fillText(`CORE ${guide === "LOCK" || mode === "SCAN" ? "·" : Math.round(metrics.axisCore)}`, width - 160, 54);
 ctx.fillText(`CONF ${Math.round(metrics.confidence)}`, width - 160, 76);
 
 if (progress > 0 && progress < 100) {
@@ -815,8 +845,7 @@ drawVideoCover,
 ],
 );
 
-const addCaptureFromExportCanvas = useCallback(
-async (metrics: FrameMetrics) => {
+const addCaptureFromExportCanvas = useCallback(async (metrics: FrameMetrics) => {
 const canvas = exportCanvasRef.current;
 if (!canvas) return;
 const timestamp = Date.now();
@@ -835,9 +864,7 @@ dataUrl,
 },
 ...prev,
 ]);
-},
-[],
-);
+}, []);
 
 const analyzePose = useCallback(
 async (now: number) => {
@@ -892,6 +919,12 @@ const confidence =
 (hipPairOk ? 10 : 0) +
 (anklePairOk ? 10 : 0);
 
+const presenceDetected =
+visibleCount >= 3 || shoulderPairOk || hipPairOk;
+
+const readDetected =
+shoulderPairOk && hipPairOk && confidence >= READ_CONFIDENCE_MIN;
+
 let metrics: FrameMetrics = {
 axisCore: 0,
 axisReady: 0,
@@ -910,17 +943,16 @@ let guide = "FIND SUBJECT";
 let center: { x: number; y: number } | null = null;
 let axisAngleRad: number | null = null;
 
-const subjectDetected =
-shoulderPairOk && hipPairOk && confidence >= SUBJECT_CONFIDENCE_MIN;
-
-if (!subjectDetected) {
-const partialBodySeen = visibleCount > 0;
-metrics.state = partialBodySeen ? "FIND SUBJECT" : "LOST";
+if (!presenceDetected) {
+metrics.state = "LOST";
 guide = "FIND SUBJECT";
 
 smoothedAxisAngleRef.current = null;
 smoothedCenterRef.current = null;
 holdStartedAtRef.current = null;
+holdLastGoodAtRef.current = null;
+calibrationStartedAtRef.current = null;
+calibrationSamplesRef.current = [];
 
 setGuideText(guide);
 setAxisState(metrics.state);
@@ -933,7 +965,33 @@ setStabilityScore(0);
 setMotionScore(0);
 setConfidenceScore(Math.round(confidence));
 
-renderInstrument(partialBodySeen ? kpMap : null, null, null, metrics, guide, calibrationProgress);
+renderInstrument(null, null, null, metrics, guide, 0);
+return;
+}
+
+if (!readDetected) {
+metrics.state = "FIND SUBJECT";
+guide = "FIND SUBJECT";
+
+smoothedAxisAngleRef.current = null;
+smoothedCenterRef.current = null;
+holdStartedAtRef.current = null;
+holdLastGoodAtRef.current = null;
+calibrationStartedAtRef.current = null;
+calibrationSamplesRef.current = [];
+
+setGuideText(guide);
+setAxisState(metrics.state);
+setTracePhase(metrics.phase);
+setIsTrueMoment(false);
+setAxisCore(0);
+setAxisReady(0);
+setAlignmentScore(0);
+setStabilityScore(0);
+setMotionScore(0);
+setConfidenceScore(Math.round(confidence));
+
+renderInstrument(kpMap, null, null, metrics, guide, 0);
 return;
 }
 
@@ -1014,8 +1072,8 @@ const progress = clamp(
 
 setCalibrationProgress(progress);
 
-metrics.state = "LOCK";
-metrics.phase = "HOLD";
+metrics.state = "FIND SUBJECT";
+metrics.phase = "LOAD";
 guide = "LOCK";
 
 if (progress >= 100 && calibrationSamplesRef.current.length >= 12) {
@@ -1038,6 +1096,8 @@ setConfidenceScore(Math.round(confidence));
 renderInstrument(kpMap, center, axisAngleRad, metrics, guide, progress);
 return;
 }
+
+setCalibrationProgress(100);
 
 const baseline = baselineRef.current;
 
@@ -1097,36 +1157,67 @@ else if (axisReady >= DROP_THRESHOLD) state = "DROP";
 else if (axisReady >= SHIFT_THRESHOLD) state = "SHIFT";
 else state = "OFF AXIS";
 
-let phase: TracePhase = "LOAD";
+/**
+* HOLD TUNING
+*/
+const holdCandidate =
+axisReady >= HOLD_READY_MIN &&
+motion >= HOLD_QUIET_MOTION_MIN &&
+stability >= HOLD_STABILITY_MIN &&
+alignment >= HOLD_ALIGNMENT_MIN;
 
-if (axisReady >= DROP_THRESHOLD) {
-if (holdStartedAtRef.current === null) holdStartedAtRef.current = now;
+if (holdCandidate) {
+if (holdStartedAtRef.current === null) {
+holdStartedAtRef.current = now;
+}
+holdLastGoodAtRef.current = now;
 } else {
+const graceExpired =
+holdLastGoodAtRef.current === null ||
+now - holdLastGoodAtRef.current > HOLD_DROP_GRACE_MS;
+
+if (graceExpired) {
 holdStartedAtRef.current = null;
+holdLastGoodAtRef.current = null;
+}
 }
 
 const holdDuration =
 holdStartedAtRef.current === null ? 0 : now - holdStartedAtRef.current;
 
-if (axisReady >= DROP_THRESHOLD && holdDuration >= HOLD_MIN_MS) {
-phase = "HOLD";
-} else {
-phase = "LOAD";
-}
+const holdConfirmed = holdDuration >= HOLD_MIN_MS;
+
+let phase: TracePhase = holdConfirmed ? "HOLD" : "LOAD";
+
+/**
+* RELEASE TUNING
+*/
+const releaseSignalCount =
+(centerVelocity > RELEASE_CENTER_VELOCITY_MIN ? 1 : 0) +
+(torsoHeightDelta > RELEASE_TORSO_HEIGHT_DELTA_MIN ? 1 : 0) +
+(Math.max(shoulderAngleDelta, hipAngleDelta) > RELEASE_ANGLE_DELTA_MIN ? 1 : 0);
+
+const releaseSignal = releaseSignalCount >= 2;
+const releaseWindowOpen =
+holdConfirmed && holdDuration >= RELEASE_MIN_FROM_HOLD_MS;
+const releaseRefractoryClear =
+now - lastReleaseAtRef.current > RELEASE_REFRACTORY_MS;
 
 let isTrue = false;
-
-const releaseSignal =
-centerVelocity > 0.006 ||
-torsoHeightDelta > 0.012 ||
-Math.max(shoulderAngleDelta, hipAngleDelta) > 2.2;
-
 const trueFlashActive = now < trueFlashUntilRef.current;
 
-if (axisReady >= LOCK_THRESHOLD && holdDuration >= HOLD_MIN_MS && releaseSignal) {
+if (
+releaseWindowOpen &&
+releaseSignal &&
+axisReady >= LOCK_THRESHOLD &&
+releaseRefractoryClear
+) {
 isTrue = true;
 phase = "RELEASE";
 trueFlashUntilRef.current = now + TRUE_FLASH_MS;
+lastReleaseAtRef.current = now;
+holdStartedAtRef.current = null;
+holdLastGoodAtRef.current = null;
 } else if (trueFlashActive) {
 isTrue = true;
 phase = "RELEASE";
@@ -1180,7 +1271,7 @@ void addCaptureFromExportCanvas(metrics);
 
 renderInstrument(kpMap, center, axisAngleRad, metrics, guide, 100);
 },
-[addCaptureFromExportCanvas, calibrationProgress, facingMode, renderInstrument],
+[addCaptureFromExportCanvas, facingMode, renderInstrument],
 );
 
 const loop = useCallback(async () => {
@@ -1412,10 +1503,10 @@ return (
 Axis Core v1
 </div>
 <div className="mt-1 text-2xl font-semibold tracking-tight">
-Stable line • true readiness • trace rail • subject gate
+HOLD and RELEASE tuning
 </div>
 <div className="mt-1 text-sm text-white/55">
-Calibrated beam pass. Freeze this before new features.
+HOLD must be earned. RELEASE must come after HOLD.
 </div>
 </div>
 
@@ -1493,7 +1584,7 @@ className="absolute inset-0 h-full w-full object-cover opacity-0 pointer-events-
 <div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
 State
 </div>
-<div className="mt-1 text-lg font-semibold">{axisState}</div>
+<div className="mt-1 text-lg font-semibold">{guideText}</div>
 </div>
 
 <div className="pointer-events-none absolute bottom-4 right-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-right backdrop-blur">
@@ -1519,7 +1610,7 @@ Axis Read
 Axis Ready
 </div>
 <div className="mt-2 text-5xl font-semibold">
-{viewMode === "SCAN" ? "··" : axisReady}
+{viewMode === "SCAN" || guideText === "LOCK" ? "··" : axisReady}
 </div>
 <div className="mt-2 text-sm text-white/55">{guideText}</div>
 </div>
@@ -1530,7 +1621,7 @@ Axis Ready
 Axis Core
 </div>
 <div className="mt-2 text-2xl font-semibold">
-{viewMode === "SCAN" ? "·" : axisCore}
+{viewMode === "SCAN" || guideText === "LOCK" ? "·" : axisCore}
 </div>
 </div>
 
@@ -1546,7 +1637,7 @@ Confidence
 Alignment
 </div>
 <div className="mt-2 text-2xl font-semibold">
-{viewMode === "SCAN" ? "·" : alignmentScore}
+{viewMode === "SCAN" || guideText === "LOCK" ? "·" : alignmentScore}
 </div>
 </div>
 
@@ -1555,7 +1646,7 @@ Alignment
 Stability
 </div>
 <div className="mt-2 text-2xl font-semibold">
-{viewMode === "SCAN" ? "·" : stabilityScore}
+{viewMode === "SCAN" || guideText === "LOCK" ? "·" : stabilityScore}
 </div>
 </div>
 </div>
@@ -1565,7 +1656,7 @@ Stability
 Motion
 </div>
 <div className="mt-2 text-2xl font-semibold">
-{viewMode === "SCAN" ? "·" : motionScore}
+{viewMode === "SCAN" || guideText === "LOCK" ? "·" : motionScore}
 </div>
 </div>
 </div>
@@ -1608,7 +1699,7 @@ SAVE
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-LOCK the instrument and begin testing Axis Core v1.
+Test HOLD first. Then test RELEASE.
 </div>
 )}
 </div>
@@ -1634,7 +1725,7 @@ SAVE VIDEO
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record the instrument feed for v1 review.
+Record the instrument feed for HOLD/RELEASE review.
 </div>
 )}
 </div>
