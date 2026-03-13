@@ -76,9 +76,9 @@ const CALIBRATION_MS = 1600;
 const AUTO_CAPTURE_COOLDOWN_MS = 1200;
 const TRUE_FLASH_MS = 550;
 
-const SHIFT_THRESHOLD = 45;
-const DROP_THRESHOLD = 70;
-const LOCK_THRESHOLD = 84;
+const SHIFT_THRESHOLD = 42;
+const DROP_THRESHOLD = 62;
+const LOCK_THRESHOLD = 78;
 
 const READ_CONFIDENCE_MIN = 45;
 
@@ -88,19 +88,20 @@ const AXIS_LOW_CONFIDENCE_SMOOTH = 0.06;
 
 /**
 * HOLD / RELEASE TUNING
+* Looser HOLD entry, still earned RELEASE.
 */
-const HOLD_READY_MIN = 72;
-const HOLD_QUIET_MOTION_MIN = 74;
-const HOLD_STABILITY_MIN = 44;
-const HOLD_ALIGNMENT_MIN = 58;
-const HOLD_MIN_MS = 180;
-const HOLD_DROP_GRACE_MS = 120;
+const HOLD_READY_MIN = 58;
+const HOLD_QUIET_MOTION_MIN = 58;
+const HOLD_STABILITY_MIN = 26;
+const HOLD_ALIGNMENT_MIN = 52;
+const HOLD_MIN_MS = 140;
+const HOLD_DROP_GRACE_MS = 180;
 
-const RELEASE_CENTER_VELOCITY_MIN = 0.008;
-const RELEASE_TORSO_HEIGHT_DELTA_MIN = 0.016;
-const RELEASE_ANGLE_DELTA_MIN = 3.0;
-const RELEASE_MIN_FROM_HOLD_MS = 70;
-const RELEASE_REFRACTORY_MS = 650;
+const RELEASE_CENTER_VELOCITY_MIN = 0.007;
+const RELEASE_TORSO_HEIGHT_DELTA_MIN = 0.014;
+const RELEASE_ANGLE_DELTA_MIN = 2.6;
+const RELEASE_MIN_FROM_HOLD_MS = 90;
+const RELEASE_REFRACTORY_MS = 700;
 
 const STATE_GLOW: Record<AxisState, string> = {
 LOST: "rgba(140,160,180,0.08)",
@@ -1039,7 +1040,7 @@ const shoulderWidthNorm = shoulderWidth / Math.max(video.videoWidth, 1);
 const hipWidthNorm = hipWidth / Math.max(video.videoWidth, 1);
 
 let baseRatio: number | null = null;
-let centerOffset = Math.abs(torsoMidXNorm - 0.5) / 0.18;
+let centerOffset = Math.abs(torsoMidXNorm - 0.5) / 0.24;
 
 if (anklePairOk) {
 const stanceWidth = Math.max(distance(la!, ra!), 1);
@@ -1114,16 +1115,16 @@ baseRatio !== null && baseline.baseRatio !== null
 
 const alignment =
 100 -
-clamp(shoulderAngleDelta / 10, 0, 1) * 42 -
-clamp(hipAngleDelta / 10, 0, 1) * 34 -
-clamp(torsoXDelta / 0.08, 0, 1) * 24;
+clamp(shoulderAngleDelta / 14, 0, 1) * 34 -
+clamp(hipAngleDelta / 14, 0, 1) * 26 -
+clamp(torsoXDelta / 0.12, 0, 1) * 18;
 
 const stability =
 100 -
-clamp(centerOffset / 0.35, 0, 1) * 68 -
+clamp(centerOffset / 0.48, 0, 1) * 52 -
 (baseRatio !== null && baseRatioDelta !== null
-? clamp(baseRatioDelta / 0.35, 0, 1) * 32
-: 15);
+? clamp(baseRatioDelta / 0.45, 0, 1) * 18
+: 8);
 
 const centerVelocity =
 lastCenterNormRef.current === null
@@ -1134,20 +1135,20 @@ lastCenterNormRef.current = torsoMidXNorm;
 
 const motion =
 100 -
-clamp(torsoHeightDelta / 0.07, 0, 1) * 28 -
-clamp(shoulderWidthDelta / 0.07, 0, 1) * 18 -
-clamp(hipWidthDelta / 0.07, 0, 1) * 16 -
-clamp(centerVelocity / 0.02, 0, 1) * 38;
+clamp(torsoHeightDelta / 0.11, 0, 1) * 18 -
+clamp(shoulderWidthDelta / 0.1, 0, 1) * 10 -
+clamp(hipWidthDelta / 0.1, 0, 1) * 10 -
+clamp(centerVelocity / 0.03, 0, 1) * 28;
 
 const axisCore =
-0.4 * clamp(alignment, 0, 100) +
-0.35 * clamp(stability, 0, 100) +
-0.25 * clamp(motion, 0, 100);
+0.38 * clamp(alignment, 0, 100) +
+0.34 * clamp(stability, 0, 100) +
+0.28 * clamp(motion, 0, 100);
 
 smoothedReadyRef.current =
 smoothedReadyRef.current === 0
 ? axisCore
-: smoothedReadyRef.current * 0.82 + axisCore * 0.18;
+: smoothedReadyRef.current * 0.78 + axisCore * 0.22;
 
 const axisReady = clamp(smoothedReadyRef.current, 0, 100);
 
@@ -1157,9 +1158,6 @@ else if (axisReady >= DROP_THRESHOLD) state = "DROP";
 else if (axisReady >= SHIFT_THRESHOLD) state = "SHIFT";
 else state = "OFF AXIS";
 
-/**
-* HOLD TUNING
-*/
 const holdCandidate =
 axisReady >= HOLD_READY_MIN &&
 motion >= HOLD_QUIET_MOTION_MIN &&
@@ -1189,9 +1187,6 @@ const holdConfirmed = holdDuration >= HOLD_MIN_MS;
 
 let phase: TracePhase = holdConfirmed ? "HOLD" : "LOAD";
 
-/**
-* RELEASE TUNING
-*/
 const releaseSignalCount =
 (centerVelocity > RELEASE_CENTER_VELOCITY_MIN ? 1 : 0) +
 (torsoHeightDelta > RELEASE_TORSO_HEIGHT_DELTA_MIN ? 1 : 0) +
@@ -1209,7 +1204,7 @@ const trueFlashActive = now < trueFlashUntilRef.current;
 if (
 releaseWindowOpen &&
 releaseSignal &&
-axisReady >= LOCK_THRESHOLD &&
+axisReady >= DROP_THRESHOLD &&
 releaseRefractoryClear
 ) {
 isTrue = true;
@@ -1506,7 +1501,7 @@ Axis Core v1
 HOLD and RELEASE tuning
 </div>
 <div className="mt-1 text-sm text-white/55">
-HOLD must be earned. RELEASE must come after HOLD.
+Reachable HOLD. Earned RELEASE. Better standing read.
 </div>
 </div>
 
@@ -1699,7 +1694,7 @@ SAVE
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Test HOLD first. Then test RELEASE.
+Test quiet standing first. Then test one clean release.
 </div>
 )}
 </div>
