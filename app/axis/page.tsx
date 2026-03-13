@@ -16,6 +16,7 @@ type AxisState =
 type TracePhase = "LOAD" | "HOLD" | "RELEASE";
 
 type FacingMode = "user" | "environment";
+type ViewMode = "SCAN" | "READ" | "TRUE";
 
 type Point = {
 x: number;
@@ -70,19 +71,28 @@ isTrue: boolean;
 
 const MIN_POINT_SCORE = 0.22;
 const MIN_PAIR_SCORE = 0.22;
+
 const CALIBRATION_MS = 1600;
 const AUTO_CAPTURE_COOLDOWN_MS = 1200;
-const TRUE_HOLD_THRESHOLD = 84;
-const READY_THRESHOLD = 70;
-const PARTIAL_THRESHOLD = 45;
+const TRUE_FLASH_MS = 550;
 const HOLD_MIN_MS = 90;
 
+const SHIFT_THRESHOLD = 45;
+const DROP_THRESHOLD = 70;
+const LOCK_THRESHOLD = 84;
+
+const SUBJECT_CONFIDENCE_MIN = 45;
+
+const AXIS_ANGLE_SMOOTH = 0.12;
+const AXIS_CENTER_SMOOTH = 0.16;
+const AXIS_LOW_CONFIDENCE_SMOOTH = 0.06;
+
 const STATE_GLOW: Record<AxisState, string> = {
-LOST: "rgba(180,180,180,0.12)",
-"FIND SUBJECT": "rgba(130,190,255,0.14)",
-"OFF AXIS": "rgba(255,110,110,0.14)",
-SHIFT: "rgba(255,210,100,0.14)",
-DROP: "rgba(255,170,90,0.14)",
+LOST: "rgba(140,160,180,0.08)",
+"FIND SUBJECT": "rgba(110,170,255,0.12)",
+"OFF AXIS": "rgba(255,120,120,0.12)",
+SHIFT: "rgba(255,210,100,0.12)",
+DROP: "rgba(255,165,90,0.12)",
 LOCK: "rgba(100,255,170,0.16)",
 };
 
@@ -116,6 +126,17 @@ const lineAngle = normalized > 90 ? normalized - 180 : normalized;
 return Math.abs(lineAngle);
 }
 
+function angleDeltaRad(a: number, b: number) {
+let d = a - b;
+while (d > Math.PI) d -= Math.PI * 2;
+while (d < -Math.PI) d += Math.PI * 2;
+return d;
+}
+
+function lerpAngle(a: number, b: number, t: number) {
+return a + angleDeltaRad(b, a) * t;
+}
+
 function hasPoint(p?: Point) {
 return !!p && p.score >= MIN_POINT_SCORE;
 }
@@ -147,16 +168,11 @@ baseRatio: averageNullable(samples.map((s) => s.baseRatio)),
 };
 }
 
-function createFileName(
-kind: string,
-score: number,
-timestamp: number,
-ext: string,
-) {
+function createFileName(kind: string, score: number, timestamp: number, ext: string) {
 const d = new Date(timestamp);
 const pad = (n: number) => String(n).padStart(2, "0");
 const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
-return `AXIS_BETA_${kind}_${Math.round(score)}_${stamp}.${ext}`;
+return `AXIS_CORE_V1_${kind}_${Math.round(score)}_${stamp}.${ext}`;
 }
 
 function dataUrlToBlob(dataUrl: string): Blob {
@@ -203,7 +219,13 @@ if (!ok) throw new Error("TensorFlow WebGL backend could not be initialized.");
 await tf.ready();
 }
 
-export default function AxisBetaPage() {
+function getViewMode(metrics: FrameMetrics): ViewMode {
+if (metrics.isTrue) return "TRUE";
+if (metrics.state === "LOST" || metrics.state === "FIND SUBJECT") return "SCAN";
+return "READ";
+}
+
+export default function AxisCoreV1Page() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -218,11 +240,16 @@ const recordedChunksRef = useRef<Blob[]>([]);
 const baselineRef = useRef<Baseline | null>(null);
 const calibrationStartedAtRef = useRef<number | null>(null);
 const calibrationSamplesRef = useRef<BaselineSample[]>([]);
+
 const holdStartedAtRef = useRef<number | null>(null);
 const lastAutoCaptureAtRef = useRef<number>(0);
 const bestReadyRef = useRef<number>(0);
 const lastCenterNormRef = useRef<number | null>(null);
 const smoothedReadyRef = useRef<number>(0);
+const trueFlashUntilRef = useRef<number>(0);
+
+const smoothedAxisAngleRef = useRef<number | null>(null);
+const smoothedCenterRef = useRef<{ x: number; y: number } | null>(null);
 
 const [enabled, setEnabled] = useState(false);
 const [ready, setReady] = useState(false);
@@ -261,6 +288,9 @@ lastAutoCaptureAtRef.current = 0;
 bestReadyRef.current = 0;
 lastCenterNormRef.current = null;
 smoothedReadyRef.current = 0;
+trueFlashUntilRef.current = 0;
+smoothedAxisAngleRef.current = null;
+smoothedCenterRef.current = null;
 
 setAxisReady(0);
 setAxisCore(0);
@@ -291,6 +321,7 @@ const syncCanvasSize = useCallback(() => {
 const { width, height } = getCanvasSize();
 const overlay = overlayCanvasRef.current;
 const exportCanvas = exportCanvasRef.current;
+
 if (overlay) {
 overlay.width = width;
 overlay.height = height;
@@ -315,9 +346,10 @@ ctx.drawImage(video, dx, dy, dw, dh);
 [],
 );
 
-const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
+const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number, mode: ViewMode) => {
 ctx.save();
-ctx.strokeStyle = "rgba(255,255,255,0.05)";
+ctx.strokeStyle =
+mode === "SCAN" ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.055)";
 ctx.lineWidth = 1;
 
 for (let i = 1; i < 6; i += 1) {
@@ -340,7 +372,7 @@ ctx.restore();
 }, []);
 
 const drawAmbientGlow = useCallback(
-(ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState) => {
+(ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState, mode: ViewMode) => {
 ctx.save();
 
 const radial = ctx.createRadialGradient(
@@ -349,7 +381,7 @@ height / 2,
 width * 0.12,
 width / 2,
 height / 2,
-Math.max(width, height) * 0.75,
+Math.max(width, height) * 0.78,
 );
 
 radial.addColorStop(0, "rgba(255,255,255,0)");
@@ -358,12 +390,21 @@ radial.addColorStop(1, STATE_GLOW[state]);
 
 ctx.fillStyle = radial;
 ctx.fillRect(0, 0, width, height);
+
+if (mode === "SCAN") {
+const top = ctx.createLinearGradient(0, 0, 0, height * 0.22);
+top.addColorStop(0, "rgba(110,170,255,0.10)");
+top.addColorStop(1, "rgba(110,170,255,0)");
+ctx.fillStyle = top;
+ctx.fillRect(0, 0, width, height * 0.22);
+}
+
 ctx.restore();
 },
 [],
 );
 
-const drawAxisLine = useCallback(
+const drawAxisBeam = useCallback(
 (
 ctx: CanvasRenderingContext2D,
 width: number,
@@ -371,35 +412,98 @@ height: number,
 state: AxisState,
 angleRad: number | null,
 center: { x: number; y: number } | null,
+mode: ViewMode,
 ) => {
 ctx.save();
 
-let color = "rgba(255,255,255,0.38)";
-if (state === "LOCK") color = "rgba(100,255,170,0.96)";
-if (state === "SHIFT") color = "rgba(255,210,100,0.92)";
-if (state === "DROP") color = "rgba(255,170,90,0.95)";
-if (state === "OFF AXIS") color = "rgba(255,110,110,0.95)";
-if (state === "FIND SUBJECT") color = "rgba(130,190,255,0.9)";
-if (state === "LOST") color = "rgba(180,180,180,0.45)";
+let color = "rgba(255,255,255,0.34)";
+let coreColor = "rgba(255,255,255,0.56)";
+let glow = "rgba(255,255,255,0.08)";
+let beamWidth = 6;
+let lineWidth = 2.2;
+
+if (mode === "SCAN") {
+color = "rgba(175,195,220,0.28)";
+coreColor = "rgba(200,215,235,0.46)";
+glow = "rgba(150,180,220,0.08)";
+beamWidth = 5;
+lineWidth = 1.6;
+} else {
+if (state === "LOCK") {
+color = "rgba(100,255,170,0.26)";
+coreColor = "rgba(100,255,170,0.96)";
+glow = "rgba(100,255,170,0.12)";
+}
+if (state === "SHIFT") {
+color = "rgba(255,210,100,0.22)";
+coreColor = "rgba(255,210,100,0.92)";
+glow = "rgba(255,210,100,0.10)";
+}
+if (state === "DROP") {
+color = "rgba(255,165,90,0.24)";
+coreColor = "rgba(255,165,90,0.95)";
+glow = "rgba(255,165,90,0.10)";
+}
+if (state === "OFF AXIS") {
+color = "rgba(255,120,120,0.22)";
+coreColor = "rgba(255,120,120,0.94)";
+glow = "rgba(255,120,120,0.10)";
+}
+}
 
 const cx = center?.x ?? width / 2;
 const cy = center?.y ?? height / 2;
 const theta = angleRad ?? Math.PI / 2;
-const length = Math.max(width, height) * 0.45;
+const length = Math.max(width, height) * 0.52;
 const dx = Math.cos(theta) * length;
 const dy = Math.sin(theta) * length;
 
-ctx.strokeStyle = color;
-ctx.lineWidth = 2.5;
+const tickNx = -Math.sin(theta);
+const tickNy = Math.cos(theta);
+
+ctx.strokeStyle = glow;
+ctx.lineWidth = beamWidth;
 ctx.beginPath();
 ctx.moveTo(cx - dx, cy - dy);
 ctx.lineTo(cx + dx, cy + dy);
 ctx.stroke();
 
-ctx.fillStyle = color;
+ctx.strokeStyle = color;
+ctx.lineWidth = beamWidth * 0.55;
 ctx.beginPath();
-ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+ctx.moveTo(cx - dx, cy - dy);
+ctx.lineTo(cx + dx, cy + dy);
+ctx.stroke();
+
+ctx.strokeStyle = coreColor;
+ctx.lineWidth = lineWidth;
+ctx.beginPath();
+ctx.moveTo(cx - dx, cy - dy);
+ctx.lineTo(cx + dx, cy + dy);
+ctx.stroke();
+
+const tickCount = 10;
+for (let i = -tickCount; i <= tickCount; i += 1) {
+if (i === 0) continue;
+const t = i / tickCount;
+const px = cx + dx * t;
+const py = cy + dy * t;
+const tickLen = i % 2 === 0 ? 10 : 6;
+
+ctx.strokeStyle = "rgba(255,255,255,0.20)";
+ctx.lineWidth = 1;
+ctx.beginPath();
+ctx.moveTo(px - tickNx * tickLen, py - tickNy * tickLen);
+ctx.lineTo(px + tickNx * tickLen, py + tickNy * tickLen);
+ctx.stroke();
+}
+
+if (mode !== "SCAN") {
+ctx.fillStyle = coreColor;
+ctx.beginPath();
+ctx.arc(cx, cy, 4.5, 0, Math.PI * 2);
 ctx.fill();
+}
 
 ctx.restore();
 },
@@ -414,8 +518,9 @@ phase: TracePhase,
 readyScore: number,
 width: number,
 height: number,
+mode: ViewMode,
 ) => {
-if (!center) return;
+if (!center || mode === "SCAN") return;
 
 const cx = center.x;
 const cy = center.y;
@@ -438,10 +543,10 @@ phase === "LOAD"
 ctx.save();
 ctx.strokeStyle =
 phase === "HOLD"
-? "rgba(120,255,180,0.75)"
+? "rgba(120,255,180,0.78)"
 : phase === "RELEASE"
-? "rgba(255,255,255,0.75)"
-: "rgba(255,210,120,0.68)";
+? "rgba(255,255,255,0.82)"
+: "rgba(255,210,120,0.72)";
 ctx.lineWidth = 1.5;
 
 const top = { x: cx, y: cy - spreadY };
@@ -467,77 +572,87 @@ ctx.restore();
 [],
 );
 
-const drawTrace = useCallback(
+const drawTraceBand = useCallback(
 (
 ctx: CanvasRenderingContext2D,
 width: number,
 height: number,
 phase: TracePhase,
 isTrue: boolean,
+mode: ViewMode,
 ) => {
-const y = height - 110;
-const x0 = 44;
-const x1 = width - 44;
+const bandX = 28;
+const bandW = width - 56;
+const bandY = height - 118;
+const bandH = 58;
+
+const x0 = bandX + 16;
+const x1 = bandX + bandW - 16;
 const loadX = x0;
 const holdX = lerp(x0, x1, 0.42);
 const trueX = lerp(x0, x1, 0.67);
 const releaseX = x1;
+const lineY = bandY + 31;
 
 ctx.save();
 
+ctx.fillStyle =
+mode === "SCAN" ? "rgba(0,0,0,0.34)" : "rgba(0,0,0,0.42)";
+ctx.fillRect(bandX, bandY, bandW, bandH);
+
 ctx.font =
-'600 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-ctx.fillStyle = "rgba(255,255,255,0.5)";
-ctx.fillText("AXIS TRACE", x0, y - 18);
+'600 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.fillStyle = "rgba(255,255,255,0.48)";
+ctx.fillText("AXIS TRACE", x0, bandY + 14);
 
 ctx.strokeStyle = "rgba(255,255,255,0.18)";
 ctx.lineWidth = 2;
 ctx.beginPath();
-ctx.moveTo(x0, y);
-ctx.lineTo(x1, y);
+ctx.moveTo(x0, lineY);
+ctx.lineTo(x1, lineY);
 ctx.stroke();
 
 const activeColor =
 phase === "HOLD"
-? "rgba(100,255,170,0.95)"
+? "rgba(100,255,170,0.98)"
 : phase === "RELEASE"
-? "rgba(255,255,255,0.95)"
-: "rgba(255,210,100,0.95)";
+? "rgba(255,255,255,0.98)"
+: "rgba(255,210,100,0.98)";
 
 ctx.strokeStyle = activeColor;
 ctx.lineWidth = 3;
 if (phase === "LOAD") {
 ctx.beginPath();
-ctx.moveTo(loadX, y);
-ctx.lineTo(holdX - 14, y);
+ctx.moveTo(loadX, lineY);
+ctx.lineTo(holdX - 14, lineY);
 ctx.stroke();
 } else if (phase === "HOLD") {
 ctx.beginPath();
-ctx.moveTo(loadX, y);
-ctx.lineTo(trueX - 16, y);
+ctx.moveTo(loadX, lineY);
+ctx.lineTo(trueX - 16, lineY);
 ctx.stroke();
 } else {
 ctx.beginPath();
-ctx.moveTo(loadX, y);
-ctx.lineTo(releaseX, y);
+ctx.moveTo(loadX, lineY);
+ctx.lineTo(releaseX, lineY);
 ctx.stroke();
 }
 
-ctx.fillStyle = "rgba(255,255,255,0.7)";
-ctx.fillText("LOAD", loadX, y + 22);
-ctx.fillText("HOLD", holdX - 14, y + 22);
-ctx.fillText("RELEASE", releaseX - 56, y + 22);
+ctx.fillStyle = "rgba(255,255,255,0.68)";
+ctx.fillText("LOAD", loadX, bandY + 49);
+ctx.fillText("HOLD", holdX - 14, bandY + 49);
+ctx.fillText("RELEASE", releaseX - 48, bandY + 49);
 
 if (isTrue) {
 ctx.font =
-'700 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
-ctx.fillStyle = "rgba(100,255,170,0.98)";
-ctx.fillText("◎", trueX - 6, y + 6);
+'700 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle = "rgba(100,255,170,1)";
+ctx.fillText("◎", trueX - 7, lineY + 7);
 } else {
 ctx.font =
-'700 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
-ctx.fillStyle = "rgba(255,255,255,0.25)";
-ctx.fillText("·", trueX - 2, y + 6);
+'700 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle = mode === "SCAN" ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.22)";
+ctx.fillText("·", trueX - 2, lineY + 7);
 }
 
 ctx.restore();
@@ -553,11 +668,23 @@ height: number,
 metrics: FrameMetrics,
 guide: string,
 progress: number,
+mode: ViewMode,
 ) => {
 ctx.save();
 
 ctx.fillStyle = "rgba(0,0,0,0.34)";
-ctx.fillRect(24, 24, width - 48, 108);
+ctx.fillRect(24, 24, width - 48, 100);
+
+const scoreColor =
+mode === "SCAN"
+? "rgba(235,240,250,0.78)"
+: metrics.axisReady >= LOCK_THRESHOLD
+? "rgba(100,255,170,1)"
+: metrics.axisReady >= DROP_THRESHOLD
+? "rgba(150,255,190,1)"
+: metrics.axisReady >= SHIFT_THRESHOLD
+? "rgba(255,210,100,1)"
+: "rgba(255,140,140,1)";
 
 ctx.font =
 '600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
@@ -566,47 +693,40 @@ ctx.fillText("AXIS READY", 40, 52);
 
 ctx.font =
 '700 38px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
-ctx.fillStyle =
-metrics.axisReady >= TRUE_HOLD_THRESHOLD
-? "rgba(100,255,170,1)"
-: metrics.axisReady >= READY_THRESHOLD
-? "rgba(150,255,190,1)"
-: metrics.axisReady >= PARTIAL_THRESHOLD
-? "rgba(255,210,100,1)"
-: "rgba(255,110,110,1)";
-ctx.fillText(String(Math.round(metrics.axisReady)).padStart(2, "0"), 40, 98);
+ctx.fillStyle = scoreColor;
+const scoreText = mode === "SCAN" ? "··" : String(Math.round(metrics.axisReady)).padStart(2, "0");
+ctx.fillText(scoreText, 40, 96);
 
 ctx.font =
 '600 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(255,255,255,0.86)";
-ctx.fillText(metrics.state, 108, 96);
+ctx.fillText(metrics.state, 108, 94);
 
 ctx.font =
 '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-ctx.fillStyle = "rgba(255,255,255,0.65)";
-ctx.fillText(`CORE ${Math.round(metrics.axisCore)}`, width - 180, 52);
-ctx.fillText(`CONF ${Math.round(metrics.confidence)}`, width - 180, 74);
-ctx.fillText(`PHASE ${metrics.phase}`, width - 180, 96);
+ctx.fillStyle = "rgba(255,255,255,0.64)";
+ctx.fillText(`CORE ${Math.round(metrics.axisCore)}`, width - 160, 54);
+ctx.fillText(`CONF ${Math.round(metrics.confidence)}`, width - 160, 76);
 
 if (progress > 0 && progress < 100) {
 ctx.fillStyle = "rgba(255,255,255,0.08)";
-ctx.fillRect(24, 138, width - 48, 10);
-ctx.fillStyle = "rgba(130,190,255,0.92)";
-ctx.fillRect(24, 138, (width - 48) * (progress / 100), 10);
+ctx.fillRect(24, 132, width - 48, 9);
+ctx.fillStyle = "rgba(130,190,255,0.96)";
+ctx.fillRect(24, 132, (width - 48) * (progress / 100), 9);
 }
 
-ctx.fillStyle = "rgba(0,0,0,0.3)";
-ctx.fillRect(24, height - 68, width - 48, 36);
+ctx.fillStyle = "rgba(0,0,0,0.28)";
+ctx.fillRect(24, height - 50, width - 48, 28);
 ctx.font =
 '500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-ctx.fillStyle = "rgba(255,255,255,0.65)";
-ctx.fillText(guide, 40, height - 45);
+ctx.fillStyle = mode === "SCAN" ? "rgba(205,220,235,0.62)" : "rgba(255,255,255,0.64)";
+ctx.fillText(guide, 40, height - 31);
 
 if (metrics.isTrue) {
 ctx.font =
 '700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(100,255,170,0.98)";
-ctx.fillText("TRUE ◎", width / 2 - 64, height / 2 - 10);
+ctx.fillText("TRUE ◎", width / 2 - 64, height / 2 - 8);
 }
 
 ctx.restore();
@@ -633,16 +753,17 @@ const exportCtx = exportCanvas.getContext("2d");
 if (!overlayCtx || !exportCtx) return;
 
 const { width, height } = overlay;
+const mode = getViewMode(metrics);
 
 [overlayCtx, exportCtx].forEach((ctx) => {
 ctx.clearRect(0, 0, width, height);
 drawVideoCover(ctx, video, width, height);
-drawAmbientGlow(ctx, width, height, metrics.state);
-drawGrid(ctx, width, height);
-drawAxisLine(ctx, width, height, metrics.state, axisAngleRad, center);
-drawAxisShape(ctx, center, metrics.phase, metrics.axisReady, width, height);
+drawAmbientGlow(ctx, width, height, metrics.state, mode);
+drawGrid(ctx, width, height, mode);
+drawAxisBeam(ctx, width, height, metrics.state, axisAngleRad, center, mode);
+drawAxisShape(ctx, center, metrics.phase, metrics.axisReady, width, height, mode);
 
-if (keypoints) {
+if (keypoints && mode !== "SCAN") {
 const ls = keypoints.left_shoulder;
 const rs = keypoints.right_shoulder;
 const lh = keypoints.left_hip;
@@ -679,17 +800,17 @@ ctx.stroke();
 ctx.restore();
 }
 
-drawTrace(ctx, width, height, metrics.phase, metrics.isTrue);
-drawHud(ctx, width, height, metrics, guide, calibration);
+drawTraceBand(ctx, width, height, metrics.phase, metrics.isTrue, mode);
+drawHud(ctx, width, height, metrics, guide, calibration, mode);
 });
 },
 [
 drawAmbientGlow,
-drawAxisLine,
+drawAxisBeam,
 drawAxisShape,
 drawGrid,
 drawHud,
-drawTrace,
+drawTraceBand,
 drawVideoCover,
 ],
 );
@@ -789,24 +910,18 @@ let guide = "FIND SUBJECT";
 let center: { x: number; y: number } | null = null;
 let axisAngleRad: number | null = null;
 
-if (!shoulderPairOk && !hipPairOk) {
-setGuideText(guide);
-setAxisState(metrics.state);
-setTracePhase(metrics.phase);
-setIsTrueMoment(false);
-setAxisCore(0);
-setAxisReady(0);
-setAlignmentScore(0);
-setStabilityScore(0);
-setMotionScore(0);
-setConfidenceScore(Math.round(confidence));
-renderInstrument(null, null, null, metrics, guide, calibrationProgress);
-return;
-}
+const subjectDetected =
+shoulderPairOk && hipPairOk && confidence >= SUBJECT_CONFIDENCE_MIN;
 
-if (!shoulderPairOk || !hipPairOk) {
-metrics.state = "FIND SUBJECT";
+if (!subjectDetected) {
+const partialBodySeen = visibleCount > 0;
+metrics.state = partialBodySeen ? "FIND SUBJECT" : "LOST";
 guide = "FIND SUBJECT";
+
+smoothedAxisAngleRef.current = null;
+smoothedCenterRef.current = null;
+holdStartedAtRef.current = null;
+
 setGuideText(guide);
 setAxisState(metrics.state);
 setTracePhase(metrics.phase);
@@ -817,27 +932,50 @@ setAlignmentScore(0);
 setStabilityScore(0);
 setMotionScore(0);
 setConfidenceScore(Math.round(confidence));
-renderInstrument(kpMap, null, null, metrics, guide, calibrationProgress);
+
+renderInstrument(partialBodySeen ? kpMap : null, null, null, metrics, guide, calibrationProgress);
 return;
 }
 
 const shoulderMid = midpoint(ls!, rs!);
 const hipMid = midpoint(lh!, rh!);
-center = {
+const rawCenter = {
 x: (shoulderMid.x + hipMid.x) / 2,
 y: (shoulderMid.y + hipMid.y) / 2,
 };
 
 const dx = hipMid.x - shoulderMid.x;
 const dy = hipMid.y - shoulderMid.y;
-axisAngleRad = Math.atan2(dy, dx);
+const rawAxisAngle = Math.atan2(dy, dx);
+
+const smoothT =
+confidence < 60 ? AXIS_LOW_CONFIDENCE_SMOOTH : AXIS_ANGLE_SMOOTH;
+
+smoothedAxisAngleRef.current =
+smoothedAxisAngleRef.current === null
+? rawAxisAngle
+: lerpAngle(smoothedAxisAngleRef.current, rawAxisAngle, smoothT);
+
+const centerT =
+confidence < 60 ? AXIS_LOW_CONFIDENCE_SMOOTH : AXIS_CENTER_SMOOTH;
+
+smoothedCenterRef.current =
+smoothedCenterRef.current === null
+? rawCenter
+: {
+x: lerp(smoothedCenterRef.current.x, rawCenter.x, centerT),
+y: lerp(smoothedCenterRef.current.y, rawCenter.y, centerT),
+};
+
+center = smoothedCenterRef.current;
+axisAngleRad = smoothedAxisAngleRef.current;
 
 const shoulderAngle = normalizeAngleAbs(angleDeg(ls!, rs!));
 const hipAngle = normalizeAngleAbs(angleDeg(lh!, rh!));
 const shoulderWidth = Math.max(distance(ls!, rs!), 1);
 const hipWidth = Math.max(distance(lh!, rh!), 1);
 const torsoHeight = Math.max(Math.abs(hipMid.y - shoulderMid.y), 1);
-const torsoMidXNorm = center.x / Math.max(video.videoWidth, 1);
+const torsoMidXNorm = rawCenter.x / Math.max(video.videoWidth, 1);
 const torsoHeightNorm = torsoHeight / Math.max(video.videoHeight, 1);
 const shoulderWidthNorm = shoulderWidth / Math.max(video.videoWidth, 1);
 const hipWidthNorm = hipWidth / Math.max(video.videoWidth, 1);
@@ -884,7 +1022,6 @@ if (progress >= 100 && calibrationSamplesRef.current.length >= 12) {
 baselineRef.current = buildBaseline(calibrationSamplesRef.current);
 calibrationStartedAtRef.current = null;
 calibrationSamplesRef.current = [];
-guide = "LOCK";
 }
 
 setGuideText(guide);
@@ -955,19 +1092,14 @@ smoothedReadyRef.current === 0
 const axisReady = clamp(smoothedReadyRef.current, 0, 100);
 
 let state: AxisState = "OFF AXIS";
-if (axisReady >= TRUE_HOLD_THRESHOLD) state = "LOCK";
-else if (axisReady >= READY_THRESHOLD) state = "DROP";
-else if (axisReady >= PARTIAL_THRESHOLD) state = "SHIFT";
+if (axisReady >= LOCK_THRESHOLD) state = "LOCK";
+else if (axisReady >= DROP_THRESHOLD) state = "DROP";
+else if (axisReady >= SHIFT_THRESHOLD) state = "SHIFT";
 else state = "OFF AXIS";
 
 let phase: TracePhase = "LOAD";
-if (axisReady >= READY_THRESHOLD) phase = "HOLD";
-else if (axisReady >= PARTIAL_THRESHOLD) phase = "LOAD";
-else phase = "LOAD";
 
-let isTrue = false;
-
-if (axisReady >= TRUE_HOLD_THRESHOLD) {
+if (axisReady >= DROP_THRESHOLD) {
 if (holdStartedAtRef.current === null) holdStartedAtRef.current = now;
 } else {
 holdStartedAtRef.current = null;
@@ -976,12 +1108,26 @@ holdStartedAtRef.current = null;
 const holdDuration =
 holdStartedAtRef.current === null ? 0 : now - holdStartedAtRef.current;
 
+if (axisReady >= DROP_THRESHOLD && holdDuration >= HOLD_MIN_MS) {
+phase = "HOLD";
+} else {
+phase = "LOAD";
+}
+
+let isTrue = false;
+
 const releaseSignal =
 centerVelocity > 0.006 ||
 torsoHeightDelta > 0.012 ||
 Math.max(shoulderAngleDelta, hipAngleDelta) > 2.2;
 
-if (holdDuration >= HOLD_MIN_MS && releaseSignal) {
+const trueFlashActive = now < trueFlashUntilRef.current;
+
+if (axisReady >= LOCK_THRESHOLD && holdDuration >= HOLD_MIN_MS && releaseSignal) {
+isTrue = true;
+phase = "RELEASE";
+trueFlashUntilRef.current = now + TRUE_FLASH_MS;
+} else if (trueFlashActive) {
 isTrue = true;
 phase = "RELEASE";
 }
@@ -1251,6 +1397,11 @@ await shareOrDownloadBlob(blob, filename);
 }, []);
 
 const topCapture = captures[0];
+const viewMode: ViewMode = isTrueMoment
+? "TRUE"
+: axisState === "LOST" || axisState === "FIND SUBJECT"
+? "SCAN"
+: "READ";
 
 return (
 <main className="min-h-screen bg-black text-white">
@@ -1258,13 +1409,13 @@ return (
 <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur md:flex-row md:items-center">
 <div>
 <div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Axis Beta
+Axis Core v1
 </div>
 <div className="mt-1 text-2xl font-semibold tracking-tight">
-Axis Line • Axis Shape • Axis Core • Axis Ready
+Stable line • true readiness • trace rail • subject gate
 </div>
 <div className="mt-1 text-sm text-white/55">
-Beta freeze build. Human-first instrument with TRUE ◎ review.
+Calibrated beam pass. Freeze this before new features.
 </div>
 </div>
 
@@ -1367,7 +1518,9 @@ Axis Read
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Axis Ready
 </div>
-<div className="mt-2 text-5xl font-semibold">{axisReady}</div>
+<div className="mt-2 text-5xl font-semibold">
+{viewMode === "SCAN" ? "··" : axisReady}
+</div>
 <div className="mt-2 text-sm text-white/55">{guideText}</div>
 </div>
 
@@ -1376,7 +1529,9 @@ Axis Ready
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Axis Core
 </div>
-<div className="mt-2 text-2xl font-semibold">{axisCore}</div>
+<div className="mt-2 text-2xl font-semibold">
+{viewMode === "SCAN" ? "·" : axisCore}
+</div>
 </div>
 
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
@@ -1390,14 +1545,18 @@ Confidence
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Alignment
 </div>
-<div className="mt-2 text-2xl font-semibold">{alignmentScore}</div>
+<div className="mt-2 text-2xl font-semibold">
+{viewMode === "SCAN" ? "·" : alignmentScore}
+</div>
 </div>
 
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Stability
 </div>
-<div className="mt-2 text-2xl font-semibold">{stabilityScore}</div>
+<div className="mt-2 text-2xl font-semibold">
+{viewMode === "SCAN" ? "·" : stabilityScore}
+</div>
 </div>
 </div>
 
@@ -1405,7 +1564,9 @@ Stability
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Motion
 </div>
-<div className="mt-2 text-2xl font-semibold">{motionScore}</div>
+<div className="mt-2 text-2xl font-semibold">
+{viewMode === "SCAN" ? "·" : motionScore}
+</div>
 </div>
 </div>
 
@@ -1447,7 +1608,7 @@ SAVE
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-LOCK the instrument and begin testing Beta.
+LOCK the instrument and begin testing Axis Core v1.
 </div>
 )}
 </div>
@@ -1473,7 +1634,7 @@ SAVE VIDEO
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record the instrument feed for Beta review.
+Record the instrument feed for v1 review.
 </div>
 )}
 </div>
