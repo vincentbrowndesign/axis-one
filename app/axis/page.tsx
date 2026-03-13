@@ -86,9 +86,6 @@ const AXIS_ANGLE_SMOOTH = 0.12;
 const AXIS_CENTER_SMOOTH = 0.16;
 const AXIS_LOW_CONFIDENCE_SMOOTH = 0.06;
 
-/**
-* Phase thresholds
-*/
 const HOLD_READY_MIN = 58;
 const HOLD_QUIET_MOTION_MIN = 58;
 const HOLD_STABILITY_MIN = 26;
@@ -1159,18 +1156,12 @@ smoothedReadyRef.current === 0
 
 const axisReady = clamp(smoothedReadyRef.current, 0, 100);
 
-/**
-* Structural state
-*/
 let state: AxisState = "OFF AXIS";
 if (axisReady >= LOCK_THRESHOLD) state = "LOCK";
 else if (axisReady >= DROP_THRESHOLD) state = "DROP";
 else if (axisReady >= SHIFT_THRESHOLD) state = "SHIFT";
 else state = "OFF AXIS";
 
-/**
-* Event phase
-*/
 const holdCandidate =
 axisReady >= HOLD_READY_MIN &&
 motion >= HOLD_QUIET_MOTION_MIN &&
@@ -1247,9 +1238,7 @@ isTrue,
 };
 
 guide =
-state === "FIND SUBJECT"
-? "FIND SUBJECT"
-: phase === "RELEASE"
+phase === "RELEASE"
 ? "RELEASE"
 : phase === "HOLD"
 ? "HOLD"
