@@ -6,16 +6,14 @@ import "@tensorflow/tfjs-backend-webgl";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 
 type AxisState =
-| "WAIT"
-| "CALIBRATING"
-| "MOVE BACK"
-| "CENTER"
-| "SHOW BASE"
-| "NOT READY"
-| "PARTIAL"
-| "READY"
-| "LOCKED"
-| "LOST";
+| "LOST"
+| "FIND SUBJECT"
+| "OFF AXIS"
+| "SHIFT"
+| "DROP"
+| "LOCK";
+
+type TracePhase = "LOAD" | "HOLD" | "RELEASE";
 
 type FacingMode = "user" | "environment";
 
@@ -27,10 +25,12 @@ score: number;
 
 type CaptureItem = {
 id: string;
-state: AxisState;
-score: number;
 timestamp: number;
-label: string;
+axisReady: number;
+axisCore: number;
+state: AxisState;
+phase: TracePhase;
+isTrue: boolean;
 dataUrl: string;
 };
 
@@ -54,25 +54,37 @@ hipWidthNorm: number;
 baseRatio: number | null;
 };
 
-const STATE_GLOW: Record<AxisState, string> = {
-WAIT: "rgba(255,255,255,0.08)",
-CALIBRATING: "rgba(120,180,255,0.14)",
-"MOVE BACK": "rgba(120,180,255,0.14)",
-CENTER: "rgba(120,180,255,0.14)",
-"SHOW BASE": "rgba(120,180,255,0.14)",
-"NOT READY": "rgba(255,90,90,0.16)",
-PARTIAL: "rgba(255,190,80,0.14)",
-READY: "rgba(115,255,170,0.14)",
-LOCKED: "rgba(80,255,150,0.18)",
-LOST: "rgba(160,160,160,0.12)",
+type FrameMetrics = {
+axisCore: number;
+axisReady: number;
+alignment: number;
+stability: number;
+motion: number;
+confidence: number;
+baseRatio: number;
+centerOffset: number;
+state: AxisState;
+phase: TracePhase;
+isTrue: boolean;
 };
 
-const MIN_PAIR_SCORE = 0.2;
-const MIN_POINT_SCORE = 0.2;
-const STATE_HOLD_MS = 300;
+const MIN_POINT_SCORE = 0.22;
+const MIN_PAIR_SCORE = 0.22;
+const CALIBRATION_MS = 1600;
 const AUTO_CAPTURE_COOLDOWN_MS = 1200;
-const BEST_CAPTURE_COOLDOWN_MS = 1500;
-const CALIBRATION_MS = 1800;
+const TRUE_HOLD_THRESHOLD = 84;
+const READY_THRESHOLD = 70;
+const PARTIAL_THRESHOLD = 45;
+const HOLD_MIN_MS = 90;
+
+const STATE_GLOW: Record<AxisState, string> = {
+LOST: "rgba(180,180,180,0.12)",
+"FIND SUBJECT": "rgba(130,190,255,0.14)",
+"OFF AXIS": "rgba(255,110,110,0.14)",
+SHIFT: "rgba(255,210,100,0.14)",
+DROP: "rgba(255,170,90,0.14)",
+LOCK: "rgba(100,255,170,0.16)",
+};
 
 function clamp(value: number, min: number, max: number) {
 return Math.min(max, Math.max(min, value));
@@ -104,16 +116,47 @@ const lineAngle = normalized > 90 ? normalized - 180 : normalized;
 return Math.abs(lineAngle);
 }
 
+function hasPoint(p?: Point) {
+return !!p && p.score >= MIN_POINT_SCORE;
+}
+
+function hasPair(a?: Point, b?: Point) {
+return !!a && !!b && a.score >= MIN_PAIR_SCORE && b.score >= MIN_PAIR_SCORE;
+}
+
+function average(values: number[]) {
+if (!values.length) return 0;
+return values.reduce((sum, v) => sum + v, 0) / values.length;
+}
+
+function averageNullable(values: Array<number | null>) {
+const valid = values.filter((v): v is number => v !== null);
+if (!valid.length) return null;
+return average(valid);
+}
+
+function buildBaseline(samples: BaselineSample[]): Baseline {
+return {
+shoulderAngle: average(samples.map((s) => s.shoulderAngle)),
+hipAngle: average(samples.map((s) => s.hipAngle)),
+torsoMidXNorm: average(samples.map((s) => s.torsoMidXNorm)),
+torsoHeightNorm: average(samples.map((s) => s.torsoHeightNorm)),
+shoulderWidthNorm: average(samples.map((s) => s.shoulderWidthNorm)),
+hipWidthNorm: average(samples.map((s) => s.hipWidthNorm)),
+baseRatio: averageNullable(samples.map((s) => s.baseRatio)),
+};
+}
+
 function createFileName(
 kind: string,
-state: AxisState,
+score: number,
 timestamp: number,
 ext: string,
 ) {
 const d = new Date(timestamp);
 const pad = (n: number) => String(n).padStart(2, "0");
 const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
-return `AXIS_READY_${kind}_${state.replace(/\s+/g, "_")}_${stamp}.${ext}`;
+return `AXIS_BETA_${kind}_${Math.round(score)}_${stamp}.${ext}`;
 }
 
 function dataUrlToBlob(dataUrl: string): Blob {
@@ -122,11 +165,7 @@ const mime = parts[0].match(/:(.*?);/)?.[1] || "image/jpeg";
 const binary = atob(parts[1]);
 const len = binary.length;
 const bytes = new Uint8Array(len);
-
-for (let i = 0; i < len; i += 1) {
-bytes[i] = binary.charCodeAt(i);
-}
-
+for (let i = 0; i < len; i += 1) bytes[i] = binary.charCodeAt(i);
 return new Blob([bytes], { type: mime });
 }
 
@@ -164,38 +203,7 @@ if (!ok) throw new Error("TensorFlow WebGL backend could not be initialized.");
 await tf.ready();
 }
 
-function hasPoint(p?: Point) {
-return !!p && p.score >= MIN_POINT_SCORE;
-}
-
-function hasPair(a?: Point, b?: Point) {
-return !!a && !!b && a.score >= MIN_PAIR_SCORE && b.score >= MIN_PAIR_SCORE;
-}
-
-function average(values: number[]) {
-if (!values.length) return 0;
-return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function averageNullable(values: Array<number | null>) {
-const valid = values.filter((v): v is number => v !== null);
-if (!valid.length) return null;
-return average(valid);
-}
-
-function buildBaseline(samples: BaselineSample[]): Baseline {
-return {
-shoulderAngle: average(samples.map((s) => s.shoulderAngle)),
-hipAngle: average(samples.map((s) => s.hipAngle)),
-torsoMidXNorm: average(samples.map((s) => s.torsoMidXNorm)),
-torsoHeightNorm: average(samples.map((s) => s.torsoHeightNorm)),
-shoulderWidthNorm: average(samples.map((s) => s.shoulderWidthNorm)),
-hipWidthNorm: average(samples.map((s) => s.hipWidthNorm)),
-baseRatio: averageNullable(samples.map((s) => s.baseRatio)),
-};
-}
-
-export default function AxisReadyPage() {
+export default function AxisBetaPage() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
 const exportCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -207,71 +215,66 @@ const rafRef = useRef<number | null>(null);
 const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 const recordedChunksRef = useRef<Blob[]>([]);
 
-const smoothedReadyRef = useRef<number>(0);
-const currentStateRef = useRef<AxisState>("WAIT");
-const candidateStateRef = useRef<AxisState>("WAIT");
-const lastStateChangeAtRef = useRef<number>(0);
-const candidateSinceRef = useRef<number>(0);
-const lastAutoCaptureAtRef = useRef<number>(0);
-const lastBestCaptureAtRef = useRef<number>(0);
-const bestScoreThisSessionRef = useRef<number>(0);
-
+const baselineRef = useRef<Baseline | null>(null);
 const calibrationStartedAtRef = useRef<number | null>(null);
 const calibrationSamplesRef = useRef<BaselineSample[]>([]);
-const baselineRef = useRef<Baseline | null>(null);
+const holdStartedAtRef = useRef<number | null>(null);
+const lastAutoCaptureAtRef = useRef<number>(0);
+const bestReadyRef = useRef<number>(0);
+const lastCenterNormRef = useRef<number | null>(null);
+const smoothedReadyRef = useRef<number>(0);
 
 const [enabled, setEnabled] = useState(false);
 const [ready, setReady] = useState(false);
 const [error, setError] = useState("");
 
-const [axisState, setAxisState] = useState<AxisState>("WAIT");
 const [axisReady, setAxisReady] = useState(0);
-const [alignmentScore, setAlignmentScore] = useState(0);
-const [baseScore, setBaseScore] = useState(0);
-const [centerScore, setCenterScore] = useState(0);
-const [motionScore, setMotionScore] = useState(0);
-const [confidenceScore, setConfidenceScore] = useState(0);
-const [guideText, setGuideText] = useState(
-"HOLD NEUTRAL STANCE TO CALIBRATE AXIS READY",
-);
+const [axisCore, setAxisCore] = useState(0);
+const [axisState, setAxisState] = useState<AxisState>("LOST");
+const [tracePhase, setTracePhase] = useState<TracePhase>("LOAD");
+const [isTrueMoment, setIsTrueMoment] = useState(false);
 const [calibrationProgress, setCalibrationProgress] = useState(0);
 
+const [alignmentScore, setAlignmentScore] = useState(0);
+const [stabilityScore, setStabilityScore] = useState(0);
+const [motionScore, setMotionScore] = useState(0);
+const [confidenceScore, setConfidenceScore] = useState(0);
+
+const [guideText, setGuideText] = useState("FIND SUBJECT");
 const [facingMode, setFacingMode] = useState<FacingMode>("environment");
 const [isRecording, setIsRecording] = useState(false);
 const [recordedVideoUrl, setRecordedVideoUrl] = useState("");
-
 const [captures, setCaptures] = useState<CaptureItem[]>([]);
 const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
 
 const sessionSeconds = useMemo(() => {
 if (!sessionStartedAt) return 0;
 return Math.floor((Date.now() - sessionStartedAt) / 1000);
-}, [sessionStartedAt, axisReady, axisState]);
+}, [sessionStartedAt, axisReady]);
 
 const resetSession = useCallback(() => {
-bestScoreThisSessionRef.current = 0;
-smoothedReadyRef.current = 0;
-currentStateRef.current = "WAIT";
-candidateStateRef.current = "WAIT";
-lastStateChangeAtRef.current = performance.now();
-candidateSinceRef.current = performance.now();
-lastAutoCaptureAtRef.current = 0;
-lastBestCaptureAtRef.current = 0;
+baselineRef.current = null;
 calibrationStartedAtRef.current = null;
 calibrationSamplesRef.current = [];
-baselineRef.current = null;
+holdStartedAtRef.current = null;
+lastAutoCaptureAtRef.current = 0;
+bestReadyRef.current = 0;
+lastCenterNormRef.current = null;
+smoothedReadyRef.current = 0;
 
-setAxisState("WAIT");
 setAxisReady(0);
+setAxisCore(0);
+setAxisState("LOST");
+setTracePhase("LOAD");
+setIsTrueMoment(false);
+setCalibrationProgress(0);
 setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(0);
+setStabilityScore(0);
 setMotionScore(0);
 setConfidenceScore(0);
-setGuideText("HOLD NEUTRAL STANCE TO CALIBRATE AXIS READY");
-setCalibrationProgress(0);
-setCaptures([]);
+setGuideText("FIND SUBJECT");
 setRecordedVideoUrl("");
+setCaptures([]);
 setSessionStartedAt(Date.now());
 }, []);
 
@@ -288,7 +291,6 @@ const syncCanvasSize = useCallback(() => {
 const { width, height } = getCanvasSize();
 const overlay = overlayCanvasRef.current;
 const exportCanvas = exportCanvasRef.current;
-
 if (overlay) {
 overlay.width = width;
 overlay.height = height;
@@ -315,22 +317,19 @@ ctx.drawImage(video, dx, dy, dw, dh);
 
 const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
 ctx.save();
-ctx.strokeStyle = "rgba(255,255,255,0.055)";
+ctx.strokeStyle = "rgba(255,255,255,0.05)";
 ctx.lineWidth = 1;
 
-const cols = 6;
-const rows = 10;
-
-for (let i = 1; i < cols; i += 1) {
-const x = (width / cols) * i;
+for (let i = 1; i < 6; i += 1) {
+const x = (width / 6) * i;
 ctx.beginPath();
 ctx.moveTo(x, 0);
 ctx.lineTo(x, height);
 ctx.stroke();
 }
 
-for (let j = 1; j < rows; j += 1) {
-const y = (height / rows) * j;
+for (let i = 1; i < 10; i += 1) {
+const y = (height / 10) * i;
 ctx.beginPath();
 ctx.moveTo(0, y);
 ctx.lineTo(width, y);
@@ -354,55 +353,191 @@ Math.max(width, height) * 0.75,
 );
 
 radial.addColorStop(0, "rgba(255,255,255,0)");
-radial.addColorStop(0.55, "rgba(255,255,255,0)");
+radial.addColorStop(0.58, "rgba(255,255,255,0)");
 radial.addColorStop(1, STATE_GLOW[state]);
 
 ctx.fillStyle = radial;
 ctx.fillRect(0, 0, width, height);
-
-const edge = ctx.createLinearGradient(0, 0, 0, height);
-edge.addColorStop(0, STATE_GLOW[state]);
-edge.addColorStop(0.18, "rgba(255,255,255,0)");
-edge.addColorStop(0.82, "rgba(255,255,255,0)");
-edge.addColorStop(1, STATE_GLOW[state]);
-
-ctx.fillStyle = edge;
-ctx.fillRect(0, 0, width, height);
-
 ctx.restore();
 },
 [],
 );
 
 const drawAxisLine = useCallback(
-(ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState) => {
+(
+ctx: CanvasRenderingContext2D,
+width: number,
+height: number,
+state: AxisState,
+angleRad: number | null,
+center: { x: number; y: number } | null,
+) => {
 ctx.save();
 
 let color = "rgba(255,255,255,0.38)";
-if (state === "READY") color = "rgba(120,255,175,0.9)";
-if (state === "LOCKED") color = "rgba(85,255,155,0.98)";
-if (state === "PARTIAL") color = "rgba(255,205,95,0.95)";
-if (state === "NOT READY") color = "rgba(255,110,110,0.95)";
-if (state === "MOVE BACK" || state === "CENTER" || state === "SHOW BASE" || state === "CALIBRATING") {
-color = "rgba(130,190,255,0.9)";
-}
-if (state === "LOST") color = "rgba(180,180,180,0.5)";
+if (state === "LOCK") color = "rgba(100,255,170,0.96)";
+if (state === "SHIFT") color = "rgba(255,210,100,0.92)";
+if (state === "DROP") color = "rgba(255,170,90,0.95)";
+if (state === "OFF AXIS") color = "rgba(255,110,110,0.95)";
+if (state === "FIND SUBJECT") color = "rgba(130,190,255,0.9)";
+if (state === "LOST") color = "rgba(180,180,180,0.45)";
+
+const cx = center?.x ?? width / 2;
+const cy = center?.y ?? height / 2;
+const theta = angleRad ?? Math.PI / 2;
+const length = Math.max(width, height) * 0.45;
+const dx = Math.cos(theta) * length;
+const dy = Math.sin(theta) * length;
 
 ctx.strokeStyle = color;
-ctx.lineWidth = 2;
+ctx.lineWidth = 2.5;
 ctx.beginPath();
-ctx.moveTo(width / 2, height * 0.12);
-ctx.lineTo(width / 2, height * 0.9);
+ctx.moveTo(cx - dx, cy - dy);
+ctx.lineTo(cx + dx, cy + dy);
 ctx.stroke();
 
-ctx.strokeStyle = "rgba(255,255,255,0.2)";
-ctx.lineWidth = 1;
-for (let i = 0; i < 12; i += 1) {
-const y = lerp(height * 0.14, height * 0.88, i / 11);
+ctx.fillStyle = color;
 ctx.beginPath();
-ctx.moveTo(width / 2 - 10, y);
-ctx.lineTo(width / 2 + 10, y);
+ctx.arc(cx, cy, 4, 0, Math.PI * 2);
+ctx.fill();
+
+ctx.restore();
+},
+[],
+);
+
+const drawAxisShape = useCallback(
+(
+ctx: CanvasRenderingContext2D,
+center: { x: number; y: number } | null,
+phase: TracePhase,
+readyScore: number,
+width: number,
+height: number,
+) => {
+if (!center) return;
+
+const cx = center.x;
+const cy = center.y;
+
+const compactness = clamp(readyScore / 100, 0, 1);
+const spreadX =
+phase === "LOAD"
+? lerp(width * 0.1, width * 0.18, 1 - compactness)
+: phase === "HOLD"
+? lerp(width * 0.065, width * 0.11, 1 - compactness)
+: lerp(width * 0.03, width * 0.06, 1 - compactness);
+
+const spreadY =
+phase === "LOAD"
+? lerp(height * 0.05, height * 0.1, 1 - compactness)
+: phase === "HOLD"
+? lerp(height * 0.04, height * 0.075, 1 - compactness)
+: lerp(height * 0.08, height * 0.15, compactness);
+
+ctx.save();
+ctx.strokeStyle =
+phase === "HOLD"
+? "rgba(120,255,180,0.75)"
+: phase === "RELEASE"
+? "rgba(255,255,255,0.75)"
+: "rgba(255,210,120,0.68)";
+ctx.lineWidth = 1.5;
+
+const top = { x: cx, y: cy - spreadY };
+const left = { x: cx - spreadX, y: cy + spreadY * 0.55 };
+const right = { x: cx + spreadX, y: cy + spreadY * 0.55 };
+const bottom = { x: cx, y: cy + spreadY * 1.15 };
+
+ctx.beginPath();
+ctx.moveTo(top.x, top.y);
+ctx.lineTo(left.x, left.y);
+ctx.lineTo(bottom.x, bottom.y);
+ctx.lineTo(right.x, right.y);
+ctx.closePath();
 ctx.stroke();
+
+ctx.beginPath();
+ctx.moveTo(top.x, top.y);
+ctx.lineTo(bottom.x, bottom.y);
+ctx.stroke();
+
+ctx.restore();
+},
+[],
+);
+
+const drawTrace = useCallback(
+(
+ctx: CanvasRenderingContext2D,
+width: number,
+height: number,
+phase: TracePhase,
+isTrue: boolean,
+) => {
+const y = height - 110;
+const x0 = 44;
+const x1 = width - 44;
+const loadX = x0;
+const holdX = lerp(x0, x1, 0.42);
+const trueX = lerp(x0, x1, 0.67);
+const releaseX = x1;
+
+ctx.save();
+
+ctx.font =
+'600 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.fillStyle = "rgba(255,255,255,0.5)";
+ctx.fillText("AXIS TRACE", x0, y - 18);
+
+ctx.strokeStyle = "rgba(255,255,255,0.18)";
+ctx.lineWidth = 2;
+ctx.beginPath();
+ctx.moveTo(x0, y);
+ctx.lineTo(x1, y);
+ctx.stroke();
+
+const activeColor =
+phase === "HOLD"
+? "rgba(100,255,170,0.95)"
+: phase === "RELEASE"
+? "rgba(255,255,255,0.95)"
+: "rgba(255,210,100,0.95)";
+
+ctx.strokeStyle = activeColor;
+ctx.lineWidth = 3;
+if (phase === "LOAD") {
+ctx.beginPath();
+ctx.moveTo(loadX, y);
+ctx.lineTo(holdX - 14, y);
+ctx.stroke();
+} else if (phase === "HOLD") {
+ctx.beginPath();
+ctx.moveTo(loadX, y);
+ctx.lineTo(trueX - 16, y);
+ctx.stroke();
+} else {
+ctx.beginPath();
+ctx.moveTo(loadX, y);
+ctx.lineTo(releaseX, y);
+ctx.stroke();
+}
+
+ctx.fillStyle = "rgba(255,255,255,0.7)";
+ctx.fillText("LOAD", loadX, y + 22);
+ctx.fillText("HOLD", holdX - 14, y + 22);
+ctx.fillText("RELEASE", releaseX - 56, y + 22);
+
+if (isTrue) {
+ctx.font =
+'700 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle = "rgba(100,255,170,0.98)";
+ctx.fillText("◎", trueX - 6, y + 6);
+} else {
+ctx.font =
+'700 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle = "rgba(255,255,255,0.25)";
+ctx.fillText("·", trueX - 2, y + 6);
 }
 
 ctx.restore();
@@ -410,21 +545,19 @@ ctx.restore();
 [],
 );
 
-const drawLabel = useCallback(
+const drawHud = useCallback(
 (
 ctx: CanvasRenderingContext2D,
 width: number,
 height: number,
-state: AxisState,
-readyScore: number,
-confidence: number,
+metrics: FrameMetrics,
 guide: string,
 progress: number,
 ) => {
 ctx.save();
 
-ctx.fillStyle = "rgba(0,0,0,0.35)";
-ctx.fillRect(24, 24, width - 48, 106);
+ctx.fillStyle = "rgba(0,0,0,0.34)";
+ctx.fillRect(24, 24, width - 48, 108);
 
 ctx.font =
 '600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
@@ -432,181 +565,48 @@ ctx.fillStyle = "rgba(255,255,255,0.72)";
 ctx.fillText("AXIS READY", 40, 52);
 
 ctx.font =
-'700 36px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
-if (state === "LOCKED") ctx.fillStyle = "rgba(85,255,155,1)";
-else if (state === "READY") ctx.fillStyle = "rgba(120,255,175,1)";
-else if (state === "PARTIAL") ctx.fillStyle = "rgba(255,205,95,1)";
-else if (state === "NOT READY") ctx.fillStyle = "rgba(255,110,110,1)";
-else if (
-state === "MOVE BACK" ||
-state === "CENTER" ||
-state === "SHOW BASE" ||
-state === "CALIBRATING"
-) {
-ctx.fillStyle = "rgba(130,190,255,1)";
-} else ctx.fillStyle = "rgba(255,255,255,0.95)";
-ctx.fillText(String(Math.round(readyScore)).padStart(2, "0"), 40, 96);
+'700 38px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle =
+metrics.axisReady >= TRUE_HOLD_THRESHOLD
+? "rgba(100,255,170,1)"
+: metrics.axisReady >= READY_THRESHOLD
+? "rgba(150,255,190,1)"
+: metrics.axisReady >= PARTIAL_THRESHOLD
+? "rgba(255,210,100,1)"
+: "rgba(255,110,110,1)";
+ctx.fillText(String(Math.round(metrics.axisReady)).padStart(2, "0"), 40, 98);
 
 ctx.font =
 '600 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
-ctx.fillStyle = "rgba(255,255,255,0.78)";
-ctx.fillText(state, 104, 95);
+ctx.fillStyle = "rgba(255,255,255,0.86)";
+ctx.fillText(metrics.state, 108, 96);
 
 ctx.font =
 '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
-ctx.fillText(`CONF ${Math.round(confidence)}`, width - 170, 52);
+ctx.fillText(`CORE ${Math.round(metrics.axisCore)}`, width - 180, 52);
+ctx.fillText(`CONF ${Math.round(metrics.confidence)}`, width - 180, 74);
+ctx.fillText(`PHASE ${metrics.phase}`, width - 180, 96);
 
-if (state === "CALIBRATING") {
-ctx.fillText(`BASELINE ${Math.round(progress)}%`, width - 170, 75);
-} else {
-ctx.fillText(`STATE ${state}`, width - 170, 75);
+if (progress > 0 && progress < 100) {
+ctx.fillStyle = "rgba(255,255,255,0.08)";
+ctx.fillRect(24, 138, width - 48, 10);
+ctx.fillStyle = "rgba(130,190,255,0.92)";
+ctx.fillRect(24, 138, (width - 48) * (progress / 100), 10);
 }
 
-ctx.restore();
-
-ctx.save();
 ctx.fillStyle = "rgba(0,0,0,0.3)";
 ctx.fillRect(24, height - 68, width - 48, 36);
 ctx.font =
 '500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
 ctx.fillText(guide, 40, height - 45);
-ctx.restore();
 
-if (state === "CALIBRATING") {
-ctx.save();
-ctx.fillStyle = "rgba(255,255,255,0.08)";
-ctx.fillRect(24, 138, width - 48, 10);
-ctx.fillStyle = "rgba(130,190,255,0.92)";
-ctx.fillRect(24, 138, (width - 48) * clamp(progress / 100, 0, 1), 10);
-ctx.restore();
-}
-},
-[],
-);
-
-const drawBodyIndicators = useCallback(
-(
-ctx: CanvasRenderingContext2D,
-width: number,
-keypoints: Record<string, Point>,
-state: AxisState,
-showShoulders: boolean,
-showHips: boolean,
-showBase: boolean,
-) => {
-const leftShoulder = keypoints.left_shoulder;
-const rightShoulder = keypoints.right_shoulder;
-const leftHip = keypoints.left_hip;
-const rightHip = keypoints.right_hip;
-const leftAnkle = keypoints.left_ankle;
-const rightAnkle = keypoints.right_ankle;
-
-if (!showShoulders && !showHips) return;
-
-let lineColor = "rgba(255,255,255,0.92)";
-if (state === "READY") lineColor = "rgba(120,255,175,0.96)";
-if (state === "LOCKED") lineColor = "rgba(85,255,155,0.98)";
-if (state === "PARTIAL") lineColor = "rgba(255,205,95,0.95)";
-if (state === "NOT READY") lineColor = "rgba(255,110,110,0.98)";
-if (
-state === "MOVE BACK" ||
-state === "CENTER" ||
-state === "SHOW BASE" ||
-state === "CALIBRATING"
-) {
-lineColor = "rgba(130,190,255,0.96)";
-}
-
-ctx.save();
-ctx.lineCap = "round";
-
-let shoulderMid: Point | null = null;
-let hipMid: Point | null = null;
-
-if (showShoulders && leftShoulder && rightShoulder) {
-shoulderMid = midpoint(leftShoulder, rightShoulder);
-ctx.strokeStyle = lineColor;
-ctx.lineWidth = 4;
-ctx.beginPath();
-ctx.moveTo(leftShoulder.x, leftShoulder.y);
-ctx.lineTo(rightShoulder.x, rightShoulder.y);
-ctx.stroke();
-
-[leftShoulder, rightShoulder, shoulderMid].forEach((p, idx) => {
-ctx.fillStyle = idx === 2 ? lineColor : "rgba(255,255,255,0.75)";
-ctx.beginPath();
-ctx.arc(p.x, p.y, idx === 2 ? 5 : 4, 0, Math.PI * 2);
-ctx.fill();
-});
-
-ctx.strokeStyle = "rgba(255,255,255,0.16)";
-ctx.lineWidth = 1;
-ctx.setLineDash([5, 6]);
-ctx.beginPath();
-ctx.moveTo(width / 2, shoulderMid.y);
-ctx.lineTo(shoulderMid.x, shoulderMid.y);
-ctx.stroke();
-ctx.setLineDash([]);
-}
-
-if (showHips && leftHip && rightHip) {
-hipMid = midpoint(leftHip, rightHip);
-ctx.strokeStyle = lineColor;
-ctx.lineWidth = 4;
-ctx.beginPath();
-ctx.moveTo(leftHip.x, leftHip.y);
-ctx.lineTo(rightHip.x, rightHip.y);
-ctx.stroke();
-
-[leftHip, rightHip, hipMid].forEach((p, idx) => {
-ctx.fillStyle = idx === 2 ? lineColor : "rgba(255,255,255,0.75)";
-ctx.beginPath();
-ctx.arc(p.x, p.y, idx === 2 ? 5 : 4, 0, Math.PI * 2);
-ctx.fill();
-});
-
-ctx.strokeStyle = "rgba(255,255,255,0.16)";
-ctx.lineWidth = 1;
-ctx.setLineDash([5, 6]);
-ctx.beginPath();
-ctx.moveTo(width / 2, hipMid.y);
-ctx.lineTo(hipMid.x, hipMid.y);
-ctx.stroke();
-ctx.setLineDash([]);
-}
-
-if (shoulderMid && hipMid) {
-ctx.strokeStyle = lineColor;
-ctx.lineWidth = 3;
-ctx.beginPath();
-ctx.moveTo(shoulderMid.x, shoulderMid.y);
-ctx.lineTo(hipMid.x, hipMid.y);
-ctx.stroke();
-}
-
-if (showBase && leftAnkle && rightAnkle && hipMid) {
-const ankleMid = midpoint(leftAnkle, rightAnkle);
-ctx.strokeStyle = "rgba(255,255,255,0.32)";
-ctx.lineWidth = 2;
-
-ctx.beginPath();
-ctx.moveTo(leftAnkle.x, leftAnkle.y);
-ctx.lineTo(rightAnkle.x, rightAnkle.y);
-ctx.stroke();
-
-ctx.beginPath();
-ctx.moveTo(hipMid.x, hipMid.y);
-ctx.lineTo(ankleMid.x, ankleMid.y);
-ctx.stroke();
-
-[leftAnkle, rightAnkle].forEach((p) => {
-ctx.fillStyle = "rgba(255,255,255,0.75)";
-ctx.beginPath();
-ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
-ctx.fill();
-});
+if (metrics.isTrue) {
+ctx.font =
+'700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.fillStyle = "rgba(100,255,170,0.98)";
+ctx.fillText("TRUE ◎", width / 2 - 64, height / 2 - 10);
 }
 
 ctx.restore();
@@ -617,19 +617,15 @@ ctx.restore();
 const renderInstrument = useCallback(
 (
 keypoints: Record<string, Point> | null,
-state: AxisState,
-readyScore: number,
-confidence: number,
+center: { x: number; y: number } | null,
+axisAngleRad: number | null,
+metrics: FrameMetrics,
 guide: string,
-progress: number,
-showShoulders: boolean,
-showHips: boolean,
-showBase: boolean,
+calibration: number,
 ) => {
 const video = videoRef.current;
 const overlay = overlayCanvasRef.current;
 const exportCanvas = exportCanvasRef.current;
-
 if (!video || !overlay || !exportCanvas) return;
 
 const overlayCtx = overlay.getContext("2d");
@@ -641,43 +637,79 @@ const { width, height } = overlay;
 [overlayCtx, exportCtx].forEach((ctx) => {
 ctx.clearRect(0, 0, width, height);
 drawVideoCover(ctx, video, width, height);
-drawAmbientGlow(ctx, width, height, state);
+drawAmbientGlow(ctx, width, height, metrics.state);
 drawGrid(ctx, width, height);
-drawAxisLine(ctx, width, height, state);
+drawAxisLine(ctx, width, height, metrics.state, axisAngleRad, center);
+drawAxisShape(ctx, center, metrics.phase, metrics.axisReady, width, height);
 
 if (keypoints) {
-drawBodyIndicators(
-ctx,
-width,
-keypoints,
-state,
-showShoulders,
-showHips,
-showBase,
-);
+const ls = keypoints.left_shoulder;
+const rs = keypoints.right_shoulder;
+const lh = keypoints.left_hip;
+const rh = keypoints.right_hip;
+const la = keypoints.left_ankle;
+const ra = keypoints.right_ankle;
+
+ctx.save();
+ctx.strokeStyle = "rgba(255,255,255,0.72)";
+ctx.lineWidth = 2.5;
+
+if (hasPair(ls, rs)) {
+ctx.beginPath();
+ctx.moveTo(ls!.x, ls!.y);
+ctx.lineTo(rs!.x, rs!.y);
+ctx.stroke();
 }
 
-drawLabel(ctx, width, height, state, readyScore, confidence, guide, progress);
+if (hasPair(lh, rh)) {
+ctx.beginPath();
+ctx.moveTo(lh!.x, lh!.y);
+ctx.lineTo(rh!.x, rh!.y);
+ctx.stroke();
+}
+
+if (hasPair(la, ra)) {
+ctx.strokeStyle = "rgba(255,255,255,0.34)";
+ctx.beginPath();
+ctx.moveTo(la!.x, la!.y);
+ctx.lineTo(ra!.x, ra!.y);
+ctx.stroke();
+}
+
+ctx.restore();
+}
+
+drawTrace(ctx, width, height, metrics.phase, metrics.isTrue);
+drawHud(ctx, width, height, metrics, guide, calibration);
 });
 },
-[drawAmbientGlow, drawAxisLine, drawBodyIndicators, drawGrid, drawLabel, drawVideoCover],
+[
+drawAmbientGlow,
+drawAxisLine,
+drawAxisShape,
+drawGrid,
+drawHud,
+drawTrace,
+drawVideoCover,
+],
 );
 
 const addCaptureFromExportCanvas = useCallback(
-async (label: string, state: AxisState, score: number) => {
+async (metrics: FrameMetrics) => {
 const canvas = exportCanvasRef.current;
 if (!canvas) return;
-
 const timestamp = Date.now();
 const dataUrl = canvas.toDataURL("image/jpeg", 0.94);
 
 setCaptures((prev) => [
 {
 id: `${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
-state,
-score,
 timestamp,
-label,
+axisReady: metrics.axisReady,
+axisCore: metrics.axisCore,
+state: metrics.state,
+phase: metrics.phase,
+isTrue: metrics.isTrue,
 dataUrl,
 },
 ...prev,
@@ -686,42 +718,12 @@ dataUrl,
 [],
 );
 
-const updateStateWithHold = useCallback((candidate: AxisState, now: number) => {
-if (candidate !== candidateStateRef.current) {
-candidateStateRef.current = candidate;
-candidateSinceRef.current = now;
-}
-
-if (
-candidate !== currentStateRef.current &&
-now - candidateSinceRef.current >= STATE_HOLD_MS &&
-now - lastStateChangeAtRef.current >= STATE_HOLD_MS
-) {
-currentStateRef.current = candidate;
-lastStateChangeAtRef.current = now;
-setAxisState(candidate);
-}
-}, []);
-
 const analyzePose = useCallback(
 async (now: number) => {
 const video = videoRef.current;
 const detector = detectorRef.current;
 
-if (!video || !detector || video.readyState < 2) {
-renderInstrument(
-null,
-"WAIT",
-smoothedReadyRef.current,
-confidenceScore,
-guideText,
-calibrationProgress,
-false,
-false,
-false,
-);
-return;
-}
+if (!video || !detector || video.readyState < 2) return;
 
 const poses = await detector.estimatePoses(video, {
 maxPoses: 1,
@@ -743,28 +745,24 @@ score: kp.score ?? 0,
 }
 }
 
-const leftShoulder = kpMap.left_shoulder;
-const rightShoulder = kpMap.right_shoulder;
-const leftHip = kpMap.left_hip;
-const rightHip = kpMap.right_hip;
-const leftAnkle = kpMap.left_ankle;
-const rightAnkle = kpMap.right_ankle;
+const ls = kpMap.left_shoulder;
+const rs = kpMap.right_shoulder;
+const lh = kpMap.left_hip;
+const rh = kpMap.right_hip;
+const la = kpMap.left_ankle;
+const ra = kpMap.right_ankle;
 
-const shoulderPairOk = hasPair(leftShoulder, rightShoulder);
-const hipPairOk = hasPair(leftHip, rightHip);
-const anklePairOk = hasPair(leftAnkle, rightAnkle);
-
-const showShoulders = shoulderPairOk;
-const showHips = hipPairOk;
-const showBase = anklePairOk;
+const shoulderPairOk = hasPair(ls, rs);
+const hipPairOk = hasPair(lh, rh);
+const anklePairOk = hasPair(la, ra);
 
 const visibleCount = [
-hasPoint(leftShoulder),
-hasPoint(rightShoulder),
-hasPoint(leftHip),
-hasPoint(rightHip),
-hasPoint(leftAnkle),
-hasPoint(rightAnkle),
+hasPoint(ls),
+hasPoint(rs),
+hasPoint(lh),
+hasPoint(rh),
+hasPoint(la),
+hasPoint(ra),
 ].filter(Boolean).length;
 
 const confidence =
@@ -773,143 +771,85 @@ const confidence =
 (hipPairOk ? 10 : 0) +
 (anklePairOk ? 10 : 0);
 
-setConfidenceScore(Math.round(confidence));
+let metrics: FrameMetrics = {
+axisCore: 0,
+axisReady: 0,
+alignment: 0,
+stability: 0,
+motion: 0,
+confidence,
+baseRatio: 0,
+centerOffset: 0,
+state: "LOST",
+phase: "LOAD",
+isTrue: false,
+};
+
+let guide = "FIND SUBJECT";
+let center: { x: number; y: number } | null = null;
+let axisAngleRad: number | null = null;
 
 if (!shoulderPairOk && !hipPairOk) {
-const guide = "STEP BACK // FIND SUBJECT";
 setGuideText(guide);
-smoothedReadyRef.current *= 0.85;
-setAxisReady(Math.round(smoothedReadyRef.current));
+setAxisState(metrics.state);
+setTracePhase(metrics.phase);
+setIsTrueMoment(false);
+setAxisCore(0);
+setAxisReady(0);
 setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(0);
+setStabilityScore(0);
 setMotionScore(0);
-updateStateWithHold("LOST", now);
-renderInstrument(
-null,
-currentStateRef.current,
-smoothedReadyRef.current,
-confidence,
-guide,
-calibrationProgress,
-false,
-false,
-false,
-);
+setConfidenceScore(Math.round(confidence));
+renderInstrument(null, null, null, metrics, guide, calibrationProgress);
 return;
 }
 
 if (!shoulderPairOk || !hipPairOk) {
-const guide = "CENTER TORSO INSIDE FIELD";
+metrics.state = "FIND SUBJECT";
+guide = "FIND SUBJECT";
 setGuideText(guide);
-smoothedReadyRef.current = Math.max(smoothedReadyRef.current * 0.92, 12);
-setAxisReady(Math.round(smoothedReadyRef.current));
+setAxisState(metrics.state);
+setTracePhase(metrics.phase);
+setIsTrueMoment(false);
+setAxisCore(0);
+setAxisReady(0);
 setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(25);
-setMotionScore(30);
-updateStateWithHold("CENTER", now);
-renderInstrument(
-kpMap,
-currentStateRef.current,
-smoothedReadyRef.current,
-confidence,
-guide,
-calibrationProgress,
-showShoulders,
-showHips,
-false,
-);
+setStabilityScore(0);
+setMotionScore(0);
+setConfidenceScore(Math.round(confidence));
+renderInstrument(kpMap, null, null, metrics, guide, calibrationProgress);
 return;
 }
 
-const shoulderMid = midpoint(leftShoulder!, rightShoulder!);
-const hipMid = midpoint(leftHip!, rightHip!);
-const shoulderWidth = Math.max(distance(leftShoulder!, rightShoulder!), 1);
-const hipWidth = Math.max(distance(leftHip!, rightHip!), 1);
-const torsoHeight = Math.max(Math.abs(hipMid.y - shoulderMid.y), 1);
+const shoulderMid = midpoint(ls!, rs!);
+const hipMid = midpoint(lh!, rh!);
+center = {
+x: (shoulderMid.x + hipMid.x) / 2,
+y: (shoulderMid.y + hipMid.y) / 2,
+};
 
-const shoulderAngle = normalizeAngleAbs(angleDeg(leftShoulder!, rightShoulder!));
-const hipAngle = normalizeAngleAbs(angleDeg(leftHip!, rightHip!));
-const torsoMidXNorm = ((shoulderMid.x + hipMid.x) / 2) / Math.max(video.videoWidth, 1);
+const dx = hipMid.x - shoulderMid.x;
+const dy = hipMid.y - shoulderMid.y;
+axisAngleRad = Math.atan2(dy, dx);
+
+const shoulderAngle = normalizeAngleAbs(angleDeg(ls!, rs!));
+const hipAngle = normalizeAngleAbs(angleDeg(lh!, rh!));
+const shoulderWidth = Math.max(distance(ls!, rs!), 1);
+const hipWidth = Math.max(distance(lh!, rh!), 1);
+const torsoHeight = Math.max(Math.abs(hipMid.y - shoulderMid.y), 1);
+const torsoMidXNorm = center.x / Math.max(video.videoWidth, 1);
 const torsoHeightNorm = torsoHeight / Math.max(video.videoHeight, 1);
 const shoulderWidthNorm = shoulderWidth / Math.max(video.videoWidth, 1);
 const hipWidthNorm = hipWidth / Math.max(video.videoWidth, 1);
 
-const tooClose =
-shoulderWidthNorm > 0.52 ||
-torsoHeightNorm > 0.58 ||
-shoulderMid.y < video.videoHeight * 0.12 ||
-hipMid.y > video.videoHeight * 0.92;
-
-const torsoCenterOffsetNorm = Math.abs(torsoMidXNorm - 0.5) / 0.18;
-const offCenter =
-torsoCenterOffsetNorm > 1 ||
-shoulderMid.x < video.videoWidth * 0.16 ||
-shoulderMid.x > video.videoWidth * 0.84 ||
-hipMid.x < video.videoWidth * 0.14 ||
-hipMid.x > video.videoWidth * 0.86;
-
 let baseRatio: number | null = null;
-let centerOverBasePenalty = 0.25;
+let centerOffset = Math.abs(torsoMidXNorm - 0.5) / 0.18;
 
 if (anklePairOk) {
-const stanceWidth = Math.max(distance(leftAnkle!, rightAnkle!), 1);
-const footMid = midpoint(leftAnkle!, rightAnkle!);
+const stanceWidth = Math.max(distance(la!, ra!), 1);
+const footMid = midpoint(la!, ra!);
 baseRatio = stanceWidth / hipWidth;
-centerOverBasePenalty = clamp(
-Math.abs(hipMid.x - footMid.x) / stanceWidth,
-0,
-1,
-);
-}
-
-if (tooClose) {
-const guide = "MOVE BACK // FIT SHOULDERS + HIPS INSIDE FIELD";
-setGuideText(guide);
-smoothedReadyRef.current = Math.max(smoothedReadyRef.current * 0.94, 14);
-setAxisReady(Math.round(smoothedReadyRef.current));
-setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(20);
-setMotionScore(20);
-updateStateWithHold("MOVE BACK", now);
-renderInstrument(
-kpMap,
-currentStateRef.current,
-smoothedReadyRef.current,
-confidence,
-guide,
-calibrationProgress,
-true,
-true,
-false,
-);
-return;
-}
-
-if (offCenter) {
-const guide = "CENTER TORSO ON AXIS";
-setGuideText(guide);
-smoothedReadyRef.current = Math.max(smoothedReadyRef.current * 0.95, 16);
-setAxisReady(Math.round(smoothedReadyRef.current));
-setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(Math.round(clamp(100 - torsoCenterOffsetNorm * 60, 0, 100)));
-setMotionScore(30);
-updateStateWithHold("CENTER", now);
-renderInstrument(
-kpMap,
-currentStateRef.current,
-smoothedReadyRef.current,
-confidence,
-guide,
-calibrationProgress,
-true,
-true,
-false,
-);
-return;
+centerOffset = Math.abs(hipMid.x - footMid.x) / stanceWidth;
 }
 
 if (!baselineRef.current) {
@@ -933,42 +873,34 @@ const progress = clamp(
 0,
 100,
 );
-setCalibrationProgress(progress);
-setGuideText("HOLD NEUTRAL STANCE // BUILDING BASELINE");
-setAxisReady(0);
-setAlignmentScore(0);
-setBaseScore(0);
-setCenterScore(0);
-setMotionScore(0);
 
-updateStateWithHold("CALIBRATING", now);
+setCalibrationProgress(progress);
+
+metrics.state = "LOCK";
+metrics.phase = "HOLD";
+guide = "LOCK";
 
 if (progress >= 100 && calibrationSamplesRef.current.length >= 12) {
 baselineRef.current = buildBaseline(calibrationSamplesRef.current);
 calibrationStartedAtRef.current = null;
 calibrationSamplesRef.current = [];
-setGuideText("BASELINE SET // AXIS READY LIVE");
-setCalibrationProgress(100);
-currentStateRef.current = "NOT READY";
-candidateStateRef.current = "NOT READY";
-setAxisState("NOT READY");
+guide = "LOCK";
 }
 
-renderInstrument(
-kpMap,
-currentStateRef.current,
-0,
-confidence,
-"HOLD NEUTRAL STANCE // BUILDING BASELINE",
-progress,
-true,
-true,
-anklePairOk,
-);
+setGuideText(guide);
+setAxisState(metrics.state);
+setTracePhase(metrics.phase);
+setIsTrueMoment(false);
+setAxisCore(0);
+setAxisReady(0);
+setAlignmentScore(0);
+setStabilityScore(0);
+setMotionScore(0);
+setConfidenceScore(Math.round(confidence));
+
+renderInstrument(kpMap, center, axisAngleRad, metrics, guide, progress);
 return;
 }
-
-setCalibrationProgress(100);
 
 const baseline = baselineRef.current;
 
@@ -985,129 +917,124 @@ baseRatio !== null && baseline.baseRatio !== null
 
 const alignment =
 100 -
-clamp(shoulderAngleDelta / 10, 0, 1) * 45 -
-clamp(hipAngleDelta / 10, 0, 1) * 35 -
-clamp(torsoXDelta / 0.08, 0, 1) * 20;
+clamp(shoulderAngleDelta / 10, 0, 1) * 42 -
+clamp(hipAngleDelta / 10, 0, 1) * 34 -
+clamp(torsoXDelta / 0.08, 0, 1) * 24;
 
-const center =
+const stability =
 100 -
-clamp(torsoXDelta / 0.08, 0, 1) * 60 -
-clamp(centerOverBasePenalty / 0.35, 0, 1) * 40;
+clamp(centerOffset / 0.35, 0, 1) * 68 -
+(baseRatio !== null && baseRatioDelta !== null
+? clamp(baseRatioDelta / 0.35, 0, 1) * 32
+: 15);
 
-const base =
-baseRatio !== null
-? 100 -
-clamp((baseRatioDelta ?? 0) / 0.35, 0, 1) * 55 -
-clamp(centerOverBasePenalty / 0.35, 0, 1) * 45
-: 68;
+const centerVelocity =
+lastCenterNormRef.current === null
+? 0
+: Math.abs(torsoMidXNorm - lastCenterNormRef.current);
+
+lastCenterNormRef.current = torsoMidXNorm;
 
 const motion =
 100 -
-clamp(torsoHeightDelta / 0.07, 0, 1) * 35 -
-clamp(shoulderWidthDelta / 0.07, 0, 1) * 25 -
-clamp(hipWidthDelta / 0.07, 0, 1) * 20 -
-clamp(shoulderAngleDelta / 12, 0, 1) * 20;
+clamp(torsoHeightDelta / 0.07, 0, 1) * 28 -
+clamp(shoulderWidthDelta / 0.07, 0, 1) * 18 -
+clamp(hipWidthDelta / 0.07, 0, 1) * 16 -
+clamp(centerVelocity / 0.02, 0, 1) * 38;
 
-const confidenceForScore = clamp(confidence, 0, 100);
-
-const rawReady =
-0.35 * clamp(alignment, 0, 100) +
-0.25 * clamp(base, 0, 100) +
-0.2 * clamp(center, 0, 100) +
-0.15 * clamp(motion, 0, 100) +
-0.05 * confidenceForScore;
+const axisCore =
+0.4 * clamp(alignment, 0, 100) +
+0.35 * clamp(stability, 0, 100) +
+0.25 * clamp(motion, 0, 100);
 
 smoothedReadyRef.current =
 smoothedReadyRef.current === 0
-? rawReady
-: smoothedReadyRef.current * 0.82 + rawReady * 0.18;
+? axisCore
+: smoothedReadyRef.current * 0.82 + axisCore * 0.18;
 
-const readyScore = clamp(smoothedReadyRef.current, 0, 100);
+const axisReady = clamp(smoothedReadyRef.current, 0, 100);
 
-let candidate: AxisState = "NOT READY";
-let guide = "AXIS READY LIVE";
+let state: AxisState = "OFF AXIS";
+if (axisReady >= TRUE_HOLD_THRESHOLD) state = "LOCK";
+else if (axisReady >= READY_THRESHOLD) state = "DROP";
+else if (axisReady >= PARTIAL_THRESHOLD) state = "SHIFT";
+else state = "OFF AXIS";
 
-if (!anklePairOk) {
-candidate = readyScore >= 70 ? "PARTIAL" : "SHOW BASE";
-guide = "SHOW FEET FOR FULL FORCE READ";
-} else if (readyScore >= 90) {
-candidate = "LOCKED";
-guide = "STABLE ENOUGH TO RELEASE FORCE";
-} else if (readyScore >= 70) {
-candidate = "READY";
-guide = "READY TO RELEASE FORCE";
-} else if (readyScore >= 40) {
-candidate = "PARTIAL";
-guide = "PARTIAL READ // CLEAN UP STRUCTURE";
+let phase: TracePhase = "LOAD";
+if (axisReady >= READY_THRESHOLD) phase = "HOLD";
+else if (axisReady >= PARTIAL_THRESHOLD) phase = "LOAD";
+else phase = "LOAD";
+
+let isTrue = false;
+
+if (axisReady >= TRUE_HOLD_THRESHOLD) {
+if (holdStartedAtRef.current === null) holdStartedAtRef.current = now;
 } else {
-candidate = "NOT READY";
-guide = "NOT READY // RESTACK BEFORE FORCE";
+holdStartedAtRef.current = null;
 }
 
-if (candidate !== candidateStateRef.current) {
-candidateStateRef.current = candidate;
-candidateSinceRef.current = now;
+const holdDuration =
+holdStartedAtRef.current === null ? 0 : now - holdStartedAtRef.current;
+
+const releaseSignal =
+centerVelocity > 0.006 ||
+torsoHeightDelta > 0.012 ||
+Math.max(shoulderAngleDelta, hipAngleDelta) > 2.2;
+
+if (holdDuration >= HOLD_MIN_MS && releaseSignal) {
+isTrue = true;
+phase = "RELEASE";
+}
+
+metrics = {
+axisCore,
+axisReady,
+alignment,
+stability,
+motion,
+confidence,
+baseRatio: baseRatio ?? 0,
+centerOffset,
+state,
+phase,
+isTrue,
+};
+
+guide =
+state === "LOCK"
+? "LOCK"
+: state === "DROP"
+? "DROP"
+: state === "SHIFT"
+? "SHIFT"
+: "OFF AXIS";
+
+setGuideText(guide);
+setAxisState(state);
+setTracePhase(phase);
+setIsTrueMoment(isTrue);
+setAxisCore(Math.round(axisCore));
+setAxisReady(Math.round(axisReady));
+setAlignmentScore(Math.round(clamp(alignment, 0, 100)));
+setStabilityScore(Math.round(clamp(stability, 0, 100)));
+setMotionScore(Math.round(clamp(motion, 0, 100)));
+setConfidenceScore(Math.round(confidence));
+
+if (axisReady > bestReadyRef.current) {
+bestReadyRef.current = axisReady;
 }
 
 if (
-candidate !== currentStateRef.current &&
-now - candidateSinceRef.current >= STATE_HOLD_MS &&
-now - lastStateChangeAtRef.current >= STATE_HOLD_MS
-) {
-currentStateRef.current = candidate;
-lastStateChangeAtRef.current = now;
-setAxisState(candidate);
-
-if (
-["READY", "LOCKED", "PARTIAL", "NOT READY"].includes(candidate) &&
+(isTrue || axisReady >= bestReadyRef.current - 0.5) &&
 now - lastAutoCaptureAtRef.current > AUTO_CAPTURE_COOLDOWN_MS
 ) {
 lastAutoCaptureAtRef.current = now;
-void addCaptureFromExportCanvas(`Auto ${candidate}`, candidate, readyScore);
-}
-}
-
-if (readyScore > bestScoreThisSessionRef.current) {
-bestScoreThisSessionRef.current = readyScore;
+void addCaptureFromExportCanvas(metrics);
 }
 
-if (
-currentStateRef.current === "LOCKED" &&
-readyScore >= bestScoreThisSessionRef.current - 0.8 &&
-now - lastBestCaptureAtRef.current > BEST_CAPTURE_COOLDOWN_MS
-) {
-lastBestCaptureAtRef.current = now;
-void addCaptureFromExportCanvas("Best Moment", "LOCKED", readyScore);
-}
-
-setGuideText(guide);
-setAxisReady(Math.round(readyScore));
-setAlignmentScore(Math.round(clamp(alignment, 0, 100)));
-setBaseScore(Math.round(clamp(base, 0, 100)));
-setCenterScore(Math.round(clamp(center, 0, 100)));
-setMotionScore(Math.round(clamp(motion, 0, 100)));
-
-renderInstrument(
-kpMap,
-currentStateRef.current,
-readyScore,
-confidence,
-guide,
-100,
-true,
-true,
-anklePairOk,
-);
+renderInstrument(kpMap, center, axisAngleRad, metrics, guide, 100);
 },
-[
-addCaptureFromExportCanvas,
-calibrationProgress,
-confidenceScore,
-facingMode,
-guideText,
-renderInstrument,
-updateStateWithHold,
-],
+[addCaptureFromExportCanvas, calibrationProgress, facingMode, renderInstrument],
 );
 
 const loop = useCallback(async () => {
@@ -1234,18 +1161,35 @@ window.addEventListener("resize", handleResize);
 return () => window.removeEventListener("resize", handleResize);
 }, [enabled, syncCanvasSize]);
 
-const flipCamera = useCallback(() => {
-setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
-}, []);
-
 useEffect(() => {
 if (!enabled) return;
 void startCamera();
 }, [facingMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
-const manualCapture = useCallback(async () => {
-await addCaptureFromExportCanvas("Manual Capture", axisState, axisReady);
-}, [addCaptureFromExportCanvas, axisReady, axisState]);
+const flipCamera = useCallback(() => {
+setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
+}, []);
+
+const manualMark = useCallback(async () => {
+const canvas = exportCanvasRef.current;
+if (!canvas) return;
+const timestamp = Date.now();
+const dataUrl = canvas.toDataURL("image/jpeg", 0.94);
+
+setCaptures((prev) => [
+{
+id: `${timestamp}-${Math.random().toString(36).slice(2, 8)}`,
+timestamp,
+axisReady,
+axisCore,
+state: axisState,
+phase: tracePhase,
+isTrue: isTrueMoment,
+dataUrl,
+},
+...prev,
+]);
+}, [axisCore, axisReady, axisState, isTrueMoment, tracePhase]);
 
 const startRecording = useCallback(() => {
 const exportCanvas = exportCanvasRef.current;
@@ -1253,8 +1197,8 @@ if (!exportCanvas || isRecording) return;
 
 recordedChunksRef.current = [];
 const stream = exportCanvas.captureStream(30);
-let recorder: MediaRecorder;
 
+let recorder: MediaRecorder;
 try {
 recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
 } catch {
@@ -1296,34 +1240,14 @@ const saveVideo = useCallback(async () => {
 if (!recordedVideoUrl) return;
 const res = await fetch(recordedVideoUrl);
 const blob = await res.blob();
-const filename = createFileName("VIDEO", axisState, Date.now(), "webm");
+const filename = createFileName("VIDEO", axisReady, Date.now(), "webm");
 await shareOrDownloadBlob(blob, filename);
-}, [axisState, recordedVideoUrl]);
+}, [axisReady, recordedVideoUrl]);
 
 const saveCapture = useCallback(async (capture: CaptureItem) => {
 const blob = dataUrlToBlob(capture.dataUrl);
-const filename = createFileName("FRAME", capture.state, capture.timestamp, "jpg");
+const filename = createFileName("FRAME", capture.axisReady, capture.timestamp, "jpg");
 await shareOrDownloadBlob(blob, filename);
-}, []);
-
-const saveAllCaptures = useCallback(async () => {
-for (const capture of captures) {
-const blob = dataUrlToBlob(capture.dataUrl);
-const filename = createFileName("FRAME", capture.state, capture.timestamp, "jpg");
-downloadBlob(blob, filename);
-await new Promise((r) => setTimeout(r, 200));
-}
-}, [captures]);
-
-const clearBaseline = useCallback(() => {
-baselineRef.current = null;
-calibrationSamplesRef.current = [];
-calibrationStartedAtRef.current = null;
-setAxisState("WAIT");
-setGuideText("HOLD NEUTRAL STANCE TO CALIBRATE AXIS READY");
-setCalibrationProgress(0);
-currentStateRef.current = "WAIT";
-candidateStateRef.current = "WAIT";
 }, []);
 
 const topCapture = captures[0];
@@ -1334,13 +1258,13 @@ return (
 <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur md:flex-row md:items-center">
 <div>
 <div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Axis Ready Instrument
+Axis Beta
 </div>
 <div className="mt-1 text-2xl font-semibold tracking-tight">
-Calibrated force-readiness signal
+Axis Line • Axis Shape • Axis Core • Axis Ready
 </div>
 <div className="mt-1 text-sm text-white/55">
-Baseline calibration, torso fallback, full-base force read, proof capture.
+Beta freeze build. Human-first instrument with TRUE ◎ review.
 </div>
 </div>
 
@@ -1350,14 +1274,14 @@ Baseline calibration, torso fallback, full-base force read, proof capture.
 onClick={() => void startCamera()}
 className="rounded-2xl border border-white/15 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:opacity-90"
 >
-Start Axis Ready
+LOCK
 </button>
 ) : (
 <button
 onClick={stopCamera}
 className="rounded-2xl border border-white/15 bg-white/10 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/15"
 >
-End Session
+END
 </button>
 )}
 
@@ -1365,15 +1289,7 @@ End Session
 onClick={flipCamera}
 className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
 >
-Flip Camera
-</button>
-
-<button
-onClick={clearBaseline}
-disabled={!enabled}
-className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
->
-Recalibrate
+FLIP
 </button>
 
 {!isRecording ? (
@@ -1382,23 +1298,23 @@ onClick={startRecording}
 disabled={!enabled || !ready}
 className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
 >
-Record Instrument
+RECORD
 </button>
 ) : (
 <button
 onClick={stopRecording}
 className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm font-semibold text-red-200 transition hover:bg-red-500/15"
 >
-Stop Recording
+STOP
 </button>
 )}
 
 <button
-onClick={() => void manualCapture()}
+onClick={() => void manualMark()}
 disabled={!enabled}
 className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
 >
-Capture Frame
+MARK
 </button>
 </div>
 </div>
@@ -1444,7 +1360,7 @@ Session
 <aside className="flex flex-col gap-4">
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
 <div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Live Read
+Axis Read
 </div>
 
 <div className="mt-4 rounded-2xl border border-white/10 bg-black/40 p-4">
@@ -1452,20 +1368,24 @@ Live Read
 Axis Ready
 </div>
 <div className="mt-2 text-5xl font-semibold">{axisReady}</div>
-<div className="mt-2 text-sm text-white/55">
-{axisState === "LOCKED"
-? "Stable enough to release force."
-: axisState === "READY"
-? "Ready to release force."
-: axisState === "PARTIAL"
-? "Partial read. Show base for full certainty."
-: axisState === "NOT READY"
-? "Restack before force."
-: guideText}
-</div>
+<div className="mt-2 text-sm text-white/55">{guideText}</div>
 </div>
 
 <div className="mt-4 grid grid-cols-2 gap-3">
+<div className="rounded-2xl border border-white/10 bg-black/40 p-3">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+Axis Core
+</div>
+<div className="mt-2 text-2xl font-semibold">{axisCore}</div>
+</div>
+
+<div className="rounded-2xl border border-white/10 bg-black/40 p-3">
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+Confidence
+</div>
+<div className="mt-2 text-2xl font-semibold">{confidenceScore}</div>
+</div>
+
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Alignment
@@ -1475,19 +1395,13 @@ Alignment
 
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Base
+Stability
 </div>
-<div className="mt-2 text-2xl font-semibold">{baseScore}</div>
+<div className="mt-2 text-2xl font-semibold">{stabilityScore}</div>
 </div>
-
-<div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Center
-</div>
-<div className="mt-2 text-2xl font-semibold">{centerScore}</div>
 </div>
 
-<div className="rounded-2xl border border-white/10 bg-black/40 p-3">
+<div className="mt-3 rounded-2xl border border-white/10 bg-black/40 p-3">
 <div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
 Motion
 </div>
@@ -1495,76 +1409,52 @@ Motion
 </div>
 </div>
 
-<div className="mt-3 rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Confidence
-</div>
-<div className="mt-2 text-2xl font-semibold">{confidenceScore}</div>
-</div>
-
-<div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
-<div
-className="h-full rounded-full bg-white transition-all duration-300"
-style={{ width: `${clamp(axisReady, 0, 100)}%` }}
-/>
-</div>
-
-<div className="mt-3 text-sm text-white/55">{guideText}</div>
-</div>
-
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between">
 <div>
 <div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Best / Auto Frames
+Review
 </div>
 <div className="mt-1 text-sm text-white/55">
-Auto captures follow state changes and best locked moments.
+TRUE ◎ moments and marked frames.
 </div>
 </div>
-
-{captures.length > 0 ? (
-<button
-onClick={() => void saveAllCaptures()}
-className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10"
->
-Save All
-</button>
-) : null}
 </div>
 
 {topCapture ? (
 <div className="mt-4 overflow-hidden rounded-2xl border border-white/10 bg-black/40">
 <img
 src={topCapture.dataUrl}
-alt={topCapture.label}
+alt="Axis capture"
 className="aspect-[9/16] w-full object-cover"
 />
 <div className="flex items-center justify-between gap-3 p-3">
 <div>
-<div className="text-sm font-semibold">{topCapture.label}</div>
+<div className="text-sm font-semibold">
+{topCapture.isTrue ? "TRUE ◎" : "MARK"}
+</div>
 <div className="text-xs text-white/50">
-{topCapture.state} • {Math.round(topCapture.score)}
+READY {Math.round(topCapture.axisReady)} • CORE {Math.round(topCapture.axisCore)}
 </div>
 </div>
 <button
 onClick={() => void saveCapture(topCapture)}
 className="rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/10"
 >
-Save
+SAVE
 </button>
 </div>
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Start the instrument and it will begin saving proof frames.
+LOCK the instrument and begin testing Beta.
 </div>
 )}
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
 <div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Recorded Instrument Feed
+Recorded Feed
 </div>
 
 {recordedVideoUrl ? (
@@ -1578,12 +1468,12 @@ className="w-full rounded-2xl border border-white/10"
 onClick={() => void saveVideo()}
 className="mt-3 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
 >
-Save Video
+SAVE VIDEO
 </button>
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record saves the full instrument feed with overlays, calibrated read, and axis line.
+Record the instrument feed for Beta review.
 </div>
 )}
 </div>
