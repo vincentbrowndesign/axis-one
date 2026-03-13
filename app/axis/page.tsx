@@ -5,7 +5,7 @@ import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 
-type AxisState = "WAIT" | "LOCK" | "SHIFT" | "DROP" | "LOST";
+type AxisState = "WAIT" | "LOCK" | "SHIFT" | "DROP" | "PARTIAL" | "LOST";
 type FacingMode = "user" | "environment";
 
 type Point = {
@@ -28,6 +28,7 @@ WAIT: "rgba(255,255,255,0.08)",
 LOCK: "rgba(80,255,150,0.16)",
 SHIFT: "rgba(255,190,80,0.16)",
 DROP: "rgba(255,90,90,0.18)",
+PARTIAL: "rgba(120,180,255,0.14)",
 LOST: "rgba(160,160,160,0.12)",
 };
 
@@ -36,11 +37,13 @@ WAIT: "WAIT",
 LOCK: "LOCK",
 SHIFT: "SHIFT",
 DROP: "DROP",
+PARTIAL: "PARTIAL",
 LOST: "LOST",
 };
 
-const MIN_KEYPOINT_SCORE = 0.3;
-const STATE_HOLD_MS = 450;
+const MIN_TORSO_SCORE = 0.22;
+const MIN_BASE_SCORE = 0.18;
+const STATE_HOLD_MS = 400;
 const AUTO_CAPTURE_COOLDOWN_MS = 1200;
 const BEST_CAPTURE_COOLDOWN_MS = 1500;
 
@@ -74,12 +77,7 @@ const lineAngle = normalized > 90 ? normalized - 180 : normalized;
 return Math.abs(lineAngle);
 }
 
-function createFileName(
-kind: string,
-state: AxisState,
-timestamp: number,
-ext: string,
-) {
+function createFileName(kind: string, state: AxisState, timestamp: number, ext: string) {
 const d = new Date(timestamp);
 const pad = (n: number) => String(n).padStart(2, "0");
 const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
@@ -106,7 +104,6 @@ const a = document.createElement("a");
 a.href = url;
 a.download = filename;
 a.click();
-
 setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
@@ -125,6 +122,19 @@ return;
 }
 
 downloadBlob(blob, filename);
+}
+
+async function initTfBackend() {
+await tf.ready();
+const current = tf.getBackend();
+if (current === "webgl") return;
+
+const ok = await tf.setBackend("webgl");
+if (!ok) {
+throw new Error("TensorFlow WebGL backend could not be initialized.");
+}
+
+await tf.ready();
 }
 
 function getCandidateState(score: number, current: AxisState): AxisState {
@@ -152,20 +162,6 @@ if (score >= 84) return "LOCK";
 if (score >= 58) return "SHIFT";
 if (score >= 20) return "DROP";
 return "LOST";
-}
-
-async function initTfBackend() {
-await tf.ready();
-
-const current = tf.getBackend();
-if (current === "webgl") return;
-
-const webglOk = await tf.setBackend("webgl");
-if (!webglOk) {
-throw new Error("TensorFlow WebGL backend could not be initialized.");
-}
-
-await tf.ready();
 }
 
 export default function AxisInstrumentPage() {
@@ -197,6 +193,7 @@ const [axisState, setAxisState] = useState<AxisState>("WAIT");
 const [stability, setStability] = useState(0);
 const [baseRatio, setBaseRatio] = useState(0);
 const [centerOffset, setCenterOffset] = useState(0);
+const [guideText, setGuideText] = useState("ALIGN TO CENTER AXIS // HOLD GREEN // RECORD PROOF");
 
 const [facingMode, setFacingMode] = useState<FacingMode>("environment");
 const [isRecording, setIsRecording] = useState(false);
@@ -224,6 +221,7 @@ setAxisState("WAIT");
 setStability(0);
 setBaseRatio(0);
 setCenterOffset(0);
+setGuideText("ALIGN TO CENTER AXIS // HOLD GREEN // RECORD PROOF");
 setCaptures([]);
 setRecordedVideoUrl("");
 setSessionStartedAt(Date.now());
@@ -254,10 +252,23 @@ exportCanvas.height = height;
 }
 }, [getCanvasSize]);
 
-const drawGrid = useCallback(
-(ctx: CanvasRenderingContext2D, width: number, height: number) => {
+const drawVideoCover = useCallback(
+(ctx: CanvasRenderingContext2D, video: HTMLVideoElement, width: number, height: number) => {
+const vw = video.videoWidth || width;
+const vh = video.videoHeight || height;
+const scale = Math.max(width / vw, height / vh);
+const dw = vw * scale;
+const dh = vh * scale;
+const dx = (width - dw) / 2;
+const dy = (height - dh) / 2;
+ctx.drawImage(video, dx, dy, dw, dh);
+},
+[],
+);
+
+const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
 ctx.save();
-ctx.strokeStyle = "rgba(255,255,255,0.06)";
+ctx.strokeStyle = "rgba(255,255,255,0.055)";
 ctx.lineWidth = 1;
 
 const cols = 6;
@@ -280,9 +291,7 @@ ctx.stroke();
 }
 
 ctx.restore();
-},
-[],
-);
+}, []);
 
 const drawAmbientGlow = useCallback(
 (ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState) => {
@@ -326,6 +335,7 @@ let color = "rgba(255,255,255,0.38)";
 if (state === "LOCK") color = "rgba(115,255,170,0.9)";
 if (state === "SHIFT") color = "rgba(255,200,90,0.92)";
 if (state === "DROP") color = "rgba(255,110,110,0.95)";
+if (state === "PARTIAL") color = "rgba(130,190,255,0.92)";
 if (state === "LOST") color = "rgba(180,180,180,0.5)";
 
 ctx.strokeStyle = color;
@@ -360,27 +370,26 @@ state: AxisState,
 score: number,
 base: number,
 center: number,
+guide: string,
 ) => {
 ctx.save();
 
 ctx.fillStyle = "rgba(0,0,0,0.35)";
 ctx.fillRect(24, 24, width - 48, 92);
 
-ctx.font =
-'600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.font = '600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(255,255,255,0.72)";
 ctx.fillText("AXIS", 40, 52);
 
-ctx.font =
-'700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.font = '700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 if (state === "LOCK") ctx.fillStyle = "rgba(115,255,170,1)";
 else if (state === "SHIFT") ctx.fillStyle = "rgba(255,200,90,1)";
 else if (state === "DROP") ctx.fillStyle = "rgba(255,110,110,1)";
+else if (state === "PARTIAL") ctx.fillStyle = "rgba(130,190,255,1)";
 else ctx.fillStyle = "rgba(255,255,255,0.95)";
 ctx.fillText(STATE_TEXT[state], 40, 92);
 
-ctx.font =
-'500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.font = '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
 ctx.fillText(`STABILITY ${Math.round(score)}`, width - 190, 50);
 ctx.fillText(`BASE ${base.toFixed(2)}`, width - 190, 72);
@@ -391,10 +400,9 @@ ctx.restore();
 ctx.save();
 ctx.fillStyle = "rgba(0,0,0,0.3)";
 ctx.fillRect(24, height - 68, width - 48, 36);
-ctx.font =
-'500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.font = '500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
-ctx.fillText("ALIGN TO CENTER AXIS // HOLD GREEN // RECORD PROOF", 40, height - 45);
+ctx.fillText(guide, 40, height - 45);
 ctx.restore();
 },
 [],
@@ -404,36 +412,28 @@ const drawBodyIndicators = useCallback(
 (
 ctx: CanvasRenderingContext2D,
 width: number,
-_height: number,
 keypoints: Record<string, Point>,
 state: AxisState,
+hasBase: boolean,
 ) => {
 const leftShoulder = keypoints.left_shoulder;
 const rightShoulder = keypoints.right_shoulder;
 const leftHip = keypoints.left_hip;
 const rightHip = keypoints.right_hip;
+
+if (!leftShoulder || !rightShoulder || !leftHip || !rightHip) return;
+
 const leftAnkle = keypoints.left_ankle;
 const rightAnkle = keypoints.right_ankle;
 
-if (
-!leftShoulder ||
-!rightShoulder ||
-!leftHip ||
-!rightHip ||
-!leftAnkle ||
-!rightAnkle
-) {
-return;
-}
-
 const shoulderMid = midpoint(leftShoulder, rightShoulder);
 const hipMid = midpoint(leftHip, rightHip);
-const ankleMid = midpoint(leftAnkle, rightAnkle);
 
 let lineColor = "rgba(255,255,255,0.92)";
 if (state === "LOCK") lineColor = "rgba(115,255,170,0.98)";
 if (state === "SHIFT") lineColor = "rgba(255,200,90,0.98)";
 if (state === "DROP") lineColor = "rgba(255,110,110,0.98)";
+if (state === "PARTIAL") lineColor = "rgba(130,190,255,0.98)";
 if (state === "LOST") lineColor = "rgba(200,200,200,0.75)";
 
 ctx.save();
@@ -451,18 +451,21 @@ ctx.moveTo(leftHip.x, leftHip.y);
 ctx.lineTo(rightHip.x, rightHip.y);
 ctx.stroke();
 
-ctx.strokeStyle = "rgba(255,255,255,0.3)";
-ctx.lineWidth = 2;
-ctx.beginPath();
-ctx.moveTo(leftAnkle.x, leftAnkle.y);
-ctx.lineTo(rightAnkle.x, rightAnkle.y);
-ctx.stroke();
-
 ctx.strokeStyle = lineColor;
 ctx.lineWidth = 3;
 ctx.beginPath();
 ctx.moveTo(shoulderMid.x, shoulderMid.y);
 ctx.lineTo(hipMid.x, hipMid.y);
+ctx.stroke();
+
+if (hasBase && leftAnkle && rightAnkle) {
+const ankleMid = midpoint(leftAnkle, rightAnkle);
+
+ctx.strokeStyle = "rgba(255,255,255,0.3)";
+ctx.lineWidth = 2;
+ctx.beginPath();
+ctx.moveTo(leftAnkle.x, leftAnkle.y);
+ctx.lineTo(rightAnkle.x, rightAnkle.y);
 ctx.stroke();
 
 ctx.strokeStyle = "rgba(255,255,255,0.35)";
@@ -471,21 +474,18 @@ ctx.moveTo(hipMid.x, hipMid.y);
 ctx.lineTo(ankleMid.x, ankleMid.y);
 ctx.stroke();
 
-const points = [
-leftShoulder,
-rightShoulder,
-leftHip,
-rightHip,
-leftAnkle,
-rightAnkle,
-shoulderMid,
-hipMid,
-];
-
-points.forEach((p, idx) => {
-ctx.fillStyle = idx >= 6 ? lineColor : "rgba(255,255,255,0.75)";
+[leftAnkle, rightAnkle].forEach((p) => {
+ctx.fillStyle = "rgba(255,255,255,0.75)";
 ctx.beginPath();
-ctx.arc(p.x, p.y, idx >= 6 ? 5 : 4, 0, Math.PI * 2);
+ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+ctx.fill();
+});
+}
+
+[leftShoulder, rightShoulder, leftHip, rightHip, shoulderMid, hipMid].forEach((p, idx) => {
+ctx.fillStyle = idx >= 4 ? lineColor : "rgba(255,255,255,0.75)";
+ctx.beginPath();
+ctx.arc(p.x, p.y, idx >= 4 ? 5 : 4, 0, Math.PI * 2);
 ctx.fill();
 });
 
@@ -518,6 +518,8 @@ state: AxisState,
 score: number,
 base: number,
 center: number,
+guide: string,
+hasBase: boolean,
 ) => {
 const video = videoRef.current;
 const overlay = overlayCanvasRef.current;
@@ -533,23 +535,22 @@ const { width, height } = overlay;
 
 [overlayCtx, exportCtx].forEach((ctx) => {
 ctx.clearRect(0, 0, width, height);
-ctx.drawImage(video, 0, 0, width, height);
+drawVideoCover(ctx, video, width, height);
 drawAmbientGlow(ctx, width, height, state);
 drawGrid(ctx, width, height);
 drawAxisLine(ctx, width, height, state);
 
 if (keypoints) {
-drawBodyIndicators(ctx, width, height, keypoints, state);
+drawBodyIndicators(ctx, width, keypoints, state, hasBase);
 }
 
-drawLabel(ctx, width, height, state, score, base, center);
+drawLabel(ctx, width, height, state, score, base, center, guide);
 });
 },
-[drawAmbientGlow, drawAxisLine, drawBodyIndicators, drawGrid, drawLabel],
+[drawAmbientGlow, drawAxisLine, drawBodyIndicators, drawGrid, drawLabel, drawVideoCover],
 );
 
-const addCaptureFromExportCanvas = useCallback(
-async (label: string, state: AxisState, score: number) => {
+const addCaptureFromExportCanvas = useCallback(async (label: string, state: AxisState, score: number) => {
 const canvas = exportCanvasRef.current;
 if (!canvas) return;
 
@@ -567,9 +568,7 @@ dataUrl,
 },
 ...prev,
 ]);
-},
-[],
-);
+}, []);
 
 const analyzePose = useCallback(
 async (now: number) => {
@@ -577,7 +576,7 @@ const video = videoRef.current;
 const detector = detectorRef.current;
 
 if (!video || !detector || video.readyState < 2) {
-renderInstrument(null, "WAIT", smoothedScoreRef.current, baseRatio, centerOffset);
+renderInstrument(null, "WAIT", smoothedScoreRef.current, 0, 0, guideText, false);
 return;
 }
 
@@ -591,7 +590,7 @@ const kpMap: Record<string, Point> = {};
 
 if (pose?.keypoints?.length) {
 for (const kp of pose.keypoints) {
-const name = kp.name || "";
+const name = (kp.name ?? (kp as { part?: string }).part ?? "") as string;
 if (!name) continue;
 kpMap[name] = {
 x: kp.x,
@@ -601,31 +600,25 @@ score: kp.score ?? 0,
 }
 }
 
-const required = [
-"left_shoulder",
-"right_shoulder",
-"left_hip",
-"right_hip",
-"left_ankle",
-"right_ankle",
-];
+const torsoKeys = ["left_shoulder", "right_shoulder", "left_hip", "right_hip"];
+const torsoVisible = torsoKeys.every((k) => kpMap[k] && kpMap[k].score >= MIN_TORSO_SCORE);
 
-const hasAll = required.every(
-(k) => kpMap[k] && kpMap[k].score >= MIN_KEYPOINT_SCORE,
-);
+const hasLeftAnkle = !!kpMap.left_ankle && kpMap.left_ankle.score >= MIN_BASE_SCORE;
+const hasRightAnkle = !!kpMap.right_ankle && kpMap.right_ankle.score >= MIN_BASE_SCORE;
+const hasBase = hasLeftAnkle && hasRightAnkle;
 
-if (!hasAll) {
+if (!torsoVisible) {
 const candidate: AxisState = "LOST";
+const guide = "STEP BACK // CENTER TORSO INSIDE FIELD";
+
+setGuideText(guide);
 
 if (candidateStateRef.current !== candidate) {
 candidateStateRef.current = candidate;
 candidateSinceRef.current = now;
 }
 
-if (
-currentStateRef.current !== candidate &&
-now - candidateSinceRef.current >= STATE_HOLD_MS
-) {
+if (currentStateRef.current !== candidate && now - candidateSinceRef.current >= STATE_HOLD_MS) {
 currentStateRef.current = candidate;
 lastStateChangeAtRef.current = now;
 setAxisState(candidate);
@@ -635,7 +628,7 @@ smoothedScoreRef.current = smoothedScoreRef.current * 0.85;
 setStability(Math.round(smoothedScoreRef.current));
 setBaseRatio(0);
 setCenterOffset(0);
-renderInstrument(null, currentStateRef.current, smoothedScoreRef.current, 0, 0);
+renderInstrument(null, currentStateRef.current, smoothedScoreRef.current, 0, 0, guide, false);
 return;
 }
 
@@ -643,41 +636,52 @@ const leftShoulder = kpMap.left_shoulder;
 const rightShoulder = kpMap.right_shoulder;
 const leftHip = kpMap.left_hip;
 const rightHip = kpMap.right_hip;
-const leftAnkle = kpMap.left_ankle;
-const rightAnkle = kpMap.right_ankle;
 
 const shoulderMid = midpoint(leftShoulder, rightShoulder);
 const hipMid = midpoint(leftHip, rightHip);
-const footMid = midpoint(leftAnkle, rightAnkle);
 
 const shoulderAngle = normalizeAngleAbs(angleDeg(leftShoulder, rightShoulder));
 const hipAngle = normalizeAngleAbs(angleDeg(leftHip, rightHip));
-
-const shoulderWidth = distance(leftShoulder, rightShoulder);
+const shoulderWidth = Math.max(distance(leftShoulder, rightShoulder), 1);
 const hipWidth = Math.max(distance(leftHip, rightHip), 1);
-const stanceWidth = distance(leftAnkle, rightAnkle);
 
 const axisDeviation = Math.abs(shoulderMid.x - hipMid.x) / shoulderWidth;
-const centerDrift = Math.abs(hipMid.x - footMid.x) / Math.max(stanceWidth, 1);
-const base = stanceWidth / hipWidth;
+const centerToAxis = Math.abs(hipMid.x - video.videoWidth / 2) / Math.max(video.videoWidth * 0.25, 1);
+
+let base = 0;
+let centerDrift = centerToAxis;
+let guide = "ALIGN TO CENTER AXIS // HOLD GREEN // RECORD PROOF";
+
+if (hasBase) {
+const leftAnkle = kpMap.left_ankle;
+const rightAnkle = kpMap.right_ankle;
+const footMid = midpoint(leftAnkle, rightAnkle);
+const stanceWidth = Math.max(distance(leftAnkle, rightAnkle), 1);
+base = stanceWidth / hipWidth;
+centerDrift = Math.abs(hipMid.x - footMid.x) / stanceWidth;
+} else {
+guide = "SHOW FEET FOR FULL BASE READ";
+}
 
 const anglePenalty = clamp((shoulderAngle + hipAngle) / 36, 0, 1);
 const axisPenalty = clamp(axisDeviation / 0.3, 0, 1);
 const centerPenalty = clamp(centerDrift / 0.3, 0, 1);
 
 const baseSweetPenalty =
-base < 1.15
+hasBase
+? base < 1.15
 ? clamp((1.15 - base) / 0.55, 0, 1)
 : base > 1.95
 ? clamp((base - 1.95) / 0.8, 0, 1)
-: 0;
+: 0
+: 0.15;
 
 let rawScore =
 100 -
-anglePenalty * 28 -
-axisPenalty * 24 -
-centerPenalty * 30 -
-baseSweetPenalty * 18;
+anglePenalty * 30 -
+axisPenalty * 28 -
+centerPenalty * 28 -
+baseSweetPenalty * 14;
 
 rawScore = clamp(rawScore, 0, 100);
 
@@ -688,7 +692,13 @@ smoothedScoreRef.current === 0
 : smoothedScoreRef.current * (1 - smoothFactor) + rawScore * smoothFactor;
 
 const score = smoothedScoreRef.current;
-const candidate = getCandidateState(score, currentStateRef.current);
+
+let candidate: AxisState;
+if (!hasBase) {
+candidate = "PARTIAL";
+} else {
+candidate = getCandidateState(score, currentStateRef.current === "PARTIAL" ? "WAIT" : currentStateRef.current);
+}
 
 if (candidate !== candidateStateRef.current) {
 candidateStateRef.current = candidate;
@@ -704,17 +714,13 @@ currentStateRef.current = candidate;
 lastStateChangeAtRef.current = now;
 setAxisState(candidate);
 
-if (
-["LOCK", "SHIFT", "DROP"].includes(candidate) &&
-now - lastAutoCaptureAtRef.current > AUTO_CAPTURE_COOLDOWN_MS
-) {
+if (["LOCK", "SHIFT", "DROP", "PARTIAL"].includes(candidate) && now - lastAutoCaptureAtRef.current > AUTO_CAPTURE_COOLDOWN_MS) {
 lastAutoCaptureAtRef.current = now;
 void addCaptureFromExportCanvas(`Auto ${candidate}`, candidate, score);
 }
 }
 
 const liveState = currentStateRef.current;
-
 if (score > bestScoreThisSessionRef.current) {
 bestScoreThisSessionRef.current = score;
 }
@@ -728,13 +734,13 @@ lastBestCaptureAtRef.current = now;
 void addCaptureFromExportCanvas("Best Moment", liveState, score);
 }
 
+setGuideText(guide);
 setStability(Math.round(score));
 setBaseRatio(Number(base.toFixed(2)));
 setCenterOffset(Number(centerDrift.toFixed(2)));
-
-renderInstrument(kpMap, liveState, score, base, centerDrift);
+renderInstrument(kpMap, liveState, score, base, centerDrift, guide, hasBase);
 },
-[addCaptureFromExportCanvas, baseRatio, centerOffset, facingMode, renderInstrument],
+[addCaptureFromExportCanvas, facingMode, guideText, renderInstrument],
 );
 
 const loop = useCallback(async () => {
@@ -862,10 +868,8 @@ stopCamera();
 
 useEffect(() => {
 if (!enabled) return;
-
 const handleResize = () => syncCanvasSize();
 window.addEventListener("resize", handleResize);
-
 return () => window.removeEventListener("resize", handleResize);
 }, [enabled, syncCanvasSize]);
 
@@ -887,19 +891,14 @@ const exportCanvas = exportCanvasRef.current;
 if (!exportCanvas || isRecording) return;
 
 recordedChunksRef.current = [];
-
 const stream = exportCanvas.captureStream(30);
 let recorder: MediaRecorder;
 
 try {
-recorder = new MediaRecorder(stream, {
-mimeType: "video/webm;codecs=vp9",
-});
+recorder = new MediaRecorder(stream, { mimeType: "video/webm;codecs=vp9" });
 } catch {
 try {
-recorder = new MediaRecorder(stream, {
-mimeType: "video/webm",
-});
+recorder = new MediaRecorder(stream, { mimeType: "video/webm" });
 } catch {
 setError("Recording is not supported on this device/browser.");
 return;
@@ -911,16 +910,12 @@ if (event.data.size > 0) recordedChunksRef.current.push(event.data);
 };
 
 recorder.onstop = () => {
-const blob = new Blob(recordedChunksRef.current, {
-type: "video/webm",
-});
+const blob = new Blob(recordedChunksRef.current, { type: "video/webm" });
 const url = URL.createObjectURL(blob);
-
 setRecordedVideoUrl((prev) => {
 if (prev) URL.revokeObjectURL(prev);
 return url;
 });
-
 setIsRecording(false);
 };
 
@@ -966,15 +961,10 @@ return (
 <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 p-4 md:p-6">
 <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur md:flex-row md:items-center">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Axis Instrument
-</div>
-<div className="mt-1 text-2xl font-semibold tracking-tight">
-Single signal. Live proof.
-</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Axis Instrument</div>
+<div className="mt-1 text-2xl font-semibold tracking-tight">Single signal. Live proof.</div>
 <div className="mt-1 text-sm text-white/55">
-Central axis layout, ambient state lighting, auto best-frame capture,
-smoothed state logic.
+Central axis layout, ambient state lighting, auto best-frame capture, smoothed state logic.
 </div>
 </div>
 
@@ -1043,25 +1033,18 @@ ref={videoRef}
 playsInline
 muted
 autoPlay
-className="absolute inset-0 h-full w-full object-cover opacity-0"
+className="absolute inset-0 h-full w-full object-cover opacity-0 pointer-events-none"
 />
-<canvas
-ref={overlayCanvasRef}
-className="absolute inset-0 h-full w-full object-cover"
-/>
+<canvas ref={overlayCanvasRef} className="absolute inset-0 h-full w-full" />
 <canvas ref={exportCanvasRef} className="hidden" />
 
 <div className="pointer-events-none absolute bottom-4 left-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 backdrop-blur">
-<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
-State
-</div>
+<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">State</div>
 <div className="mt-1 text-lg font-semibold">{axisState}</div>
 </div>
 
 <div className="pointer-events-none absolute bottom-4 right-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-right backdrop-blur">
-<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
-Session
-</div>
+<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">Session</div>
 <div className="mt-1 text-lg font-semibold">
 {String(Math.floor(sessionSeconds / 60)).padStart(2, "0")}:
 {String(sessionSeconds % 60).padStart(2, "0")}
@@ -1072,34 +1055,21 @@ Session
 
 <aside className="flex flex-col gap-4">
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Live Read
-</div>
-
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Live Read</div>
 <div className="mt-4 grid grid-cols-3 gap-3">
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Stability
-</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Stability</div>
 <div className="mt-2 text-2xl font-semibold">{stability}</div>
 </div>
 
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Base
-</div>
-<div className="mt-2 text-2xl font-semibold">
-{baseRatio.toFixed(2)}
-</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Base</div>
+<div className="mt-2 text-2xl font-semibold">{baseRatio.toFixed(2)}</div>
 </div>
 
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
-Center
-</div>
-<div className="mt-2 text-2xl font-semibold">
-{centerOffset.toFixed(2)}
-</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Center</div>
+<div className="mt-2 text-2xl font-semibold">{centerOffset.toFixed(2)}</div>
 </div>
 </div>
 
@@ -1111,16 +1081,14 @@ style={{ width: `${clamp(stability, 0, 100)}%` }}
 </div>
 
 <div className="mt-3 text-sm text-white/55">
-LOCK is the dominant signal. Everything else supports it.
+{guideText}
 </div>
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Best / Auto Frames
-</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Best / Auto Frames</div>
 <div className="mt-1 text-sm text-white/55">
 Auto captures happen on state changes and best LOCK moments.
 </div>
@@ -1138,11 +1106,7 @@ Save All
 
 {topCapture ? (
 <div className="mt-4 overflow-hidden rounded-2xl border border-white/10 bg-black/40">
-<img
-src={topCapture.dataUrl}
-alt={topCapture.label}
-className="aspect-[9/16] w-full object-cover"
-/>
+<img src={topCapture.dataUrl} alt={topCapture.label} className="aspect-[9/16] w-full object-cover" />
 <div className="flex items-center justify-between gap-3 p-3">
 <div>
 <div className="text-sm font-semibold">{topCapture.label}</div>
@@ -1166,17 +1130,11 @@ Start the instrument and it will begin saving proof frames.
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Recorded Instrument Feed
-</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Recorded Instrument Feed</div>
 
 {recordedVideoUrl ? (
 <div className="mt-4">
-<video
-src={recordedVideoUrl}
-controls
-className="w-full rounded-2xl border border-white/10"
-/>
+<video src={recordedVideoUrl} controls className="w-full rounded-2xl border border-white/10" />
 <button
 onClick={() => void saveVideo()}
 className="mt-3 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
@@ -1186,8 +1144,7 @@ Save Video
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record saves the full instrument feed with overlays, state lighting,
-and axis line.
+Record saves the full instrument feed with overlays, state lighting, and axis line.
 </div>
 )}
 </div>
