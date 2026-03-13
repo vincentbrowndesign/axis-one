@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as poseDetection from "@tensorflow-models/pose-detection";
+import "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
+import * as poseDetection from "@tensorflow-models/pose-detection";
 
 type AxisState = "WAIT" | "LOCK" | "SHIFT" | "DROP" | "LOST";
 type FacingMode = "user" | "environment";
@@ -73,7 +74,12 @@ const lineAngle = normalized > 90 ? normalized - 180 : normalized;
 return Math.abs(lineAngle);
 }
 
-function createFileName(kind: string, state: AxisState, timestamp: number, ext: string) {
+function createFileName(
+kind: string,
+state: AxisState,
+timestamp: number,
+ext: string,
+) {
 const d = new Date(timestamp);
 const pad = (n: number) => String(n).padStart(2, "0");
 const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
@@ -86,7 +92,11 @@ const mime = parts[0].match(/:(.*?);/)?.[1] || "image/jpeg";
 const binary = atob(parts[1]);
 const len = binary.length;
 const bytes = new Uint8Array(len);
-for (let i = 0; i < len; i += 1) bytes[i] = binary.charCodeAt(i);
+
+for (let i = 0; i < len; i += 1) {
+bytes[i] = binary.charCodeAt(i);
+}
+
 return new Blob([bytes], { type: mime });
 }
 
@@ -96,6 +106,7 @@ const a = document.createElement("a");
 a.href = url;
 a.download = filename;
 a.click();
+
 setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
@@ -175,7 +186,7 @@ const [centerOffset, setCenterOffset] = useState(0);
 
 const [facingMode, setFacingMode] = useState<FacingMode>("environment");
 const [isRecording, setIsRecording] = useState(false);
-const [recordedVideoUrl, setRecordedVideoUrl] = useState<string>("");
+const [recordedVideoUrl, setRecordedVideoUrl] = useState("");
 
 const [captures, setCaptures] = useState<CaptureItem[]>([]);
 const [sessionStartedAt, setSessionStartedAt] = useState<number | null>(null);
@@ -229,7 +240,8 @@ exportCanvas.height = height;
 }
 }, [getCanvasSize]);
 
-const drawGrid = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
+const drawGrid = useCallback(
+(ctx: CanvasRenderingContext2D, width: number, height: number) => {
 ctx.save();
 ctx.strokeStyle = "rgba(255,255,255,0.06)";
 ctx.lineWidth = 1;
@@ -254,7 +266,9 @@ ctx.stroke();
 }
 
 ctx.restore();
-}, []);
+},
+[],
+);
 
 const drawAmbientGlow = useCallback(
 (ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState) => {
@@ -291,12 +305,7 @@ ctx.restore();
 );
 
 const drawAxisLine = useCallback(
-(
-ctx: CanvasRenderingContext2D,
-width: number,
-height: number,
-state: AxisState,
-) => {
+(ctx: CanvasRenderingContext2D, width: number, height: number, state: AxisState) => {
 ctx.save();
 
 let color = "rgba(255,255,255,0.38)";
@@ -343,18 +352,21 @@ ctx.save();
 ctx.fillStyle = "rgba(0,0,0,0.35)";
 ctx.fillRect(24, 24, width - 48, 92);
 
-ctx.font = '600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.font =
+'600 18px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(255,255,255,0.72)";
 ctx.fillText("AXIS", 40, 52);
 
-ctx.font = '700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
+ctx.font =
+'700 34px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 if (state === "LOCK") ctx.fillStyle = "rgba(115,255,170,1)";
 else if (state === "SHIFT") ctx.fillStyle = "rgba(255,200,90,1)";
 else if (state === "DROP") ctx.fillStyle = "rgba(255,110,110,1)";
 else ctx.fillStyle = "rgba(255,255,255,0.95)";
 ctx.fillText(STATE_TEXT[state], 40, 92);
 
-ctx.font = '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.font =
+'500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
 ctx.fillText(`STABILITY ${Math.round(score)}`, width - 190, 50);
 ctx.fillText(`BASE ${base.toFixed(2)}`, width - 190, 72);
@@ -365,7 +377,8 @@ ctx.restore();
 ctx.save();
 ctx.fillStyle = "rgba(0,0,0,0.3)";
 ctx.fillRect(24, height - 68, width - 48, 36);
-ctx.font = '500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
+ctx.font =
+'500 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.65)";
 ctx.fillText("ALIGN TO CENTER AXIS // HOLD GREEN // RECORD PROOF", 40, height - 45);
 ctx.restore();
@@ -377,7 +390,7 @@ const drawBodyIndicators = useCallback(
 (
 ctx: CanvasRenderingContext2D,
 width: number,
-height: number,
+_height: number,
 keypoints: Record<string, Point>,
 state: AxisState,
 ) => {
@@ -444,7 +457,17 @@ ctx.moveTo(hipMid.x, hipMid.y);
 ctx.lineTo(ankleMid.x, ankleMid.y);
 ctx.stroke();
 
-const points = [leftShoulder, rightShoulder, leftHip, rightHip, leftAnkle, rightAnkle, shoulderMid, hipMid];
+const points = [
+leftShoulder,
+rightShoulder,
+leftHip,
+rightHip,
+leftAnkle,
+rightAnkle,
+shoulderMid,
+hipMid,
+];
+
 points.forEach((p, idx) => {
 ctx.fillStyle = idx >= 6 ? lineColor : "rgba(255,255,255,0.75)";
 ctx.beginPath();
@@ -573,10 +596,13 @@ const required = [
 "right_ankle",
 ];
 
-const hasAll = required.every((k) => kpMap[k] && kpMap[k].score >= MIN_KEYPOINT_SCORE);
+const hasAll = required.every(
+(k) => kpMap[k] && kpMap[k].score >= MIN_KEYPOINT_SCORE,
+);
 
 if (!hasAll) {
-const candidate = "LOST";
+const candidate: AxisState = "LOST";
+
 if (candidateStateRef.current !== candidate) {
 candidateStateRef.current = candidate;
 candidateSinceRef.current = now;
@@ -674,11 +700,14 @@ void addCaptureFromExportCanvas(`Auto ${candidate}`, candidate, score);
 }
 
 const liveState = currentStateRef.current;
-bestScoreThisSessionRef.current = Math.max(bestScoreThisSessionRef.current, score);
+
+if (score > bestScoreThisSessionRef.current) {
+bestScoreThisSessionRef.current = score;
+}
 
 if (
 liveState === "LOCK" &&
-score > bestScoreThisSessionRef.current - 0.8 &&
+score >= bestScoreThisSessionRef.current - 0.8 &&
 now - lastBestCaptureAtRef.current > BEST_CAPTURE_COOLDOWN_MS
 ) {
 lastBestCaptureAtRef.current = now;
@@ -700,8 +729,8 @@ const now = performance.now();
 try {
 await analyzePose(now);
 } catch (err) {
-console.error(err);
-setError("Pose tracking hit an error.");
+console.error("analyzePose error:", err);
+setError(`Pose analysis failed: ${String(err)}`);
 }
 
 rafRef.current = requestAnimationFrame(loop);
@@ -739,6 +768,10 @@ setError("");
 stopCamera();
 resetSession();
 
+if (!navigator.mediaDevices?.getUserMedia) {
+throw new Error("This browser does not support camera access.");
+}
+
 const stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
 video: {
@@ -752,20 +785,43 @@ frameRate: { ideal: 30, max: 30 },
 streamRef.current = stream;
 
 const video = videoRef.current;
-if (!video) return;
+if (!video) {
+throw new Error("Video element was not found.");
+}
 
 video.srcObject = stream;
-await video.play();
 
+await new Promise<void>((resolve, reject) => {
+const onLoaded = () => resolve();
+const onError = () => reject(new Error("Video metadata failed to load."));
+video.onloadedmetadata = onLoaded;
+video.onerror = onError;
+});
+
+await video.play();
 syncCanvasSize();
 
-const detector = await poseDetection.createDetector(
+let detector: poseDetection.PoseDetector;
+
+try {
+detector = await poseDetection.createDetector(
 poseDetection.SupportedModels.MoveNet,
 {
 modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
 enableSmoothing: true,
 },
 );
+} catch (movenetError) {
+console.warn("MoveNet failed, trying BlazePose fallback:", movenetError);
+
+detector = await poseDetection.createDetector(
+poseDetection.SupportedModels.BlazePose,
+{
+runtime: "tfjs",
+modelType: "lite",
+} as poseDetection.BlazePoseTfjsModelConfig,
+);
+}
 
 detectorRef.current = detector;
 setEnabled(true);
@@ -774,10 +830,15 @@ setReady(true);
 stopLoop();
 rafRef.current = requestAnimationFrame(loop);
 } catch (err) {
-console.error(err);
-setError("Camera or pose model failed to start.");
+console.error("startCamera error:", err);
+setError(`Camera or pose model failed to start: ${String(err)}`);
 setEnabled(false);
 setReady(false);
+
+if (streamRef.current) {
+streamRef.current.getTracks().forEach((track) => track.stop());
+streamRef.current = null;
+}
 }
 }, [facingMode, loop, resetSession, stopCamera, stopLoop, syncCanvasSize]);
 
@@ -789,12 +850,14 @@ stopCamera();
 
 useEffect(() => {
 if (!enabled) return;
+
 const handleResize = () => syncCanvasSize();
 window.addEventListener("resize", handleResize);
+
 return () => window.removeEventListener("resize", handleResize);
 }, [enabled, syncCanvasSize]);
 
-const flipCamera = useCallback(async () => {
+const flipCamera = useCallback(() => {
 setFacingMode((prev) => (prev === "user" ? "environment" : "user"));
 }, []);
 
@@ -814,9 +877,22 @@ if (!exportCanvas || isRecording) return;
 recordedChunksRef.current = [];
 
 const stream = exportCanvas.captureStream(30);
-const recorder = new MediaRecorder(stream, {
+let recorder: MediaRecorder;
+
+try {
+recorder = new MediaRecorder(stream, {
 mimeType: "video/webm;codecs=vp9",
 });
+} catch {
+try {
+recorder = new MediaRecorder(stream, {
+mimeType: "video/webm",
+});
+} catch {
+setError("Recording is not supported on this device/browser.");
+return;
+}
+}
 
 recorder.ondataavailable = (event) => {
 if (event.data.size > 0) recordedChunksRef.current.push(event.data);
@@ -827,10 +903,12 @@ const blob = new Blob(recordedChunksRef.current, {
 type: "video/webm",
 });
 const url = URL.createObjectURL(blob);
+
 setRecordedVideoUrl((prev) => {
 if (prev) URL.revokeObjectURL(prev);
 return url;
 });
+
 setIsRecording(false);
 };
 
@@ -876,10 +954,15 @@ return (
 <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-4 p-4 md:p-6">
 <div className="flex flex-col justify-between gap-4 rounded-3xl border border-white/10 bg-white/[0.03] p-4 backdrop-blur md:flex-row md:items-center">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Axis Instrument</div>
-<div className="mt-1 text-2xl font-semibold tracking-tight">Single signal. Live proof.</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Axis Instrument
+</div>
+<div className="mt-1 text-2xl font-semibold tracking-tight">
+Single signal. Live proof.
+</div>
 <div className="mt-1 text-sm text-white/55">
-Central axis layout, ambient state lighting, auto best-frame capture, smoothed state logic.
+Central axis layout, ambient state lighting, auto best-frame capture,
+smoothed state logic.
 </div>
 </div>
 
@@ -957,12 +1040,16 @@ className="absolute inset-0 h-full w-full object-cover"
 <canvas ref={exportCanvasRef} className="hidden" />
 
 <div className="pointer-events-none absolute bottom-4 left-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 backdrop-blur">
-<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">State</div>
+<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
+State
+</div>
 <div className="mt-1 text-lg font-semibold">{axisState}</div>
 </div>
 
-<div className="pointer-events-none absolute bottom-4 right-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 backdrop-blur text-right">
-<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">Session</div>
+<div className="pointer-events-none absolute bottom-4 right-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-right backdrop-blur">
+<div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
+Session
+</div>
 <div className="mt-1 text-lg font-semibold">
 {String(Math.floor(sessionSeconds / 60)).padStart(2, "0")}:
 {String(sessionSeconds % 60).padStart(2, "0")}
@@ -973,19 +1060,34 @@ className="absolute inset-0 h-full w-full object-cover"
 
 <aside className="flex flex-col gap-4">
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Live Read</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Live Read
+</div>
+
 <div className="mt-4 grid grid-cols-3 gap-3">
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Stability</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+Stability
+</div>
 <div className="mt-2 text-2xl font-semibold">{stability}</div>
 </div>
+
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Base</div>
-<div className="mt-2 text-2xl font-semibold">{baseRatio.toFixed(2)}</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+Base
 </div>
+<div className="mt-2 text-2xl font-semibold">
+{baseRatio.toFixed(2)}
+</div>
+</div>
+
 <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">Center</div>
-<div className="mt-2 text-2xl font-semibold">{centerOffset.toFixed(2)}</div>
+<div className="text-[10px] uppercase tracking-[0.22em] text-white/45">
+Center
+</div>
+<div className="mt-2 text-2xl font-semibold">
+{centerOffset.toFixed(2)}
+</div>
 </div>
 </div>
 
@@ -1004,7 +1106,9 @@ LOCK is the dominant signal. Everything else supports it.
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Best / Auto Frames</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Best / Auto Frames
+</div>
 <div className="mt-1 text-sm text-white/55">
 Auto captures happen on state changes and best LOCK moments.
 </div>
@@ -1022,7 +1126,11 @@ Save All
 
 {topCapture ? (
 <div className="mt-4 overflow-hidden rounded-2xl border border-white/10 bg-black/40">
-<img src={topCapture.dataUrl} alt={topCapture.label} className="aspect-[9/16] w-full object-cover" />
+<img
+src={topCapture.dataUrl}
+alt={topCapture.label}
+className="aspect-[9/16] w-full object-cover"
+/>
 <div className="flex items-center justify-between gap-3 p-3">
 <div>
 <div className="text-sm font-semibold">{topCapture.label}</div>
@@ -1046,10 +1154,17 @@ Start the instrument and it will begin saving proof frames.
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Recorded Instrument Feed</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Recorded Instrument Feed
+</div>
+
 {recordedVideoUrl ? (
 <div className="mt-4">
-<video src={recordedVideoUrl} controls className="w-full rounded-2xl border border-white/10" />
+<video
+src={recordedVideoUrl}
+controls
+className="w-full rounded-2xl border border-white/10"
+/>
 <button
 onClick={() => void saveVideo()}
 className="mt-3 rounded-xl border border-white/15 bg-white/5 px-3 py-2 text-sm font-semibold text-white transition hover:bg-white/10"
@@ -1059,7 +1174,8 @@ Save Video
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record saves the full instrument feed with overlays, state lighting, and axis line.
+Record saves the full instrument feed with overlays, state lighting,
+and axis line.
 </div>
 )}
 </div>
