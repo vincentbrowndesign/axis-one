@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import "@tensorflow/tfjs-core";
+import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
 import * as poseDetection from "@tensorflow-models/pose-detection";
 
@@ -152,6 +152,20 @@ if (score >= 84) return "LOCK";
 if (score >= 58) return "SHIFT";
 if (score >= 20) return "DROP";
 return "LOST";
+}
+
+async function initTfBackend() {
+await tf.ready();
+
+const current = tf.getBackend();
+if (current === "webgl") return;
+
+const webglOk = await tf.setBackend("webgl");
+if (!webglOk) {
+throw new Error("TensorFlow WebGL backend could not be initialized.");
+}
+
+await tf.ready();
 }
 
 export default function AxisInstrumentPage() {
@@ -772,6 +786,8 @@ if (!navigator.mediaDevices?.getUserMedia) {
 throw new Error("This browser does not support camera access.");
 }
 
+await initTfBackend();
+
 const stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
 video: {
@@ -792,8 +808,18 @@ throw new Error("Video element was not found.");
 video.srcObject = stream;
 
 await new Promise<void>((resolve, reject) => {
-const onLoaded = () => resolve();
-const onError = () => reject(new Error("Video metadata failed to load."));
+const onLoaded = () => {
+video.onloadedmetadata = null;
+video.onerror = null;
+resolve();
+};
+
+const onError = () => {
+video.onloadedmetadata = null;
+video.onerror = null;
+reject(new Error("Video metadata failed to load."));
+};
+
 video.onloadedmetadata = onLoaded;
 video.onerror = onError;
 });
@@ -801,27 +827,13 @@ video.onerror = onError;
 await video.play();
 syncCanvasSize();
 
-let detector: poseDetection.PoseDetector;
-
-try {
-detector = await poseDetection.createDetector(
+const detector = await poseDetection.createDetector(
 poseDetection.SupportedModels.MoveNet,
 {
 modelType: poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
 enableSmoothing: true,
 },
 );
-} catch (movenetError) {
-console.warn("MoveNet failed, trying BlazePose fallback:", movenetError);
-
-detector = await poseDetection.createDetector(
-poseDetection.SupportedModels.BlazePose,
-{
-runtime: "tfjs",
-modelType: "lite",
-} as poseDetection.BlazePoseTfjsModelConfig,
-);
-}
 
 detectorRef.current = detector;
 setEnabled(true);
