@@ -87,8 +87,7 @@ const AXIS_CENTER_SMOOTH = 0.16;
 const AXIS_LOW_CONFIDENCE_SMOOTH = 0.06;
 
 /**
-* HOLD / RELEASE TUNING
-* Looser HOLD entry, still earned RELEASE.
+* Phase thresholds
 */
 const HOLD_READY_MIN = 58;
 const HOLD_QUIET_MOTION_MIN = 58;
@@ -573,9 +572,9 @@ phase === "LOAD"
 ctx.save();
 ctx.strokeStyle =
 phase === "HOLD"
-? "rgba(120,255,180,0.78)"
+? "rgba(120,255,180,0.82)"
 : phase === "RELEASE"
-? "rgba(255,255,255,0.82)"
+? "rgba(255,255,255,0.88)"
 : "rgba(255,210,120,0.72)";
 ctx.lineWidth = 1.5;
 
@@ -596,6 +595,11 @@ ctx.beginPath();
 ctx.moveTo(top.x, top.y);
 ctx.lineTo(bottom.x, bottom.y);
 ctx.stroke();
+
+if (phase === "HOLD") {
+ctx.fillStyle = "rgba(120,255,180,0.14)";
+ctx.fill();
+}
 
 ctx.restore();
 },
@@ -633,7 +637,7 @@ ctx.fillRect(bandX, bandY, bandW, bandH);
 ctx.font =
 '600 11px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 ctx.fillStyle = "rgba(255,255,255,0.48)";
-ctx.fillText("AXIS TRACE", x0, bandY + 14);
+ctx.fillText("PHASE TRACE", x0, bandY + 14);
 
 ctx.strokeStyle = "rgba(255,255,255,0.18)";
 ctx.lineWidth = 2;
@@ -651,6 +655,7 @@ phase === "HOLD"
 
 ctx.strokeStyle = activeColor;
 ctx.lineWidth = 3;
+
 if (phase === "LOAD") {
 ctx.beginPath();
 ctx.moveTo(loadX, lineY);
@@ -708,11 +713,11 @@ ctx.fillRect(24, 24, width - 48, 100);
 const scoreColor =
 mode === "SCAN"
 ? "rgba(235,240,250,0.78)"
-: metrics.axisReady >= LOCK_THRESHOLD
+: metrics.state === "LOCK"
 ? "rgba(100,255,170,1)"
-: metrics.axisReady >= DROP_THRESHOLD
+: metrics.state === "DROP"
 ? "rgba(150,255,190,1)"
-: metrics.axisReady >= SHIFT_THRESHOLD
+: metrics.state === "SHIFT"
 ? "rgba(255,210,100,1)"
 : "rgba(255,140,140,1)";
 
@@ -731,7 +736,7 @@ ctx.fillText(scoreText, 40, 96);
 ctx.font =
 '600 16px ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI"';
 ctx.fillStyle = "rgba(255,255,255,0.86)";
-ctx.fillText(guide === "LOCK" ? "LOCK" : metrics.state, 108, 94);
+ctx.fillText(metrics.state === "FIND SUBJECT" ? "FIND SUBJECT" : metrics.state, 108, 94);
 
 ctx.font =
 '500 14px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
@@ -946,6 +951,7 @@ let axisAngleRad: number | null = null;
 
 if (!presenceDetected) {
 metrics.state = "LOST";
+metrics.phase = "LOAD";
 guide = "FIND SUBJECT";
 
 smoothedAxisAngleRef.current = null;
@@ -972,6 +978,7 @@ return;
 
 if (!readDetected) {
 metrics.state = "FIND SUBJECT";
+metrics.phase = "LOAD";
 guide = "FIND SUBJECT";
 
 smoothedAxisAngleRef.current = null;
@@ -1152,12 +1159,18 @@ smoothedReadyRef.current === 0
 
 const axisReady = clamp(smoothedReadyRef.current, 0, 100);
 
+/**
+* Structural state
+*/
 let state: AxisState = "OFF AXIS";
 if (axisReady >= LOCK_THRESHOLD) state = "LOCK";
 else if (axisReady >= DROP_THRESHOLD) state = "DROP";
 else if (axisReady >= SHIFT_THRESHOLD) state = "SHIFT";
 else state = "OFF AXIS";
 
+/**
+* Event phase
+*/
 const holdCandidate =
 axisReady >= HOLD_READY_MIN &&
 motion >= HOLD_QUIET_MOTION_MIN &&
@@ -1185,7 +1198,8 @@ holdStartedAtRef.current === null ? 0 : now - holdStartedAtRef.current;
 
 const holdConfirmed = holdDuration >= HOLD_MIN_MS;
 
-let phase: TracePhase = holdConfirmed ? "HOLD" : "LOAD";
+let phase: TracePhase = "LOAD";
+if (holdConfirmed) phase = "HOLD";
 
 const releaseSignalCount =
 (centerVelocity > RELEASE_CENTER_VELOCITY_MIN ? 1 : 0) +
@@ -1233,13 +1247,13 @@ isTrue,
 };
 
 guide =
-state === "LOCK"
-? "LOCK"
-: state === "DROP"
-? "DROP"
-: state === "SHIFT"
-? "SHIFT"
-: "OFF AXIS";
+state === "FIND SUBJECT"
+? "FIND SUBJECT"
+: phase === "RELEASE"
+? "RELEASE"
+: phase === "HOLD"
+? "HOLD"
+: "LOAD";
 
 setGuideText(guide);
 setAxisState(state);
@@ -1498,10 +1512,10 @@ return (
 Axis Core v1
 </div>
 <div className="mt-1 text-2xl font-semibold tracking-tight">
-HOLD and RELEASE tuning
+State decoupled from phase
 </div>
 <div className="mt-1 text-sm text-white/55">
-Reachable HOLD. Earned RELEASE. Better standing read.
+Structural state on top. Event phase below.
 </div>
 </div>
 
@@ -1579,17 +1593,14 @@ className="absolute inset-0 h-full w-full object-cover opacity-0 pointer-events-
 <div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
 State
 </div>
-<div className="mt-1 text-lg font-semibold">{guideText}</div>
+<div className="mt-1 text-lg font-semibold">{axisState}</div>
 </div>
 
 <div className="pointer-events-none absolute bottom-4 right-4 rounded-2xl border border-white/10 bg-black/40 px-3 py-2 text-right backdrop-blur">
 <div className="text-[10px] uppercase tracking-[0.25em] text-white/45">
-Session
+Phase
 </div>
-<div className="mt-1 text-lg font-semibold">
-{String(Math.floor(sessionSeconds / 60)).padStart(2, "0")}:
-{String(sessionSeconds % 60).padStart(2, "0")}
-</div>
+<div className="mt-1 text-lg font-semibold">{tracePhase}</div>
 </div>
 </div>
 </section>
@@ -1607,7 +1618,9 @@ Axis Ready
 <div className="mt-2 text-5xl font-semibold">
 {viewMode === "SCAN" || guideText === "LOCK" ? "··" : axisReady}
 </div>
-<div className="mt-2 text-sm text-white/55">{guideText}</div>
+<div className="mt-2 text-sm text-white/55">
+{axisState} · {tracePhase}
+</div>
 </div>
 
 <div className="mt-4 grid grid-cols-2 gap-3">
@@ -1681,7 +1694,7 @@ className="aspect-[9/16] w-full object-cover"
 {topCapture.isTrue ? "TRUE ◎" : "MARK"}
 </div>
 <div className="text-xs text-white/50">
-READY {Math.round(topCapture.axisReady)} • CORE {Math.round(topCapture.axisCore)}
+{topCapture.state} · {topCapture.phase} · READY {Math.round(topCapture.axisReady)}
 </div>
 </div>
 <button
@@ -1694,7 +1707,7 @@ SAVE
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Test quiet standing first. Then test one clean release.
+Watch how structural state and phase separate now.
 </div>
 )}
 </div>
@@ -1720,7 +1733,7 @@ SAVE VIDEO
 </div>
 ) : (
 <div className="mt-4 rounded-2xl border border-dashed border-white/12 bg-black/30 p-6 text-sm text-white/45">
-Record the instrument feed for HOLD/RELEASE review.
+Record the instrument feed and review state/phase combinations.
 </div>
 )}
 </div>
