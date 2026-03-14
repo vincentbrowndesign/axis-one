@@ -1,11 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as posedetection from "@tensorflow-models/pose-detection";
 import "@tensorflow/tfjs-backend-webgl";
 
-type AxisState = "SEARCHING" | "ALIGNED" | "SHIFT" | "DROP" | "LOST";
+type AxisState =
+| "NO_SUBJECT"
+| "LOCKING"
+| "ALIGNED"
+| "SHIFT"
+| "DROP"
+| "LOST";
+
 type CameraFacing = "user" | "environment";
+
+type CameraOption = {
+deviceId: string;
+label: string;
+};
 
 type JointPoint = {
 x: number;
@@ -17,13 +29,16 @@ type PoseMetrics = {
 ready: boolean;
 state: AxisState;
 confidence: number;
+confidenceSignal: number;
 stability: number;
+lockStrength: number;
+detectionStrength: number;
 verticalStack: number;
 torsoLean: number;
 hipOverBase: number;
-kneeFlex: number;
 shoulderLevel: number;
 frameCoverage: number;
+subjectCentered: number;
 signal: number[];
 };
 
@@ -33,47 +48,66 @@ startedAt: number;
 endedAt: number;
 peakState: AxisState;
 avgStability: number;
-peakInstability: number;
-made?: boolean;
+avgDetection: number;
 notes: string;
+made?: boolean;
 };
 
-const KEYPOINT_MIN_SCORE = 0.3;
-const SIGNAL_BUFFER = 120;
-const ANALYSIS_INTERVAL_MS = 70;
+type EngineStatus = "idle" | "loading" | "ready" | "error";
 
+type EngineError = {
+title: string;
+detail: string;
+};
+
+const KEYPOINT_MIN_SCORE = 0.2;
+const SIGNAL_BUFFER = 96;
+const ANALYSIS_INTERVAL_MS = 66;
 const VIDEO_W = 1280;
 const VIDEO_H = 720;
 
-const STATE_ORDER: AxisState[] = ["SEARCHING", "ALIGNED", "SHIFT", "DROP", "LOST"];
+const STATE_COLOR: Record<AxisState, string> = {
+NO_SUBJECT: "#7E7E7E",
+LOCKING: "#7BD7FF",
+ALIGNED: "#46E17D",
+SHIFT: "#FFD54A",
+DROP: "#FF9D42",
+LOST: "#FF5757",
+};
 
 const STATE_LABEL: Record<AxisState, string> = {
-SEARCHING: "SEARCHING",
+NO_SUBJECT: "NO SUBJECT",
+LOCKING: "LOCKING",
 ALIGNED: "ALIGNED",
 SHIFT: "SHIFT",
 DROP: "DROP",
 LOST: "LOST",
 };
 
-const STATE_COLOR: Record<AxisState, string> = {
-SEARCHING: "#8B8B8B",
-ALIGNED: "#33d17a",
-SHIFT: "#ffd84d",
-DROP: "#ff9f40",
-LOST: "#ff4d4f",
+const INITIAL_METRICS: PoseMetrics = {
+ready: false,
+state: "NO_SUBJECT",
+confidence: 0,
+confidenceSignal: 0,
+stability: 10,
+lockStrength: 0,
+detectionStrength: 0,
+verticalStack: 0,
+torsoLean: 1,
+hipOverBase: 1,
+shoulderLevel: 1,
+frameCoverage: 0,
+subjectCentered: 0,
+signal: [],
 };
 
 function clamp(value: number, min: number, max: number): number {
 return Math.min(max, Math.max(min, value));
 }
 
-function lerp(a: number, b: number, t: number): number {
-return a + (b - a) * t;
-}
-
 function mean(values: number[]): number {
 if (!values.length) return 0;
-return values.reduce((sum, v) => sum + v, 0) / values.length;
+return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function smoothstep(value: number, edge0: number, edge1: number): number {
@@ -85,15 +119,12 @@ function nowId(): string {
 return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function getPoint(
-pose: posedetection.Pose,
-name: string,
-): JointPoint | null {
-const point = pose.keypoints.find((kp) => kp.name === name);
-if (!point) return null;
-const score = point.score ?? 0;
+function getPoint(pose: posedetection.Pose, name: string): JointPoint | null {
+const kp = pose.keypoints.find((point) => point.name === name);
+if (!kp) return null;
+const score = kp.score ?? 0;
 if (score < KEYPOINT_MIN_SCORE) return null;
-return { x: point.x, y: point.y, score };
+return { x: kp.x, y: kp.y, score };
 }
 
 function midpoint(a: JointPoint | null, b: JointPoint | null): JointPoint | null {
@@ -110,10 +141,6 @@ if (!a || !b) return 0;
 return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function safeDiv(n: number, d: number): number {
-return d === 0 ? 0 : n / d;
-}
-
 function getBaseScale(pose: posedetection.Pose): number {
 const ls = getPoint(pose, "left_shoulder");
 const rs = getPoint(pose, "right_shoulder");
@@ -127,7 +154,7 @@ const hipWidth = distance(lh, rh);
 const ankleWidth = distance(la, ra);
 const torsoHeight = distance(midpoint(ls, rs), midpoint(lh, rh));
 
-return Math.max(shoulderWidth, hipWidth, ankleWidth * 0.75, torsoHeight * 0.7, 40);
+return Math.max(shoulderWidth, hipWidth, ankleWidth * 0.8, torsoHeight * 0.7, 48);
 }
 
 function getBodyCoverage(pose: posedetection.Pose, width: number, height: number): number {
@@ -145,6 +172,22 @@ const boxArea = Math.max(1, (maxX - minX) * (maxY - minY));
 return clamp(boxArea / Math.max(1, width * height), 0, 1);
 }
 
+function getSubjectCentered(pose: posedetection.Pose, width: number): number {
+const ls = getPoint(pose, "left_shoulder");
+const rs = getPoint(pose, "right_shoulder");
+const lh = getPoint(pose, "left_hip");
+const rh = getPoint(pose, "right_hip");
+const center = midpoint(midpoint(ls, rs), midpoint(lh, rh));
+if (!center || !width) return 0;
+const offset = Math.abs(center.x - width / 2) / (width / 2);
+return clamp(1 - offset, 0, 1);
+}
+
+function getDetectionSignal(confidence: number, coverage: number, centered: number): number {
+const raw = confidence * 0.48 + coverage * 0.34 + centered * 0.18;
+return Math.round(clamp(raw * 100, 0, 100));
+}
+
 function analyzePose(
 pose: posedetection.Pose,
 videoWidth: number,
@@ -154,12 +197,8 @@ priorSignal: number[],
 const nose = getPoint(pose, "nose");
 const ls = getPoint(pose, "left_shoulder");
 const rs = getPoint(pose, "right_shoulder");
-const le = getPoint(pose, "left_elbow");
-const re = getPoint(pose, "right_elbow");
 const lh = getPoint(pose, "left_hip");
 const rh = getPoint(pose, "right_hip");
-const lk = getPoint(pose, "left_knee");
-const rk = getPoint(pose, "right_knee");
 const la = getPoint(pose, "left_ankle");
 const ra = getPoint(pose, "right_ankle");
 
@@ -167,27 +206,39 @@ const shoulderMid = midpoint(ls, rs);
 const hipMid = midpoint(lh, rh);
 const ankleMid = midpoint(la, ra);
 
-const baseScale = getBaseScale(pose);
 const frameCoverage = getBodyCoverage(pose, videoWidth, videoHeight);
+const subjectCentered = getSubjectCentered(pose, videoWidth);
+
+const pointScores = pose.keypoints
+.map((kp) => kp.score ?? 0)
+.filter((score) => score > 0);
+const confidence = clamp(mean(pointScores), 0, 1);
+const confidenceSignal = Math.round(confidence * 100);
+const detectionStrength = getDetectionSignal(confidence, frameCoverage, subjectCentered);
 
 const essentialReady = Boolean(shoulderMid && hipMid && (la || ra));
 if (!essentialReady) {
-const searchingSignal = [...priorSignal, 10].slice(-SIGNAL_BUFFER);
+const signalValue = Math.max(8, Math.round(detectionStrength * 0.5));
+const nextSignal = [...priorSignal, signalValue].slice(-SIGNAL_BUFFER);
 return {
 ready: false,
-state: "SEARCHING",
-confidence: 0,
+state: detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
+confidence,
+confidenceSignal,
 stability: 10,
+lockStrength: detectionStrength,
+detectionStrength,
 verticalStack: 0,
 torsoLean: 1,
 hipOverBase: 1,
-kneeFlex: 0,
 shoulderLevel: 1,
 frameCoverage,
-signal: searchingSignal,
+subjectCentered,
+signal: nextSignal,
 };
 }
 
+const baseScale = getBaseScale(pose);
 const headX = nose?.x ?? shoulderMid!.x;
 const chestX = shoulderMid!.x;
 const hipX = hipMid!.x;
@@ -195,271 +246,65 @@ const baseX = ankleMid?.x ?? hipMid!.x;
 
 const verticalStackRaw =
 (Math.abs(headX - chestX) + Math.abs(chestX - hipX)) / Math.max(baseScale, 1);
-const verticalStack = clamp(1 - verticalStackRaw / 0.45, 0, 1);
+const verticalStack = clamp(1 - verticalStackRaw / 0.5, 0, 1);
 
 const torsoLeanRaw = Math.abs(chestX - hipX) / Math.max(baseScale, 1);
-const torsoLean = clamp(1 - torsoLeanRaw / 0.35, 0, 1);
+const torsoLean = clamp(1 - torsoLeanRaw / 0.38, 0, 1);
 
 const ankleSpread = Math.max(distance(la, ra), baseScale * 0.75);
 const hipOverBaseRaw = Math.abs(hipX - baseX) / Math.max(ankleSpread * 0.75, 1);
-const hipOverBase = clamp(1 - hipOverBaseRaw / 0.9, 0, 1);
+const hipOverBase = clamp(1 - hipOverBaseRaw / 0.92, 0, 1);
 
 const shoulderLevelRaw = ls && rs ? Math.abs(ls.y - rs.y) / Math.max(baseScale, 1) : 0;
-const shoulderLevel = clamp(1 - shoulderLevelRaw / 0.35, 0, 1);
+const shoulderLevel = clamp(1 - shoulderLevelRaw / 0.32, 0, 1);
 
-const leftKneeFlex = lh && lk && la ? safeDiv(Math.abs(lh.y - lk.y), Math.abs(la.y - lh.y) + 1) : 0.45;
-const rightKneeFlex = rh && rk && ra ? safeDiv(Math.abs(rh.y - rk.y), Math.abs(ra.y - rh.y) + 1) : 0.45;
-const kneeFlexRaw = mean([leftKneeFlex, rightKneeFlex]);
-const kneeFlex = clamp(smoothstep(kneeFlexRaw, 0.18, 0.55), 0, 1);
-
-const pointScores = [
-nose?.score ?? 0,
-ls?.score ?? 0,
-rs?.score ?? 0,
-le?.score ?? 0,
-re?.score ?? 0,
-lh?.score ?? 0,
-rh?.score ?? 0,
-lk?.score ?? 0,
-rk?.score ?? 0,
-la?.score ?? 0,
-ra?.score ?? 0,
-].filter(Boolean);
-
-const confidence = clamp(mean(pointScores), 0, 1);
-
-const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.32), 0, 1);
+const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.34), 0, 1);
+const centeredScore = clamp(smoothstep(subjectCentered, 0.35, 0.9), 0, 1);
+const lockStrength = Math.round(
+clamp(
+(confidence * 0.42 + coverageScore * 0.32 + centeredScore * 0.26) * 100,
+0,
+100,
+),
+);
 
 const rawStability =
-verticalStack * 0.28 +
-torsoLean * 0.26 +
-hipOverBase * 0.26 +
+verticalStack * 0.32 +
+torsoLean * 0.24 +
+hipOverBase * 0.24 +
 shoulderLevel * 0.08 +
-kneeFlex * 0.05 +
-coverageScore * 0.07;
+coverageScore * 0.08 +
+centeredScore * 0.04;
 
-const stability = Math.round(clamp(rawStability * confidence * 100, 0, 100));
+const stability = Math.round(clamp(rawStability * 100, 0, 100));
 
-let state: AxisState = "ALIGNED";
-if (confidence < 0.38 || coverageScore < 0.2) state = "SEARCHING";
+let state: AxisState = "NO_SUBJECT";
+if (lockStrength < 30) state = "NO_SUBJECT";
+else if (lockStrength < 58) state = "LOCKING";
 else if (stability >= 78) state = "ALIGNED";
 else if (stability >= 58) state = "SHIFT";
-else if (stability >= 36) state = "DROP";
+else if (stability >= 38) state = "DROP";
 else state = "LOST";
 
-const nextSignal = [...priorSignal, stability].slice(-SIGNAL_BUFFER);
+const signalValue = state === "NO_SUBJECT" ? lockStrength : stability;
+const nextSignal = [...priorSignal, Math.max(8, signalValue)].slice(-SIGNAL_BUFFER);
 
 return {
 ready: true,
 state,
 confidence,
+confidenceSignal,
 stability,
+lockStrength,
+detectionStrength,
 verticalStack,
 torsoLean,
 hipOverBase,
-kneeFlex,
 shoulderLevel,
 frameCoverage,
+subjectCentered,
 signal: nextSignal,
 };
-}
-
-function getRepNote(avg: number, peakInstability: number, peakState: AxisState): string {
-if (peakState === "ALIGNED" && avg >= 82) return "Repeatable structure.";
-if (peakState === "SHIFT") return "Slight drift through the rep.";
-if (peakState === "DROP") return "Structure dropped before or during action.";
-if (peakState === "LOST") return "Body broke outside its base.";
-if (peakInstability > 50) return "Late instability spike detected.";
-return "Signal captured.";
-}
-
-export default function AxisCameraPlacementTolerant() {
-const videoRef = useRef<HTMLVideoElement | null>(null);
-const canvasRef = useRef<HTMLCanvasElement | null>(null);
-const overlayRef = useRef<HTMLCanvasElement | null>(null);
-const streamRef = useRef<MediaStream | null>(null);
-const detectorRef = useRef<posedetection.PoseDetector | null>(null);
-const loopRef = useRef<number | null>(null);
-const lastRunRef = useRef(0);
-const signalRef = useRef<number[]>([]);
-const repWindowRef = useRef<number[]>([]);
-const repActiveRef = useRef(false);
-const repStartRef = useRef<number | null>(null);
-const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-const mediaChunksRef = useRef<Blob[]>([]);
-const recordStreamRef = useRef<MediaStream | null>(null);
-
-const [booting, setBooting] = useState(true);
-const [enabled, setEnabled] = useState(false);
-const [facingMode, setFacingMode] = useState<CameraFacing>("environment");
-const [error, setError] = useState("");
-const [metrics, setMetrics] = useState<PoseMetrics>({
-ready: false,
-state: "SEARCHING",
-confidence: 0,
-stability: 10,
-verticalStack: 0,
-torsoLean: 1,
-hipOverBase: 1,
-kneeFlex: 0,
-shoulderLevel: 1,
-frameCoverage: 0,
-signal: [],
-});
-const [isRecording, setIsRecording] = useState(false);
-const [reps, setReps] = useState<RepRecord[]>([]);
-const [lastClipUrl, setLastClipUrl] = useState<string>("");
-const [lastClipMade, setLastClipMade] = useState<boolean | undefined>(undefined);
-
-const signalBars = useMemo(() => {
-return metrics.signal.map((value, idx) => {
-let color = STATE_COLOR.SEARCHING;
-if (value >= 78) color = STATE_COLOR.ALIGNED;
-else if (value >= 58) color = STATE_COLOR.SHIFT;
-else if (value >= 36) color = STATE_COLOR.DROP;
-else color = STATE_COLOR.LOST;
-return { id: `${idx}-${value}`, value, color };
-});
-}, [metrics.signal]);
-
-useEffect(() => {
-let mounted = true;
-
-async function setupDetector() {
-try {
-await posedetection.createDetector(posedetection.SupportedModels.MoveNet, {
-modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-enableSmoothing: true,
-}).then((detector) => {
-if (!mounted) return;
-detectorRef.current = detector;
-});
-} catch (err) {
-console.error(err);
-if (mounted) setError("Pose model failed to load.");
-} finally {
-if (mounted) setBooting(false);
-}
-}
-
-setupDetector();
-
-return () => {
-mounted = false;
-};
-}, []);
-
-useEffect(() => {
-return () => {
-stopCamera();
-if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
-};
-}, [lastClipUrl]);
-
-async function startCamera(nextFacingMode = facingMode) {
-try {
-setError("");
-stopCamera();
-
-const stream = await navigator.mediaDevices.getUserMedia({
-audio: false,
-video: {
-facingMode: { ideal: nextFacingMode },
-width: { ideal: VIDEO_W },
-height: { ideal: VIDEO_H },
-frameRate: { ideal: 30, max: 30 },
-},
-});
-
-const video = videoRef.current;
-if (!video) return;
-
-streamRef.current = stream;
-video.srcObject = stream;
-await video.play();
-
-setEnabled(true);
-startLoop();
-} catch (err) {
-console.error(err);
-setError("Camera access failed.");
-setEnabled(false);
-}
-}
-
-function stopCamera() {
-if (loopRef.current) {
-cancelAnimationFrame(loopRef.current);
-loopRef.current = null;
-}
-
-if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-mediaRecorderRef.current.stop();
-}
-
-streamRef.current?.getTracks().forEach((track) => track.stop());
-streamRef.current = null;
-
-recordStreamRef.current?.getTracks().forEach((track) => track.stop());
-recordStreamRef.current = null;
-
-const video = videoRef.current;
-if (video) video.srcObject = null;
-
-setEnabled(false);
-setIsRecording(false);
-}
-
-function startLoop() {
-if (loopRef.current) cancelAnimationFrame(loopRef.current);
-
-const run = async (ts: number) => {
-loopRef.current = requestAnimationFrame(run);
-if (!videoRef.current || !detectorRef.current) return;
-if (videoRef.current.readyState < 2) return;
-if (ts - lastRunRef.current < ANALYSIS_INTERVAL_MS) return;
-lastRunRef.current = ts;
-
-const video = videoRef.current;
-const detector = detectorRef.current;
-const overlay = overlayRef.current;
-if (!overlay) return;
-
-overlay.width = video.videoWidth;
-overlay.height = video.videoHeight;
-
-const poses = await detector.estimatePoses(video, { maxPoses: 1, flipHorizontal: false });
-const pose = poses[0];
-
-if (!pose) {
-const nextMetrics: PoseMetrics = {
-ready: false,
-state: "SEARCHING",
-confidence: 0,
-stability: 10,
-verticalStack: 0,
-torsoLean: 1,
-hipOverBase: 1,
-kneeFlex: 0,
-shoulderLevel: 1,
-frameCoverage: 0,
-signal: [...signalRef.current, 10].slice(-SIGNAL_BUFFER),
-};
-signalRef.current = nextMetrics.signal;
-setMetrics(nextMetrics);
-drawOverlay(null, nextMetrics);
-trackRep(nextMetrics);
-return;
-}
-
-const nextMetrics = analyzePose(pose, video.videoWidth, video.videoHeight, signalRef.current);
-signalRef.current = nextMetrics.signal;
-setMetrics(nextMetrics);
-drawOverlay(pose, nextMetrics);
-trackRep(nextMetrics);
-};
-
-loopRef.current = requestAnimationFrame(run);
 }
 
 function drawLine(
@@ -482,39 +327,335 @@ ctx.stroke();
 function drawCircle(
 ctx: CanvasRenderingContext2D,
 p: JointPoint | null,
-r: number,
-fill: string,
+radius: number,
+color: string,
 ) {
 if (!p) return;
 ctx.beginPath();
-ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-ctx.fillStyle = fill;
+ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+ctx.fillStyle = color;
 ctx.fill();
 }
 
-function drawOverlay(pose: posedetection.Pose | null, nextMetrics: PoseMetrics) {
+function getRepNote(rep: RepRecord): string {
+if (rep.avgDetection < 36) return "Weak subject read. Improve framing.";
+if (rep.peakState === "ALIGNED" && rep.avgStability >= 82) return "Repeatable structure.";
+if (rep.peakState === "SHIFT") return "Slight drift through the rep.";
+if (rep.peakState === "DROP") return "Structure dropped during action.";
+if (rep.peakState === "LOST") return "Structure broke outside base.";
+return "Signal captured.";
+}
+
+function getPreferredBackCamera(cameras: CameraOption[]): CameraOption | null {
+if (!cameras.length) return null;
+const back = cameras.find((camera) => /back|rear|environment/i.test(camera.label));
+return back ?? cameras[cameras.length - 1] ?? null;
+}
+
+function getPreferredFrontCamera(cameras: CameraOption[]): CameraOption | null {
+if (!cameras.length) return null;
+const front = cameras.find((camera) => /front|user|facetime|webcam|integrated/i.test(camera.label));
+return front ?? cameras[0] ?? null;
+}
+
+async function safeStopStream(stream: MediaStream | null) {
+stream?.getTracks().forEach((track) => track.stop());
+}
+
+export default function AxisCameraInstrument() {
+const videoRef = useRef<HTMLVideoElement | null>(null);
+const overlayRef = useRef<HTMLCanvasElement | null>(null);
+const recordCanvasRef = useRef<HTMLCanvasElement | null>(null);
+const detectorRef = useRef<posedetection.PoseDetector | null>(null);
+const streamRef = useRef<MediaStream | null>(null);
+const loopRef = useRef<number | null>(null);
+const lastAnalysisRef = useRef(0);
+const signalRef = useRef<number[]>([]);
+const repSignalRef = useRef<number[]>([]);
+const repStartRef = useRef<number | null>(null);
+const repActiveRef = useRef(false);
+const drawRecordingRef = useRef(false);
+const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+const mediaChunksRef = useRef<Blob[]>([]);
+const recordStreamRef = useRef<MediaStream | null>(null);
+
+const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
+const [engineError, setEngineError] = useState<EngineError | null>(null);
+const [enabled, setEnabled] = useState(false);
+const [startingCamera, setStartingCamera] = useState(false);
+const [switchingCamera, setSwitchingCamera] = useState(false);
+const [facingMode, setFacingMode] = useState<CameraFacing>("user");
+const [cameraOptions, setCameraOptions] = useState<CameraOption[]>([]);
+const [activeCameraId, setActiveCameraId] = useState<string>("");
+const [metrics, setMetrics] = useState<PoseMetrics>(INITIAL_METRICS);
+const [isRecording, setIsRecording] = useState(false);
+const [reps, setReps] = useState<RepRecord[]>([]);
+const [lastClipUrl, setLastClipUrl] = useState("");
+const [lastClipMade, setLastClipMade] = useState<boolean | undefined>(undefined);
+
+const destroyDetector = useCallback(async () => {
+if (detectorRef.current) {
+await detectorRef.current.dispose();
+detectorRef.current = null;
+}
+}, []);
+
+const initDetector = useCallback(async () => {
+setEngineStatus("loading");
+setEngineError(null);
+
+try {
+await destroyDetector();
+const detector = await posedetection.createDetector(posedetection.SupportedModels.MoveNet, {
+modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
+enableSmoothing: true,
+});
+detectorRef.current = detector;
+setEngineStatus("ready");
+return detector;
+} catch (error) {
+console.error(error);
+setEngineStatus("error");
+setEngineError({
+title: "Instrument unavailable",
+detail: "Pose engine did not initialize. Retry engine or restart camera.",
+});
+return null;
+}
+}, [destroyDetector]);
+
+const loadCameraOptions = useCallback(async () => {
+try {
+const devices = await navigator.mediaDevices.enumerateDevices();
+const cameras = devices
+.filter((device) => device.kind === "videoinput")
+.map((device) => ({
+deviceId: device.deviceId,
+label: device.label || `Camera ${device.deviceId.slice(-4)}`,
+}));
+setCameraOptions(cameras);
+return cameras;
+} catch (error) {
+console.error(error);
+return [] as CameraOption[];
+}
+}, []);
+
+const stopLoop = useCallback(() => {
+if (loopRef.current) {
+cancelAnimationFrame(loopRef.current);
+loopRef.current = null;
+}
+}, []);
+
+const stopRecording = useCallback(async () => {
+drawRecordingRef.current = false;
+if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+mediaRecorderRef.current.stop();
+}
+setIsRecording(false);
+await safeStopStream(recordStreamRef.current);
+recordStreamRef.current = null;
+}, []);
+
+const stopCamera = useCallback(async () => {
+stopLoop();
+await stopRecording();
+await safeStopStream(streamRef.current);
+streamRef.current = null;
+const video = videoRef.current;
+if (video) {
+video.pause();
+video.srcObject = null;
+}
+setEnabled(false);
+}, [stopLoop, stopRecording]);
+
+const startCamera = useCallback(
+async (options?: { preferredFacing?: CameraFacing; preferredDeviceId?: string }) => {
+setStartingCamera(true);
+setEngineError(null);
+
+let detector = detectorRef.current;
+if (!detector) {
+detector = await initDetector();
+}
+if (!detector) {
+setStartingCamera(false);
+return;
+}
+
+await stopCamera();
+
+try {
+const preferredFacing = options?.preferredFacing ?? facingMode;
+let cameras = cameraOptions;
+if (!cameras.length) cameras = await loadCameraOptions();
+
+let chosenDeviceId = options?.preferredDeviceId ?? "";
+if (!chosenDeviceId) {
+const preferredCamera =
+preferredFacing === "environment"
+? getPreferredBackCamera(cameras)
+: getPreferredFrontCamera(cameras);
+chosenDeviceId = preferredCamera?.deviceId ?? "";
+}
+
+const constraints: MediaStreamConstraints = {
+audio: false,
+video: chosenDeviceId
+? {
+deviceId: { exact: chosenDeviceId },
+width: { ideal: VIDEO_W },
+height: { ideal: VIDEO_H },
+frameRate: { ideal: 30, max: 30 },
+}
+: {
+facingMode: { ideal: preferredFacing },
+width: { ideal: VIDEO_W },
+height: { ideal: VIDEO_H },
+frameRate: { ideal: 30, max: 30 },
+},
+};
+
+const stream = await navigator.mediaDevices.getUserMedia(constraints);
+streamRef.current = stream;
+
+const settings = stream.getVideoTracks()[0]?.getSettings();
+const resolvedDeviceId = settings?.deviceId ?? chosenDeviceId;
+const resolvedFacing =
+settings?.facingMode === "environment" || preferredFacing === "environment"
+? "environment"
+: "user";
+
+setActiveCameraId(resolvedDeviceId || "");
+setFacingMode(resolvedFacing);
+
+const video = videoRef.current;
+if (!video) throw new Error("Missing video element");
+video.srcObject = stream;
+video.playsInline = true;
+video.muted = true;
+await video.play();
+
+await loadCameraOptions();
+setEnabled(true);
+setStartingCamera(false);
+} catch (error) {
+console.error(error);
+setEngineError({
+title: "Camera unavailable",
+detail: "Camera did not start. Check permissions and try again.",
+});
+setStartingCamera(false);
+setEnabled(false);
+}
+},
+[cameraOptions, facingMode, initDetector, loadCameraOptions, stopCamera],
+);
+
+const restartEngine = useCallback(async () => {
+const detector = await initDetector();
+if (detector && enabled) {
+await startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined });
+}
+}, [activeCameraId, enabled, facingMode, initDetector, startCamera]);
+
+const switchCamera = useCallback(async () => {
+if (switchingCamera || startingCamera) return;
+setSwitchingCamera(true);
+
+try {
+let cameras = cameraOptions;
+if (!cameras.length) cameras = await loadCameraOptions();
+
+const currentIndex = cameras.findIndex((camera) => camera.deviceId === activeCameraId);
+let nextCamera: CameraOption | null = null;
+
+if (cameras.length > 1 && currentIndex >= 0) {
+nextCamera = cameras[(currentIndex + 1) % cameras.length] ?? null;
+} else {
+const nextFacing: CameraFacing = facingMode === "user" ? "environment" : "user";
+nextCamera =
+nextFacing === "environment"
+? getPreferredBackCamera(cameras)
+: getPreferredFrontCamera(cameras);
+}
+
+const nextFacing: CameraFacing = facingMode === "user" ? "environment" : "user";
+
+await startCamera({
+preferredFacing: nextFacing,
+preferredDeviceId: nextCamera?.deviceId,
+});
+} finally {
+setSwitchingCamera(false);
+}
+}, [activeCameraId, cameraOptions, facingMode, loadCameraOptions, startCamera, startingCamera, switchingCamera]);
+
+const drawOverlay = useCallback((pose: posedetection.Pose | null, nextMetrics: PoseMetrics) => {
 const canvas = overlayRef.current;
-if (!canvas) return;
+const video = videoRef.current;
+if (!canvas || !video) return;
+
+canvas.width = video.videoWidth || VIDEO_W;
+canvas.height = video.videoHeight || VIDEO_H;
+
 const ctx = canvas.getContext("2d");
 if (!ctx) return;
-
 ctx.clearRect(0, 0, canvas.width, canvas.height);
 
 const accent = STATE_COLOR[nextMetrics.state];
+const centerX = canvas.width / 2;
+const centerY = canvas.height / 2;
 
-ctx.strokeStyle = accent;
+const targetWidth = canvas.width * 0.46;
+const targetHeight = canvas.height * 0.68;
+const targetX = centerX - targetWidth / 2;
+const targetY = centerY - targetHeight / 2;
+
+ctx.save();
+ctx.strokeStyle = nextMetrics.state === "LOCKING" ? "rgba(123,215,255,0.9)" : "rgba(255,255,255,0.16)";
 ctx.lineWidth = 2;
-ctx.strokeRect(24, 24, canvas.width - 48, canvas.height - 48);
+ctx.setLineDash([10, 10]);
+ctx.strokeRect(targetX, targetY, targetWidth, targetHeight);
+ctx.restore();
 
-const labelW = 220;
-const labelH = 54;
-ctx.fillStyle = "rgba(0,0,0,0.58)";
-ctx.fillRect(28, 28, labelW, labelH);
+if (nextMetrics.state === "NO_SUBJECT" || nextMetrics.state === "LOCKING") {
+const alpha = nextMetrics.state === "LOCKING" ? 0.4 : 0.18;
+ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+ctx.fillRect(centerX - 1, targetY + 10, 2, targetHeight - 20);
+ctx.fillRect(targetX + 10, centerY - 1, targetWidth - 20, 2);
+
+ctx.fillStyle = "rgba(0,0,0,0.5)";
+ctx.fillRect(24, 24, 240, 72);
 ctx.fillStyle = accent;
-ctx.font = "600 16px Inter, ui-sans-serif, system-ui";
-ctx.fillText("STATE", 42, 50);
-ctx.font = "700 24px Inter, ui-sans-serif, system-ui";
-ctx.fillText(STATE_LABEL[nextMetrics.state], 42, 76);
+ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
+ctx.fillText("SUBJECT READ", 40, 50);
+ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
+ctx.fillText(STATE_LABEL[nextMetrics.state], 40, 82);
+
+ctx.fillStyle = "rgba(255,255,255,0.86)";
+ctx.font = "600 17px Inter, ui-sans-serif, system-ui";
+ctx.textAlign = "center";
+ctx.fillText(
+nextMetrics.state === "LOCKING" ? "HOLD POSITION" : "ENTER FRAME",
+centerX,
+targetY + targetHeight / 2,
+);
+ctx.font = "500 14px Inter, ui-sans-serif, system-ui";
+ctx.fillStyle = "rgba(255,255,255,0.58)";
+ctx.fillText("show torso + hips for a live read", centerX, targetY + targetHeight / 2 + 24);
+ctx.textAlign = "left";
+}
+
+ctx.fillStyle = "rgba(0,0,0,0.48)";
+ctx.fillRect(canvas.width - 166, 24, 142, 72);
+ctx.fillStyle = accent;
+ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
+ctx.fillText("STATE", canvas.width - 150, 50);
+ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
+ctx.fillText(STATE_LABEL[nextMetrics.state], canvas.width - 150, 82);
 
 if (!pose) return;
 
@@ -542,94 +683,36 @@ drawLine(ctx, rk, ra, accent, 4);
 drawLine(ctx, shoulderMid, hipMid, accent, 5);
 drawLine(ctx, hipMid, ankleMid, accent, 4);
 
-drawCircle(ctx, nose, 7, accent);
-drawCircle(ctx, shoulderMid, 8, accent);
-drawCircle(ctx, hipMid, 8, accent);
-drawCircle(ctx, la, 7, accent);
-drawCircle(ctx, ra, 7, accent);
+drawCircle(ctx, nose, 6, accent);
+drawCircle(ctx, shoulderMid, 7, accent);
+drawCircle(ctx, hipMid, 7, accent);
+drawCircle(ctx, la, 6, accent);
+drawCircle(ctx, ra, 6, accent);
+}, []);
 
-if (shoulderMid && hipMid && ankleMid) {
-ctx.setLineDash([8, 8]);
-ctx.beginPath();
-ctx.moveTo(ankleMid.x, ankleMid.y - 120);
-ctx.lineTo(ankleMid.x, ankleMid.y + 30);
-ctx.strokeStyle = "rgba(255,255,255,0.4)";
-ctx.lineWidth = 2;
-ctx.stroke();
-ctx.setLineDash([]);
-}
-}
-
-function trackRep(nextMetrics: PoseMetrics) {
-repWindowRef.current.push(nextMetrics.stability);
-if (repWindowRef.current.length > 90) repWindowRef.current.shift();
-
-const movingAvg = mean(repWindowRef.current.slice(-6));
-const currentlyActive = nextMetrics.ready && movingAvg >= 48;
-
-if (currentlyActive && !repActiveRef.current) {
-repActiveRef.current = true;
-repStartRef.current = Date.now();
-if (!isRecording) beginClipRecording();
-}
-
-if (!currentlyActive && repActiveRef.current) {
-repActiveRef.current = false;
-const start = repStartRef.current ?? Date.now();
-const ended = Date.now();
-const repValues = repWindowRef.current.slice(-30);
-const avgStability = Math.round(mean(repValues));
-const peakInstability = Math.max(0, 100 - Math.min(...repValues, 100));
-const repState = derivePeakState(repValues);
-const notes = getRepNote(avgStability, peakInstability, repState);
-
-setReps((prev) => [
-{
-id: nowId(),
-startedAt: start,
-endedAt: ended,
-peakState: repState,
-avgStability,
-peakInstability,
-made: lastClipMade,
-notes,
-},
-...prev,
-].slice(0, 8));
-
-repStartRef.current = null;
-if (isRecording) endClipRecording();
-}
-}
-
-function derivePeakState(values: number[]): AxisState {
-const avg = mean(values);
-if (avg >= 78) return "ALIGNED";
-if (avg >= 58) return "SHIFT";
-if (avg >= 36) return "DROP";
-return "LOST";
-}
-
-function beginClipRecording() {
-const canvas = canvasRef.current;
+const startRecording = useCallback(() => {
+const recordCanvas = recordCanvasRef.current;
 const overlay = overlayRef.current;
 const video = videoRef.current;
-if (!canvas || !overlay || !video) return;
+if (!recordCanvas || !overlay || !video) return;
 
+const ctx = recordCanvas.getContext("2d");
+if (!ctx) return;
+
+recordCanvas.width = video.videoWidth || VIDEO_W;
+recordCanvas.height = video.videoHeight || VIDEO_H;
+
+drawRecordingRef.current = true;
 const draw = () => {
-const ctx = canvas.getContext("2d");
-if (!ctx || !video) return;
-canvas.width = video.videoWidth || VIDEO_W;
-canvas.height = video.videoHeight || VIDEO_H;
-ctx.clearRect(0, 0, canvas.width, canvas.height);
-ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-if (overlay.width && overlay.height) {
-ctx.drawImage(overlay, 0, 0, canvas.width, canvas.height);
-}
-if (isRecording) requestAnimationFrame(draw);
+if (!drawRecordingRef.current) return;
+ctx.clearRect(0, 0, recordCanvas.width, recordCanvas.height);
+ctx.drawImage(video, 0, 0, recordCanvas.width, recordCanvas.height);
+ctx.drawImage(overlay, 0, 0, recordCanvas.width, recordCanvas.height);
+requestAnimationFrame(draw);
 };
+requestAnimationFrame(draw);
 
-const stream = canvas.captureStream(30);
+const stream = recordCanvas.captureStream(30);
 recordStreamRef.current = stream;
 const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
 ? "video/webm;codecs=vp9"
@@ -637,153 +720,299 @@ const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
 
 const recorder = new MediaRecorder(stream, { mimeType });
 mediaChunksRef.current = [];
-
 recorder.ondataavailable = (event) => {
 if (event.data.size > 0) mediaChunksRef.current.push(event.data);
 };
-
-recorder.onstop = () => {
+recorder.onstop = async () => {
 const blob = new Blob(mediaChunksRef.current, { type: mimeType });
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
-const url = URL.createObjectURL(blob);
-setLastClipUrl(url);
-recordStreamRef.current?.getTracks().forEach((track) => track.stop());
+setLastClipUrl(URL.createObjectURL(blob));
+await safeStopStream(recordStreamRef.current);
 recordStreamRef.current = null;
 };
 
 mediaRecorderRef.current = recorder;
-setIsRecording(true);
 recorder.start();
-requestAnimationFrame(draw);
+setIsRecording(true);
+}, [lastClipUrl]);
+
+const closeRep = useCallback(() => {
+if (!repActiveRef.current) return;
+
+repActiveRef.current = false;
+const endedAt = Date.now();
+const startedAt = repStartRef.current ?? endedAt;
+const recent = repSignalRef.current.slice(-30);
+const avgStability = Math.round(mean(recent));
+const avgDetection = metrics.detectionStrength;
+
+let peakState: AxisState = "NO_SUBJECT";
+if (avgStability >= 78) peakState = "ALIGNED";
+else if (avgStability >= 58) peakState = "SHIFT";
+else if (avgStability >= 38) peakState = "DROP";
+else peakState = "LOST";
+
+const nextRep: RepRecord = {
+id: nowId(),
+startedAt,
+endedAt,
+peakState,
+avgStability,
+avgDetection,
+notes: "",
+made: lastClipMade,
+};
+nextRep.notes = getRepNote(nextRep);
+
+setReps((prev) => [nextRep, ...prev].slice(0, 8));
+repStartRef.current = null;
+stopRecording();
+}, [lastClipMade, metrics.detectionStrength, stopRecording]);
+
+const trackRep = useCallback(
+(nextMetrics: PoseMetrics) => {
+repSignalRef.current.push(nextMetrics.stability);
+if (repSignalRef.current.length > 90) repSignalRef.current.shift();
+
+const liveAvg = mean(repSignalRef.current.slice(-6));
+const active = nextMetrics.ready && nextMetrics.lockStrength >= 58 && liveAvg >= 48;
+
+if (active && !repActiveRef.current) {
+repActiveRef.current = true;
+repStartRef.current = Date.now();
+startRecording();
 }
 
-function endClipRecording() {
-if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-mediaRecorderRef.current.stop();
+if (!active && repActiveRef.current) {
+closeRep();
 }
-setIsRecording(false);
+},
+[closeRep, startRecording],
+);
+
+useEffect(() => {
+initDetector();
+return () => {
+stopCamera();
+destroyDetector();
+if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
+};
+}, [destroyDetector, initDetector, lastClipUrl, stopCamera]);
+
+useEffect(() => {
+if (!enabled || engineStatus !== "ready") {
+stopLoop();
+return;
 }
 
-async function toggleCamera() {
-const next: CameraFacing = facingMode === "user" ? "environment" : "user";
-setFacingMode(next);
-await startCamera(next);
+const analyze = async (ts: number) => {
+loopRef.current = requestAnimationFrame(analyze);
+const video = videoRef.current;
+const detector = detectorRef.current;
+if (!video || !detector) return;
+if (video.readyState < 2) return;
+if (ts - lastAnalysisRef.current < ANALYSIS_INTERVAL_MS) return;
+lastAnalysisRef.current = ts;
+
+try {
+const poses = await detector.estimatePoses(video, { maxPoses: 1, flipHorizontal: facingMode === "user" });
+const pose = poses[0] ?? null;
+
+let nextMetrics = INITIAL_METRICS;
+if (pose) {
+nextMetrics = analyzePose(pose, video.videoWidth, video.videoHeight, signalRef.current);
+} else {
+const fallbackSignal = Math.max(8, Math.round(metrics.detectionStrength * 0.5));
+nextMetrics = {
+...INITIAL_METRICS,
+state: metrics.detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
+detectionStrength: metrics.detectionStrength,
+lockStrength: metrics.detectionStrength,
+signal: [...signalRef.current, fallbackSignal].slice(-SIGNAL_BUFFER),
+};
 }
 
-function markShot(made: boolean) {
+signalRef.current = nextMetrics.signal;
+setMetrics(nextMetrics);
+drawOverlay(pose, nextMetrics);
+trackRep(nextMetrics);
+} catch (error) {
+console.error(error);
+setEngineStatus("error");
+setEngineError({
+title: "Instrument unavailable",
+detail: "Pose engine did not initialize. Retry engine or restart camera.",
+});
+}
+};
+
+loopRef.current = requestAnimationFrame(analyze);
+return () => stopLoop();
+}, [drawOverlay, enabled, engineStatus, facingMode, metrics.detectionStrength, stopLoop, trackRep]);
+
+const signalBars = useMemo(() => {
+return metrics.signal.map((value, index) => {
+let color = STATE_COLOR.NO_SUBJECT;
+if (value >= 78) color = STATE_COLOR.ALIGNED;
+else if (value >= 58) color = STATE_COLOR.SHIFT;
+else if (value >= 38) color = STATE_COLOR.DROP;
+else if (value >= 24) color = STATE_COLOR.LOCKING;
+else color = STATE_COLOR.NO_SUBJECT;
+return {
+id: `${index}-${value}`,
+value,
+color,
+active: index === metrics.signal.length - 1,
+};
+});
+}, [metrics.signal]);
+
+const liveReadLabel = useMemo(() => {
+if (engineStatus === "error") return "INSTRUMENT OFFLINE";
+if (metrics.state === "NO_SUBJECT") return "NO LIVE READ";
+if (metrics.state === "LOCKING") return "SIGNAL ACQUIRING";
+if (metrics.state === "ALIGNED") return "STRUCTURE STABLE";
+if (metrics.state === "SHIFT") return "STRUCTURE DRIFT";
+if (metrics.state === "DROP") return "STRUCTURE DROP";
+return "STRUCTURE LOST";
+}, [engineStatus, metrics.state]);
+
+const subjectBarLabel = useMemo(() => {
+if (metrics.detectionStrength < 12) return "no subject";
+if (metrics.detectionStrength < 30) return "weak read";
+if (metrics.detectionStrength < 58) return "locking";
+if (metrics.detectionStrength < 80) return "good read";
+return "strong read";
+}, [metrics.detectionStrength]);
+
+const markShot = useCallback((made: boolean) => {
 setLastClipMade(made);
 setReps((prev) => {
 if (!prev.length) return prev;
 const [first, ...rest] = prev;
 return [{ ...first, made }, ...rest];
 });
-}
-
-const instrumentTone = useMemo(() => {
-const s = metrics.stability;
-if (s >= 78) return "Repeatable structure";
-if (s >= 58) return "Slight drift";
-if (s >= 36) return "Structure dropped";
-return "Body broke outside base";
-}, [metrics.stability]);
+}, []);
 
 return (
 <div className="min-h-screen bg-black text-white">
 <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 lg:px-8">
-<div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+<div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Axis Instrument</div>
+<div className="text-xs uppercase tracking-[0.32em] text-white/40">Axis Instrument</div>
 <h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-5xl">Structure Through Space + Time</h1>
 <p className="mt-2 max-w-3xl text-sm text-white/60 md:text-base">
-This version is camera-placement tolerant by normalizing to your body proportions instead of screen position.
-It works best front view, slight angle, tripod, phone, laptop, or external webcam.
+Camera-placement tolerant by normalizing to body proportions instead of screen position.
+Live subject read, locking state, structure signal, replay after rep.
 </p>
 </div>
 
 <div className="flex flex-wrap gap-3">
 <button
 onClick={() => (enabled ? stopCamera() : startCamera())}
-className="rounded-2xl border border-white/15 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:opacity-90"
-disabled={booting}
+disabled={startingCamera || engineStatus === "loading"}
+className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
 >
-{enabled ? "Stop Camera" : booting ? "Loading Model" : "Start Camera"}
+{enabled ? "Stop Camera" : startingCamera || engineStatus === "loading" ? "Starting" : "Start Camera"}
 </button>
 <button
-onClick={toggleCamera}
-className="rounded-2xl border border-white/15 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10"
-disabled={!enabled}
+onClick={switchCamera}
+disabled={!enabled || switchingCamera || startingCamera}
+className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
 >
-Flip Camera
+{switchingCamera ? "Switching" : "Switch Camera"}
 </button>
 </div>
 </div>
 
-{error ? (
-<div className="rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-{error}
+{engineError ? (
+<div className="rounded-[24px] border border-red-500/30 bg-red-500/8 px-5 py-4">
+<div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+<div>
+<div className="text-xs uppercase tracking-[0.28em] text-red-200/70">Instrument Status</div>
+<div className="mt-1 text-xl font-semibold text-red-100">{engineError.title}</div>
+<div className="mt-1 text-sm text-red-100/80">{engineError.detail}</div>
+</div>
+<div className="flex gap-3">
+<button
+onClick={restartEngine}
+className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black"
+>
+Retry Engine
+</button>
+<button
+onClick={() => startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined })}
+className="rounded-2xl border border-white/10 bg-white/8 px-4 py-3 text-sm font-semibold text-white"
+>
+Restart Camera
+</button>
+</div>
+</div>
 </div>
 ) : null}
 
-<div className="grid gap-6 lg:grid-cols-[1.35fr_0.65fr]">
-<div className="overflow-hidden rounded-[28px] border border-white/10 bg-neutral-950 shadow-2xl shadow-black/30">
-<div className="relative aspect-video w-full bg-black">
+<div className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr]">
+<div className="overflow-hidden rounded-[30px] border border-white/10 bg-neutral-950 shadow-[0_30px_80px_rgba(0,0,0,0.45)]">
+<div className="relative aspect-video bg-black">
 <video
 ref={videoRef}
-className="absolute inset-0 h-full w-full object-cover"
+className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`}
+autoPlay
 muted
 playsInline
-autoPlay
 />
-<canvas ref={overlayRef} className="absolute inset-0 h-full w-full object-cover" />
-<canvas ref={canvasRef} className="hidden" />
+<canvas ref={overlayRef} className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`} />
+<canvas ref={recordCanvasRef} className="hidden" />
 
-<div className="absolute left-4 top-4 rounded-2xl border border-white/10 bg-black/50 px-4 py-3 backdrop-blur-md">
+<div className="absolute left-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 backdrop-blur-md">
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">State</div>
 <div className="mt-1 text-2xl font-semibold" style={{ color: STATE_COLOR[metrics.state] }}>
 {STATE_LABEL[metrics.state]}
 </div>
 </div>
 
-<div className="absolute right-4 top-4 rounded-2xl border border-white/10 bg-black/50 px-4 py-3 backdrop-blur-md text-right">
+<div className="absolute right-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-right backdrop-blur-md">
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Stability</div>
 <div className="mt-1 text-2xl font-semibold">{metrics.stability}</div>
 </div>
 
-<div className="absolute bottom-4 left-4 right-4 rounded-[24px] border border-white/10 bg-black/60 p-4 backdrop-blur-md">
-<div className="mb-2 flex items-center justify-between gap-4">
+<div className="absolute inset-x-4 bottom-4 rounded-[26px] border border-white/10 bg-black/62 p-4 backdrop-blur-md">
+<div className="mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
 <div>
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Structure Signal</div>
-<div className="mt-1 text-sm text-white/75">{instrumentTone}</div>
+<div className="mt-1 text-sm font-medium text-white/80">{liveReadLabel}</div>
 </div>
-<div className="flex items-center gap-2 text-xs text-white/55">
-<span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.ALIGNED }} />
-aligned
-<span className="inline-block h-2.5 w-2.5 rounded-full ml-2" style={{ backgroundColor: STATE_COLOR.SHIFT }} />
-shift
-<span className="inline-block h-2.5 w-2.5 rounded-full ml-2" style={{ backgroundColor: STATE_COLOR.DROP }} />
-drop
-<span className="inline-block h-2.5 w-2.5 rounded-full ml-2" style={{ backgroundColor: STATE_COLOR.LOST }} />
-lost
+<div className="flex items-center gap-2 text-xs text-white/60">
+<span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.NO_SUBJECT }} /> no subject
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOCKING }} /> locking
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.ALIGNED }} /> aligned
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.SHIFT }} /> shift
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.DROP }} /> drop
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOST }} /> lost
 </div>
 </div>
 
-<div className="flex h-12 items-end gap-[3px] overflow-hidden rounded-2xl border border-white/10 bg-white/[0.04] px-2 py-2">
+<div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-3">
+<div className="flex h-20 items-end gap-[4px] overflow-hidden rounded-[18px] bg-gradient-to-b from-white/[0.03] to-white/[0.01] px-2 py-2">
 {signalBars.length ? (
 signalBars.map((bar) => (
 <div
 key={bar.id}
-className="min-w-[4px] flex-1 rounded-full"
+className="min-w-[7px] flex-1 rounded-full transition-all duration-150"
 style={{
 height: `${clamp(bar.value, 8, 100)}%`,
 backgroundColor: bar.color,
+boxShadow: bar.active ? `0 0 18px ${bar.color}` : "none",
+opacity: bar.active ? 1 : 0.84,
 }}
 />
 ))
 ) : (
-<div className="flex w-full items-center justify-center text-xs uppercase tracking-[0.26em] text-white/30">
-waiting for signal
+<div className="flex w-full items-center justify-center text-xs uppercase tracking-[0.3em] text-white/28">
+no live read
 </div>
 )}
+</div>
 </div>
 </div>
 </div>
@@ -791,24 +1020,48 @@ waiting for signal
 
 <div className="flex flex-col gap-6">
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Placement Robustness</div>
-<div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-<MetricCard label="Confidence" value={`${Math.round(metrics.confidence * 100)}%`} />
-<MetricCard label="Frame Coverage" value={`${Math.round(metrics.frameCoverage * 100)}%`} />
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Signal Integrity</div>
+<div className="mt-4 rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
+<div className="flex items-center justify-between gap-4">
+<div>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">Subject Read</div>
+<div className="mt-2 text-2xl font-semibold text-white">{metrics.detectionStrength}%</div>
+</div>
+<div className="text-sm capitalize text-white/55">{subjectBarLabel}</div>
+</div>
+<div className="mt-4 h-4 overflow-hidden rounded-full bg-white/8">
+<div
+className="h-full rounded-full transition-all duration-200"
+style={{
+width: `${metrics.detectionStrength}%`,
+background:
+metrics.detectionStrength < 24
+? "linear-gradient(90deg, #595959 0%, #8A8A8A 100%)"
+: metrics.detectionStrength < 58
+? "linear-gradient(90deg, #5AC8FA 0%, #8CE1FF 100%)"
+: metrics.detectionStrength < 78
+? "linear-gradient(90deg, #FFD54A 0%, #FFE388 100%)"
+: "linear-gradient(90deg, #3DDE74 0%, #76F5A1 100%)",
+}}
+/>
+</div>
+</div>
+
+<div className="mt-4 grid grid-cols-2 gap-3 text-sm">
+<MetricCard label="Confidence" value={`${metrics.confidenceSignal}%`} />
+<MetricCard label="Lock" value={`${metrics.lockStrength}%`} />
 <MetricCard label="Vertical Stack" value={`${Math.round(metrics.verticalStack * 100)}%`} />
-<MetricCard label="Torso Lean" value={`${Math.round(metrics.torsoLean * 100)}%`} />
 <MetricCard label="Hip Over Base" value={`${Math.round(metrics.hipOverBase * 100)}%`} />
-<MetricCard label="Shoulder Level" value={`${Math.round(metrics.shoulderLevel * 100)}%`} />
 </div>
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
 <div className="flex items-center justify-between gap-3">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Rep Review</div>
-<div className="mt-2 text-lg font-semibold">Record live. Review the rep after.</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Replay</div>
+<div className="mt-2 text-lg font-semibold">Record live. Validate after.</div>
 </div>
-<div className={`rounded-full px-3 py-1 text-xs font-semibold ${isRecording ? "bg-red-500/15 text-red-300" : "bg-white/5 text-white/55"}`}>
+<div className={`rounded-full px-3 py-1 text-xs font-semibold ${isRecording ? "bg-red-500/12 text-red-200" : "bg-white/6 text-white/55"}`}>
 {isRecording ? "Recording" : "Idle"}
 </div>
 </div>
@@ -822,18 +1075,18 @@ Mark Made
 </button>
 <button
 onClick={() => markShot(false)}
-className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white"
+className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white"
 >
 Mark Missed
 </button>
 </div>
 
 {lastClipUrl ? (
-<div className="mt-4 overflow-hidden rounded-2xl border border-white/10 bg-black">
+<div className="mt-4 overflow-hidden rounded-[22px] border border-white/10 bg-black">
 <video src={lastClipUrl} controls className="aspect-video w-full" />
 </div>
 ) : (
-<div className="mt-4 rounded-2xl border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
+<div className="mt-4 rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
 Complete a rep and the most recent clip will appear here.
 </div>
 )}
@@ -844,18 +1097,18 @@ Complete a rep and the most recent clip will appear here.
 <div className="mt-4 space-y-3">
 {reps.length ? (
 reps.map((rep) => (
-<div key={rep.id} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+<div key={rep.id} className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between gap-4">
 <div className="text-sm font-semibold" style={{ color: STATE_COLOR[rep.peakState] }}>
-{rep.peakState}
+{STATE_LABEL[rep.peakState]}
 </div>
 <div className="text-xs text-white/45">
 {Math.max(0.2, (rep.endedAt - rep.startedAt) / 1000).toFixed(1)}s
 </div>
 </div>
 <div className="mt-2 flex flex-wrap gap-2 text-xs text-white/60">
-<span className="rounded-full border border-white/10 px-2 py-1">avg {rep.avgStability}</span>
-<span className="rounded-full border border-white/10 px-2 py-1">peak instability {rep.peakInstability}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">stability {rep.avgStability}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">read {rep.avgDetection}</span>
 {typeof rep.made === "boolean" ? (
 <span className="rounded-full border border-white/10 px-2 py-1">{rep.made ? "made" : "missed"}</span>
 ) : null}
@@ -864,28 +1117,12 @@ reps.map((rep) => (
 </div>
 ))
 ) : (
-<div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
+<div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
 No reps captured yet.
 </div>
 )}
 </div>
 </div>
-</div>
-</div>
-
-<div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5 text-sm text-white/65">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Important</div>
-<div className="mt-3 grid gap-2 md:grid-cols-3">
-<p>
-This is <span className="font-semibold text-white">placement tolerant</span>, not mathematically perfect for every angle.
-It normalizes by body proportions so zoom and distance matter less.
-</p>
-<p>
-Best results: full body visible, camera chest-to-waist height, slight angle or front view, stable tripod, good light.
-</p>
-<p>
-If you want true all-angle robustness later, the next step is multi-camera fusion or adding depth / IMU sensors.
-</p>
 </div>
 </div>
 </div>
@@ -895,7 +1132,7 @@ If you want true all-angle robustness later, the next step is multi-camera fusio
 
 function MetricCard({ label, value }: { label: string; value: string }) {
 return (
-<div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
+<div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
 <div className="text-[10px] uppercase tracking-[0.24em] text-white/40">{label}</div>
 <div className="mt-2 text-lg font-semibold text-white">{value}</div>
 </div>
