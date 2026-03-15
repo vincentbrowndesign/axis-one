@@ -51,15 +51,6 @@ shotCandidate: number;
 releaseStability: number;
 };
 
-type FrameSample = {
-ts: number;
-state: AxisState;
-phase: ShotPhase;
-stability: number;
-detectionStrength: number;
-shotCandidate: number;
-};
-
 type RepRecord = {
 id: string;
 startedAt: number;
@@ -496,27 +487,39 @@ releaseStability,
 };
 }
 
+function pickRecorderMimeType(): string {
+const options = [
+"video/webm;codecs=vp9,opus",
+"video/webm;codecs=vp8,opus",
+"video/webm;codecs=h264,opus",
+"video/webm",
+"video/mp4",
+];
+
+for (const type of options) {
+if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(type)) {
+return type;
+}
+}
+
+return "";
+}
+
 export default function AxisCameraInstrument() {
 const videoRef = useRef<HTMLVideoElement | null>(null);
 const overlayRef = useRef<HTMLCanvasElement | null>(null);
-const recordCanvasRef = useRef<HTMLCanvasElement | null>(null);
 const detectorRef = useRef<posedetection.PoseDetector | null>(null);
 const streamRef = useRef<MediaStream | null>(null);
 const loopRef = useRef<number | null>(null);
 const lastAnalysisRef = useRef(0);
 const signalRef = useRef<number[]>([]);
-const frameHistoryRef = useRef<FrameSample[]>([]);
-const repStartRef = useRef<number | null>(null);
-const repActiveRef = useRef(false);
-const drawRecordingRef = useRef(false);
-const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-const mediaChunksRef = useRef<Blob[]>([]);
-const recordStreamRef = useRef<MediaStream | null>(null);
-const engineBootedRef = useRef(false);
 const prevPhaseRef = useRef<ShotPhase>("IDLE");
 const prevChestYRef = useRef<number | null>(null);
+const engineBootedRef = useRef(false);
+
+const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+const mediaChunksRef = useRef<Blob[]>([]);
 const pendingClipMetaRef = useRef<PendingClipMeta | null>(null);
-const autoClipStopTimeoutRef = useRef<number | null>(null);
 const manualClipStopTimeoutRef = useRef<number | null>(null);
 
 const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
@@ -551,6 +554,7 @@ setEngineError(null);
 try {
 await tf.ready();
 const currentBackend = tf.getBackend();
+
 if (currentBackend !== "webgl") {
 await tf.setBackend("webgl");
 await tf.ready();
@@ -577,7 +581,9 @@ await new Promise((resolve) => setTimeout(resolve, 250));
 }
 }
 
-if (!detector) throw lastError ?? new Error("Detector failed to initialize");
+if (!detector) {
+throw lastError ?? new Error("Detector failed to initialize");
+}
 
 detectorRef.current = detector;
 setEngineStatus("ready");
@@ -644,35 +650,26 @@ pendingClipMetaRef.current = null;
 [],
 );
 
-const clearClipTimeouts = useCallback(() => {
-if (autoClipStopTimeoutRef.current) {
-window.clearTimeout(autoClipStopTimeoutRef.current);
-autoClipStopTimeoutRef.current = null;
-}
+const stopRecording = useCallback(async () => {
 if (manualClipStopTimeoutRef.current) {
 window.clearTimeout(manualClipStopTimeoutRef.current);
 manualClipStopTimeoutRef.current = null;
 }
-}, []);
-
-const stopRecording = useCallback(async () => {
-drawRecordingRef.current = false;
 
 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
 mediaRecorderRef.current.stop();
-} else {
-setIsSavingClip(false);
+setIsRecording(false);
+setIsManualClipActive(false);
+return;
 }
 
 setIsRecording(false);
 setIsManualClipActive(false);
-await safeStopStream(recordStreamRef.current);
-recordStreamRef.current = null;
+setIsSavingClip(false);
 }, []);
 
 const stopCamera = useCallback(async () => {
 stopLoop();
-clearClipTimeouts();
 await stopRecording();
 await safeStopStream(streamRef.current);
 streamRef.current = null;
@@ -682,8 +679,9 @@ if (video) {
 video.pause();
 video.srcObject = null;
 }
+
 setEnabled(false);
-}, [clearClipTimeouts, stopLoop, stopRecording]);
+}, [stopLoop, stopRecording]);
 
 const startCamera = useCallback(
 async (options?: { preferredFacing?: CameraFacing; preferredDeviceId?: string }) => {
@@ -859,13 +857,6 @@ ctx.setLineDash([10, 10]);
 ctx.strokeRect(targetX, targetY, targetWidth, targetHeight);
 ctx.restore();
 
-if (nextMetrics.state === "NO_SUBJECT" || nextMetrics.state === "LOCKING") {
-const alpha = nextMetrics.state === "LOCKING" ? 0.24 + lockPulse * 0.2 : 0.12;
-ctx.fillStyle = `rgba(255,255,255,${alpha})`;
-ctx.fillRect(centerX - 1, targetY + 10, 2, targetHeight - 20);
-ctx.fillRect(targetX + 10, centerY - 1, targetWidth - 20, 2);
-}
-
 ctx.fillStyle = "rgba(0,0,0,0.52)";
 ctx.fillRect(24, 24, 280, 84);
 ctx.fillStyle = accent;
@@ -913,159 +904,80 @@ drawCircle(ctx, ra, 6, accent);
 [lockPulse],
 );
 
-const startRecording = useCallback(() => {
-const recordCanvas = recordCanvasRef.current;
-const overlay = overlayRef.current;
-const video = videoRef.current;
-if (!recordCanvas || !overlay || !video) return false;
+const startRawCameraRecording = useCallback(
+(meta: PendingClipMeta) => {
+const stream = streamRef.current;
+if (!stream) return false;
+if (typeof MediaRecorder === "undefined") return false;
 
-const ctx = recordCanvas.getContext("2d");
-if (!ctx) return false;
+const mimeType = pickRecorderMimeType();
+let recorder: MediaRecorder;
 
-recordCanvas.width = video.videoWidth || VIDEO_W;
-recordCanvas.height = video.videoHeight || VIDEO_H;
+try {
+recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+} catch (error) {
+console.error(error);
+return false;
+}
 
-drawRecordingRef.current = true;
-
-const draw = () => {
-if (!drawRecordingRef.current) return;
-ctx.clearRect(0, 0, recordCanvas.width, recordCanvas.height);
-ctx.drawImage(video, 0, 0, recordCanvas.width, recordCanvas.height);
-ctx.drawImage(overlay, 0, 0, recordCanvas.width, recordCanvas.height);
-requestAnimationFrame(draw);
-};
-requestAnimationFrame(draw);
-
-const stream = recordCanvas.captureStream(30);
-recordStreamRef.current = stream;
-
-const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-? "video/webm;codecs=vp9"
-: "video/webm";
-
-const recorder = new MediaRecorder(stream, { mimeType });
+pendingClipMetaRef.current = meta;
 mediaChunksRef.current = [];
-setIsSavingClip(false);
+mediaRecorderRef.current = recorder;
 
 recorder.ondataavailable = (event) => {
-if (event.data.size > 0) {
+if (event.data && event.data.size > 0) {
 mediaChunksRef.current.push(event.data);
 }
 };
 
-recorder.onstop = async () => {
+recorder.onerror = (event) => {
+console.error("MediaRecorder error", event);
+setIsRecording(false);
+setIsManualClipActive(false);
+setIsSavingClip(false);
+};
+
+recorder.onstop = () => {
 try {
-const blob = new Blob(mediaChunksRef.current, { type: mimeType });
+const finalType =
+recorder.mimeType || mimeType || "video/webm";
+const blob = new Blob(mediaChunksRef.current, { type: finalType });
+
 if (blob.size > 0) {
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
 const url = URL.createObjectURL(blob);
 setLastClipUrl(url);
 finalizePendingClip(url);
+} else {
+pendingClipMetaRef.current = null;
 }
 } finally {
-await safeStopStream(recordStreamRef.current);
-recordStreamRef.current = null;
+setIsRecording(false);
+setIsManualClipActive(false);
 setIsSavingClip(false);
+mediaRecorderRef.current = null;
+mediaChunksRef.current = [];
 }
 };
 
-mediaRecorderRef.current = recorder;
-recorder.start();
+try {
+recorder.start(250);
 setIsRecording(true);
 return true;
-}, [finalizePendingClip, lastClipUrl]);
-
-const scheduleStopRecording = useCallback(
-(ms: number, source: "auto" | "manual") => {
-const timeoutId = window.setTimeout(async () => {
-setIsSavingClip(true);
-await stopRecording();
-}, ms);
-
-if (source === "auto") {
-autoClipStopTimeoutRef.current = timeoutId;
-} else {
-manualClipStopTimeoutRef.current = timeoutId;
+} catch (error) {
+console.error(error);
+pendingClipMetaRef.current = null;
+mediaRecorderRef.current = null;
+return false;
 }
 },
-[stopRecording],
+[finalizePendingClip, lastClipUrl],
 );
-
-const saveAutoRep = useCallback(() => {
-if (!repActiveRef.current || isRecording || isManualClipActive) return;
-
-const endedAt = Date.now();
-const startedAt = repStartRef.current ?? endedAt;
-const clipStart = Math.max(startedAt - AUTO_PRE_ROLL_MS, 0);
-const clipEnd = endedAt + AUTO_POST_ROLL_MS;
-
-const relevantFrames = frameHistoryRef.current.filter(
-(frame) => frame.ts >= clipStart && frame.ts <= clipEnd,
-);
-
-const avgStability = Math.round(mean(relevantFrames.map((f) => f.stability)));
-const avgDetection = Math.round(mean(relevantFrames.map((f) => f.detectionStrength)));
-const releaseFrames = relevantFrames.filter((f) => f.phase === "RELEASE");
-const releaseStability = releaseFrames.length
-? Math.round(mean(releaseFrames.map((f) => f.stability)))
-: 0;
-
-let phase: ShotPhase = "IDLE";
-for (const p of ["RELEASE", "RISE", "SET", "LAND"] as ShotPhase[]) {
-if (relevantFrames.some((frame) => frame.phase === p)) {
-phase = p;
-break;
-}
-}
-
-let peakState: AxisState = "LOST";
-if (phase === "RELEASE") {
-peakState =
-releaseStability >= 78
-? "RELEASE"
-: releaseStability >= 58
-? "SHIFT"
-: releaseStability >= 38
-? "DROP"
-: "LOST";
-} else if (avgStability >= 78) peakState = "ALIGNED";
-else if (avgStability >= 58) peakState = "SHIFT";
-else if (avgStability >= 38) peakState = "DROP";
-
-const meta: PendingClipMeta = {
-source: "auto",
-startedAt: clipStart,
-endedAt: clipEnd,
-phase,
-peakState,
-avgStability,
-avgDetection,
-releaseStability,
-notes: getRepNote({
-avgDetection,
-phase,
-releaseStability,
-peakState,
-source: "auto",
-}),
-made: lastClipMade,
-};
-
-pendingClipMetaRef.current = meta;
-repActiveRef.current = false;
-repStartRef.current = null;
-
-const started = startRecording();
-if (started) {
-scheduleStopRecording(AUTO_PRE_ROLL_MS + AUTO_POST_ROLL_MS, "auto");
-}
-}, [isManualClipActive, isRecording, lastClipMade, scheduleStopRecording, startRecording]);
 
 const manualClip = useCallback(() => {
 if (!enabled || startingCamera || isRecording || isSavingClip) return;
 
 const now = Date.now();
-
 const meta: PendingClipMeta = {
 source: "manual",
 startedAt: now,
@@ -1085,16 +997,21 @@ source: "manual",
 made: lastClipMade,
 };
 
-pendingClipMetaRef.current = meta;
+const started = startRawCameraRecording(meta);
+if (!started) {
+setEngineError({
+title: "Recording unavailable",
+detail: "Manual clip could not start on this browser/device.",
+});
+return;
+}
+
 setIsManualClipActive(true);
 
-const started = startRecording();
-if (started) {
-scheduleStopRecording(manualClipMs, "manual");
-} else {
-setIsManualClipActive(false);
-pendingClipMetaRef.current = null;
-}
+manualClipStopTimeoutRef.current = window.setTimeout(() => {
+setIsSavingClip(true);
+void stopRecording();
+}, manualClipMs);
 }, [
 enabled,
 isRecording,
@@ -1104,51 +1021,19 @@ manualClipMs,
 metrics.detectionStrength,
 metrics.state,
 metrics.stability,
-scheduleStopRecording,
-startRecording,
+startRawCameraRecording,
 startingCamera,
+stopRecording,
 ]);
-
-const trackAutoShot = useCallback(
-(nextMetrics: PoseMetrics, ts: number) => {
-frameHistoryRef.current.push({
-ts,
-state: nextMetrics.state,
-phase: nextMetrics.phase,
-stability: nextMetrics.stability,
-detectionStrength: nextMetrics.detectionStrength,
-shotCandidate: nextMetrics.shotCandidate,
-});
-
-frameHistoryRef.current = frameHistoryRef.current.filter((f) => ts - f.ts <= 12000);
-
-if (isManualClipActive || isRecording || isSavingClip) return;
-
-const active =
-nextMetrics.phase === "SET" ||
-nextMetrics.phase === "RISE" ||
-nextMetrics.phase === "RELEASE";
-
-if (active && !repActiveRef.current) {
-repActiveRef.current = true;
-repStartRef.current = ts;
-}
-
-if (repActiveRef.current && nextMetrics.phase === "LAND") {
-saveAutoRep();
-}
-},
-[isManualClipActive, isRecording, isSavingClip, saveAutoRep],
-);
 
 useEffect(() => {
 if (engineBootedRef.current) return;
 
-initDetector();
+void initDetector();
 
 return () => {
-stopCamera();
-destroyDetector();
+void stopCamera();
+void destroyDetector();
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
 };
 }, [destroyDetector, initDetector, lastClipUrl, stopCamera]);
@@ -1221,7 +1106,6 @@ signalRef.current = nextMetrics.signal;
 prevPhaseRef.current = nextMetrics.phase;
 setMetrics(nextMetrics);
 drawOverlay(pose, nextMetrics);
-trackAutoShot(nextMetrics, ts);
 } catch (error) {
 console.error(error);
 setEngineStatus("error");
@@ -1241,7 +1125,6 @@ engineStatus,
 facingMode,
 metrics.detectionStrength,
 stopLoop,
-trackAutoShot,
 ]);
 
 const signalBars = useMemo(() => {
@@ -1302,8 +1185,8 @@ Axis Instrument
 Structure Through Space + Time
 </h1>
 <p className="mt-2 max-w-3xl text-sm text-white/60 md:text-base">
-Shot phase engine + automatic replay. Manual clip now records and saves
-independently.
+Raw-camera manual clip mode. Tap Clip Rep to record and save the actual
+camera stream.
 </p>
 </div>
 
@@ -1388,13 +1271,13 @@ autoPlay
 muted
 playsInline
 />
+
 <canvas
 ref={overlayRef}
 className={`absolute inset-0 h-full w-full object-cover ${
 facingMode === "user" ? "scale-x-[-1]" : ""
 }`}
 />
-<canvas ref={recordCanvasRef} className="hidden" />
 
 <div className="absolute left-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 backdrop-blur-md">
 <div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
@@ -1541,7 +1424,7 @@ metrics.detectionStrength < 24
 Replay
 </div>
 <div className="mt-2 text-lg font-semibold">
-Auto clip + manual clip.
+Raw camera manual clip.
 </div>
 </div>
 
@@ -1557,7 +1440,7 @@ isManualClipActive
 }`}
 >
 {isManualClipActive
-? "Manual Clip"
+? "Recording Clip"
 : isRecording
 ? "Recording"
 : isSavingClip
@@ -1605,7 +1488,7 @@ className="mt-2 w-full"
 </div>
 ) : (
 <div className="mt-4 rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
-Tap Clip Rep to save a manual replay, even without a shot.
+Tap Clip Rep to save a raw camera replay.
 </div>
 )}
 </div>
