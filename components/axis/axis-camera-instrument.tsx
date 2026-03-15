@@ -219,10 +219,10 @@ const confidence = clamp(mean(pointScores), 0, 1);
 const confidenceSignal = Math.round(confidence * 100);
 const detectionStrength = getDetectionSignal(confidence, frameCoverage, subjectCentered);
 
-const essentialReady = Boolean(shoulderMid && hipMid && (la || ra));
-if (!essentialReady) {
+if (!shoulderMid || !hipMid || (!la && !ra)) {
 const signalValue = Math.max(8, Math.round(detectionStrength * 0.5));
 const nextSignal = [...priorSignal, signalValue].slice(-SIGNAL_BUFFER);
+
 return {
 ready: false,
 state: detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
@@ -265,11 +265,7 @@ const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.34), 0, 1);
 const centeredScore = clamp(smoothstep(subjectCentered, 0.35, 0.9), 0, 1);
 
 const lockStrength = Math.round(
-clamp(
-confidence * 42 + coverageScore * 32 + centeredScore * 26,
-0,
-100,
-),
+clamp(confidence * 42 + coverageScore * 32 + centeredScore * 26, 0, 100),
 );
 
 const rawStability =
@@ -442,9 +438,7 @@ await new Promise((resolve) => setTimeout(resolve, 250));
 }
 }
 
-if (!detector) {
-throw lastError ?? new Error("Detector failed to initialize");
-}
+if (!detector) throw lastError ?? new Error("Detector failed to initialize");
 
 detectorRef.current = detector;
 setEngineStatus("ready");
@@ -487,11 +481,9 @@ loopRef.current = null;
 
 const stopRecording = useCallback(async () => {
 drawRecordingRef.current = false;
-
 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
 mediaRecorderRef.current.stop();
 }
-
 setIsRecording(false);
 await safeStopStream(recordStreamRef.current);
 recordStreamRef.current = null;
@@ -543,6 +535,7 @@ chosenDeviceId = preferredCamera?.deviceId ?? "";
 }
 
 let stream: MediaStream;
+
 try {
 const constraints: MediaStreamConstraints = {
 audio: false,
@@ -560,11 +553,14 @@ height: { ideal: VIDEO_H },
 frameRate: { ideal: 30, max: 30 },
 },
 };
+
 stream = await navigator.mediaDevices.getUserMedia(constraints);
 } catch {
 stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
-video: { facingMode: preferredFacing },
+video: {
+facingMode: preferredFacing,
+},
 });
 }
 
@@ -695,7 +691,6 @@ ctx.fillRect(targetX + 10, centerY - 1, targetWidth - 20, 2);
 
 ctx.fillStyle = "rgba(0,0,0,0.52)";
 ctx.fillRect(24, 24, 260, 76);
-
 ctx.fillStyle = accent;
 ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
 ctx.fillText("SUBJECT READ", 40, 52);
@@ -723,7 +718,6 @@ ctx.textAlign = "left";
 
 ctx.fillStyle = "rgba(0,0,0,0.5)";
 ctx.fillRect(canvas.width - 170, 24, 146, 76);
-
 ctx.fillStyle = accent;
 ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
 ctx.fillText("STATE", canvas.width - 152, 52);
@@ -799,9 +793,7 @@ const recorder = new MediaRecorder(stream, { mimeType });
 mediaChunksRef.current = [];
 
 recorder.ondataavailable = (event) => {
-if (event.data.size > 0) {
-mediaChunksRef.current.push(event.data);
-}
+if (event.data.size > 0) mediaChunksRef.current.push(event.data);
 };
 
 recorder.onstop = async () => {
@@ -1362,7 +1354,9 @@ No reps captured yet.
 function MetricCard({ label, value }: { label: string; value: string }) {
 return (
 <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">{label}</div>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
+{label}
+</div>
 <div className="mt-2 text-lg font-semibold text-white">{value}</div>
 </div>
 );
