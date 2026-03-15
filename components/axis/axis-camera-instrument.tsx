@@ -8,11 +8,16 @@ import * as posedetection from "@tensorflow-models/pose-detection";
 type AxisState =
 | "NO_SUBJECT"
 | "LOCKING"
+| "SET"
+| "RISE"
+| "RELEASE"
+| "LAND"
 | "ALIGNED"
 | "SHIFT"
 | "DROP"
 | "LOST";
 
+type ShotPhase = "IDLE" | "SET" | "RISE" | "RELEASE" | "LAND";
 type CameraFacing = "user" | "environment";
 
 type CameraOption = {
@@ -29,6 +34,7 @@ score: number;
 type PoseMetrics = {
 ready: boolean;
 state: AxisState;
+phase: ShotPhase;
 confidence: number;
 confidenceSignal: number;
 stability: number;
@@ -41,6 +47,17 @@ shoulderLevel: number;
 frameCoverage: number;
 subjectCentered: number;
 signal: number[];
+shotCandidate: number;
+releaseStability: number;
+};
+
+type FrameSample = {
+ts: number;
+state: AxisState;
+phase: ShotPhase;
+stability: number;
+detectionStrength: number;
+poseLike: number;
 };
 
 type RepRecord = {
@@ -48,10 +65,13 @@ id: string;
 startedAt: number;
 endedAt: number;
 peakState: AxisState;
+phase: ShotPhase;
 avgStability: number;
 avgDetection: number;
+releaseStability: number;
 notes: string;
 made?: boolean;
+clipUrl?: string;
 };
 
 type EngineStatus = "idle" | "loading" | "ready" | "error";
@@ -67,10 +87,17 @@ const ANALYSIS_INTERVAL_MS = 66;
 const VIDEO_W = 1280;
 const VIDEO_H = 720;
 const ENGINE_RETRY_LIMIT = 2;
+const PRE_ROLL_MS = 1400;
+const POST_ROLL_MS = 1400;
+const MANUAL_EXTRA_CLIP_MS = 1800;
 
 const STATE_COLOR: Record<AxisState, string> = {
 NO_SUBJECT: "#8C8C8C",
 LOCKING: "#7BD7FF",
+SET: "#5AC8FA",
+RISE: "#9BDB4D",
+RELEASE: "#46E17D",
+LAND: "#FFD54A",
 ALIGNED: "#46E17D",
 SHIFT: "#FFD54A",
 DROP: "#FF9D42",
@@ -80,6 +107,10 @@ LOST: "#FF5757",
 const STATE_LABEL: Record<AxisState, string> = {
 NO_SUBJECT: "NO SUBJECT",
 LOCKING: "LOCKING",
+SET: "SET",
+RISE: "RISE",
+RELEASE: "RELEASE",
+LAND: "LAND",
 ALIGNED: "ALIGNED",
 SHIFT: "SHIFT",
 DROP: "DROP",
@@ -89,6 +120,7 @@ LOST: "LOST",
 const INITIAL_METRICS: PoseMetrics = {
 ready: false,
 state: "NO_SUBJECT",
+phase: "IDLE",
 confidence: 0,
 confidenceSignal: 0,
 stability: 10,
@@ -101,6 +133,8 @@ shoulderLevel: 1,
 frameCoverage: 0,
 subjectCentered: 0,
 signal: [],
+shotCandidate: 0,
+releaseStability: 0,
 };
 
 function clamp(value: number, min: number, max: number): number {
@@ -190,123 +224,6 @@ const raw = confidence * 0.48 + coverage * 0.34 + centered * 0.18;
 return Math.round(clamp(raw * 100, 0, 100));
 }
 
-function analyzePose(
-pose: posedetection.Pose,
-videoWidth: number,
-videoHeight: number,
-priorSignal: number[],
-): PoseMetrics {
-const nose = getPoint(pose, "nose");
-const ls = getPoint(pose, "left_shoulder");
-const rs = getPoint(pose, "right_shoulder");
-const lh = getPoint(pose, "left_hip");
-const rh = getPoint(pose, "right_hip");
-const la = getPoint(pose, "left_ankle");
-const ra = getPoint(pose, "right_ankle");
-
-const shoulderMid = midpoint(ls, rs);
-const hipMid = midpoint(lh, rh);
-const ankleMid = midpoint(la, ra);
-
-const frameCoverage = getBodyCoverage(pose, videoWidth, videoHeight);
-const subjectCentered = getSubjectCentered(pose, videoWidth);
-
-const pointScores = pose.keypoints
-.map((kp) => kp.score ?? 0)
-.filter((score) => score > 0);
-
-const confidence = clamp(mean(pointScores), 0, 1);
-const confidenceSignal = Math.round(confidence * 100);
-const detectionStrength = getDetectionSignal(confidence, frameCoverage, subjectCentered);
-
-if (!shoulderMid || !hipMid || (!la && !ra)) {
-const signalValue = Math.max(8, Math.round(detectionStrength * 0.5));
-const nextSignal = [...priorSignal, signalValue].slice(-SIGNAL_BUFFER);
-
-return {
-ready: false,
-state: detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
-confidence,
-confidenceSignal,
-stability: 10,
-lockStrength: detectionStrength,
-detectionStrength,
-verticalStack: 0,
-torsoLean: 1,
-hipOverBase: 1,
-shoulderLevel: 1,
-frameCoverage,
-subjectCentered,
-signal: nextSignal,
-};
-}
-
-const baseScale = getBaseScale(pose);
-const headX = nose?.x ?? shoulderMid.x;
-const chestX = shoulderMid.x;
-const hipX = hipMid.x;
-const baseX = ankleMid?.x ?? hipMid.x;
-
-const verticalStackRaw =
-(Math.abs(headX - chestX) + Math.abs(chestX - hipX)) / Math.max(baseScale, 1);
-const verticalStack = clamp(1 - verticalStackRaw / 0.5, 0, 1);
-
-const torsoLeanRaw = Math.abs(chestX - hipX) / Math.max(baseScale, 1);
-const torsoLean = clamp(1 - torsoLeanRaw / 0.38, 0, 1);
-
-const ankleSpread = Math.max(distance(la, ra), baseScale * 0.75);
-const hipOverBaseRaw = Math.abs(hipX - baseX) / Math.max(ankleSpread * 0.75, 1);
-const hipOverBase = clamp(1 - hipOverBaseRaw / 0.92, 0, 1);
-
-const shoulderLevelRaw = ls && rs ? Math.abs(ls.y - rs.y) / Math.max(baseScale, 1) : 0;
-const shoulderLevel = clamp(1 - shoulderLevelRaw / 0.32, 0, 1);
-
-const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.34), 0, 1);
-const centeredScore = clamp(smoothstep(subjectCentered, 0.35, 0.9), 0, 1);
-
-const lockStrength = Math.round(
-clamp(confidence * 42 + coverageScore * 32 + centeredScore * 26, 0, 100),
-);
-
-const rawStability =
-verticalStack * 0.32 +
-torsoLean * 0.24 +
-hipOverBase * 0.24 +
-shoulderLevel * 0.08 +
-coverageScore * 0.08 +
-centeredScore * 0.04;
-
-const stability = Math.round(clamp(rawStability * 100, 0, 100));
-
-let state: AxisState = "NO_SUBJECT";
-if (lockStrength < 30) state = "NO_SUBJECT";
-else if (lockStrength < 58) state = "LOCKING";
-else if (stability >= 78) state = "ALIGNED";
-else if (stability >= 58) state = "SHIFT";
-else if (stability >= 38) state = "DROP";
-else state = "LOST";
-
-const signalValue = state === "NO_SUBJECT" ? lockStrength : stability;
-const nextSignal = [...priorSignal, Math.max(8, signalValue)].slice(-SIGNAL_BUFFER);
-
-return {
-ready: true,
-state,
-confidence,
-confidenceSignal,
-stability,
-lockStrength,
-detectionStrength,
-verticalStack,
-torsoLean,
-hipOverBase,
-shoulderLevel,
-frameCoverage,
-subjectCentered,
-signal: nextSignal,
-};
-}
-
 function drawLine(
 ctx: CanvasRenderingContext2D,
 a: JointPoint | null,
@@ -337,15 +254,6 @@ ctx.fillStyle = color;
 ctx.fill();
 }
 
-function getRepNote(rep: RepRecord): string {
-if (rep.avgDetection < 36) return "Weak subject read. Improve framing.";
-if (rep.peakState === "ALIGNED" && rep.avgStability >= 82) return "Repeatable structure.";
-if (rep.peakState === "SHIFT") return "Slight drift through the rep.";
-if (rep.peakState === "DROP") return "Structure dropped during action.";
-if (rep.peakState === "LOST") return "Structure broke outside base.";
-return "Signal captured.";
-}
-
 function getPreferredBackCamera(cameras: CameraOption[]): CameraOption | null {
 if (!cameras.length) return null;
 const back = cameras.find((camera) => /back|rear|environment/i.test(camera.label));
@@ -354,14 +262,193 @@ return back ?? cameras[cameras.length - 1] ?? null;
 
 function getPreferredFrontCamera(cameras: CameraOption[]): CameraOption | null {
 if (!cameras.length) return null;
-const front = cameras.find((camera) =>
-/front|user|facetime|webcam|integrated/i.test(camera.label),
-);
+const front = cameras.find((camera) => /front|user|facetime|webcam|integrated/i.test(camera.label));
 return front ?? cameras[0] ?? null;
 }
 
 async function safeStopStream(stream: MediaStream | null) {
 stream?.getTracks().forEach((track) => track.stop());
+}
+
+function getRepNote(rep: RepRecord): string {
+if (rep.avgDetection < 36) return "Weak subject read. Improve framing.";
+if (rep.phase === "RELEASE" && rep.releaseStability >= 78) return "Stable release window.";
+if (rep.phase === "RISE") return "Good rise. Release not confirmed.";
+if (rep.peakState === "SHIFT") return "Slight drift through the shot.";
+if (rep.peakState === "DROP") return "Structure dropped during shot.";
+if (rep.peakState === "LOST") return "Structure broke outside base.";
+return "Signal captured.";
+}
+
+function analyzePose(
+pose: posedetection.Pose,
+videoWidth: number,
+videoHeight: number,
+priorSignal: number[],
+prevPhase: ShotPhase,
+prevChestY: number | null,
+): PoseMetrics {
+const nose = getPoint(pose, "nose");
+const ls = getPoint(pose, "left_shoulder");
+const rs = getPoint(pose, "right_shoulder");
+const le = getPoint(pose, "left_elbow");
+const re = getPoint(pose, "right_elbow");
+const lw = getPoint(pose, "left_wrist");
+const rw = getPoint(pose, "right_wrist");
+const lh = getPoint(pose, "left_hip");
+const rh = getPoint(pose, "right_hip");
+const lk = getPoint(pose, "left_knee");
+const rk = getPoint(pose, "right_knee");
+const la = getPoint(pose, "left_ankle");
+const ra = getPoint(pose, "right_ankle");
+
+const shoulderMid = midpoint(ls, rs);
+const hipMid = midpoint(lh, rh);
+const ankleMid = midpoint(la, ra);
+const wristMid = midpoint(lw, rw);
+const elbowMid = midpoint(le, re);
+const kneeMid = midpoint(lk, rk);
+
+const frameCoverage = getBodyCoverage(pose, videoWidth, videoHeight);
+const subjectCentered = getSubjectCentered(pose, videoWidth);
+
+const pointScores = pose.keypoints
+.map((kp) => kp.score ?? 0)
+.filter((score) => score > 0);
+const confidence = clamp(mean(pointScores), 0, 1);
+const confidenceSignal = Math.round(confidence * 100);
+const detectionStrength = getDetectionSignal(confidence, frameCoverage, subjectCentered);
+
+if (!shoulderMid || !hipMid || (!la && !ra)) {
+const signalValue = Math.max(8, Math.round(detectionStrength * 0.5));
+const nextSignal = [...priorSignal, signalValue].slice(-SIGNAL_BUFFER);
+return {
+ready: false,
+state: detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
+phase: "IDLE",
+confidence,
+confidenceSignal,
+stability: 10,
+lockStrength: detectionStrength,
+detectionStrength,
+verticalStack: 0,
+torsoLean: 1,
+hipOverBase: 1,
+shoulderLevel: 1,
+frameCoverage,
+subjectCentered,
+signal: nextSignal,
+shotCandidate: 0,
+releaseStability: 0,
+};
+}
+
+const baseScale = getBaseScale(pose);
+const headX = nose?.x ?? shoulderMid.x;
+const chestX = shoulderMid.x;
+const hipX = hipMid.x;
+const baseX = ankleMid?.x ?? hipMid.x;
+
+const verticalStackRaw =
+(Math.abs(headX - chestX) + Math.abs(chestX - hipX)) / Math.max(baseScale, 1);
+const verticalStack = clamp(1 - verticalStackRaw / 0.5, 0, 1);
+
+const torsoLeanRaw = Math.abs(chestX - hipX) / Math.max(baseScale, 1);
+const torsoLean = clamp(1 - torsoLeanRaw / 0.38, 0, 1);
+
+const ankleSpread = Math.max(distance(la, ra), baseScale * 0.75);
+const hipOverBaseRaw = Math.abs(hipX - baseX) / Math.max(ankleSpread * 0.75, 1);
+const hipOverBase = clamp(1 - hipOverBaseRaw / 0.92, 0, 1);
+
+const shoulderLevelRaw = ls && rs ? Math.abs(ls.y - rs.y) / Math.max(baseScale, 1) : 0;
+const shoulderLevel = clamp(1 - shoulderLevelRaw / 0.32, 0, 1);
+
+const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.34), 0, 1);
+const centeredScore = clamp(smoothstep(subjectCentered, 0.35, 0.9), 0, 1);
+const lockStrength = Math.round(
+clamp(confidence * 42 + coverageScore * 32 + centeredScore * 26, 0, 100),
+);
+
+const rawStability =
+verticalStack * 0.32 +
+torsoLean * 0.24 +
+hipOverBase * 0.24 +
+shoulderLevel * 0.08 +
+coverageScore * 0.08 +
+centeredScore * 0.04;
+const stability = Math.round(clamp(rawStability * 100, 0, 100));
+
+const wristAboveChest = wristMid ? clamp((shoulderMid.y - wristMid.y) / Math.max(baseScale, 1), 0, 1) : 0;
+const wristNearFace = wristMid && nose ? clamp((nose.y - wristMid.y + baseScale * 0.35) / Math.max(baseScale, 1), 0, 1) : 0;
+const elbowLift = elbowMid ? clamp((shoulderMid.y - elbowMid.y + baseScale * 0.25) / Math.max(baseScale, 1), 0, 1) : 0;
+const kneeBend = kneeMid ? clamp((kneeMid.y - hipMid.y) / Math.max(baseScale * 1.3, 1), 0, 1) : 0.35;
+const chestRise = prevChestY !== null ? clamp((prevChestY - shoulderMid.y) / Math.max(baseScale * 0.55, 1), -1, 1) : 0;
+const riseSignal = clamp((chestRise + wristAboveChest * 0.6 + elbowLift * 0.4), 0, 1);
+
+const shotCandidate = Math.round(
+clamp(
+wristAboveChest * 34 + wristNearFace * 18 + elbowLift * 14 + kneeBend * 12 + lockStrength * 0.22,
+0,
+100,
+),
+);
+
+let phase: ShotPhase = "IDLE";
+if (lockStrength < 46) {
+phase = "IDLE";
+} else if (shotCandidate >= 38 && wristAboveChest < 0.2 && kneeBend > 0.18) {
+phase = "SET";
+} else if (shotCandidate >= 48 && riseSignal > 0.2 && wristAboveChest < 0.45) {
+phase = "RISE";
+} else if (shotCandidate >= 56 && wristAboveChest >= 0.45 && wristNearFace >= 0.25) {
+phase = "RELEASE";
+} else if (prevPhase === "RELEASE" && wristAboveChest < 0.25) {
+phase = "LAND";
+} else if (prevPhase === "RISE" && shotCandidate >= 46) {
+phase = "RISE";
+} else if (prevPhase === "SET" && shotCandidate >= 34) {
+phase = "SET";
+}
+
+let state: AxisState = "NO_SUBJECT";
+if (lockStrength < 30) state = "NO_SUBJECT";
+else if (lockStrength < 58) state = "LOCKING";
+else if (phase === "SET") state = "SET";
+else if (phase === "RISE") state = "RISE";
+else if (phase === "RELEASE") state = "RELEASE";
+else if (phase === "LAND") state = "LAND";
+else if (stability >= 78) state = "ALIGNED";
+else if (stability >= 58) state = "SHIFT";
+else if (stability >= 38) state = "DROP";
+else state = "LOST";
+
+const releaseStability = phase === "RELEASE" ? stability : 0;
+const signalValue = phase === "RELEASE" || phase === "RISE"
+? Math.max(stability, lockStrength)
+: state === "NO_SUBJECT"
+? lockStrength
+: stability;
+const nextSignal = [...priorSignal, Math.max(8, signalValue)].slice(-SIGNAL_BUFFER);
+
+return {
+ready: true,
+state,
+phase,
+confidence,
+confidenceSignal,
+stability,
+lockStrength,
+detectionStrength,
+verticalStack,
+torsoLean,
+hipOverBase,
+shoulderLevel,
+frameCoverage,
+subjectCentered,
+signal: nextSignal,
+shotCandidate,
+releaseStability,
+};
 }
 
 export default function AxisCameraInstrument() {
@@ -373,7 +460,7 @@ const streamRef = useRef<MediaStream | null>(null);
 const loopRef = useRef<number | null>(null);
 const lastAnalysisRef = useRef(0);
 const signalRef = useRef<number[]>([]);
-const repSignalRef = useRef<number[]>([]);
+const frameHistoryRef = useRef<FrameSample[]>([]);
 const repStartRef = useRef<number | null>(null);
 const repActiveRef = useRef(false);
 const drawRecordingRef = useRef(false);
@@ -381,6 +468,10 @@ const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 const mediaChunksRef = useRef<Blob[]>([]);
 const recordStreamRef = useRef<MediaStream | null>(null);
 const engineBootedRef = useRef(false);
+const prevPhaseRef = useRef<ShotPhase>("IDLE");
+const prevChestYRef = useRef<number | null>(null);
+const lastAutoCloseAtRef = useRef<number>(0);
+const lastMetricsRef = useRef<PoseMetrics>(INITIAL_METRICS);
 
 const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
 const [engineError, setEngineError] = useState<EngineError | null>(null);
@@ -396,6 +487,7 @@ const [reps, setReps] = useState<RepRecord[]>([]);
 const [lastClipUrl, setLastClipUrl] = useState("");
 const [lastClipMade, setLastClipMade] = useState<boolean | undefined>(undefined);
 const [lockPulse, setLockPulse] = useState(0);
+const [clipWindowMs, setClipWindowMs] = useState(2800);
 
 const destroyDetector = useCallback(async () => {
 if (detectorRef.current) {
@@ -410,7 +502,6 @@ setEngineError(null);
 
 try {
 await tf.ready();
-
 const currentBackend = tf.getBackend();
 if (currentBackend !== "webgl") {
 await tf.setBackend("webgl");
@@ -494,13 +585,11 @@ stopLoop();
 await stopRecording();
 await safeStopStream(streamRef.current);
 streamRef.current = null;
-
 const video = videoRef.current;
 if (video) {
 video.pause();
 video.srcObject = null;
 }
-
 setEnabled(false);
 }, [stopLoop, stopRecording]);
 
@@ -535,7 +624,6 @@ chosenDeviceId = preferredCamera?.deviceId ?? "";
 }
 
 let stream: MediaStream;
-
 try {
 const constraints: MediaStreamConstraints = {
 audio: false,
@@ -553,14 +641,11 @@ height: { ideal: VIDEO_H },
 frameRate: { ideal: 30, max: 30 },
 },
 };
-
 stream = await navigator.mediaDevices.getUserMedia(constraints);
 } catch {
 stream = await navigator.mediaDevices.getUserMedia({
 audio: false,
-video: {
-facingMode: preferredFacing,
-},
+video: { facingMode: preferredFacing },
 });
 }
 
@@ -578,7 +663,6 @@ setFacingMode(resolvedFacing);
 
 const video = videoRef.current;
 if (!video) throw new Error("Missing video element");
-
 video.srcObject = stream;
 video.playsInline = true;
 video.muted = true;
@@ -603,21 +687,16 @@ setStartingCamera(false);
 const restartEngine = useCallback(async () => {
 const detector = await initDetector();
 if (detector && enabled) {
-await startCamera({
-preferredFacing: facingMode,
-preferredDeviceId: activeCameraId || undefined,
-});
+await startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined });
 }
 }, [activeCameraId, enabled, facingMode, initDetector, startCamera]);
 
 const switchCamera = useCallback(async () => {
 if (switchingCamera || startingCamera) return;
 setSwitchingCamera(true);
-
 try {
 let cameras = cameraOptions;
 if (!cameras.length) cameras = await loadCameraOptions();
-
 const currentIndex = cameras.findIndex((camera) => camera.deviceId === activeCameraId);
 let nextCamera: CameraOption | null = null;
 
@@ -632,26 +711,13 @@ nextFacing === "environment"
 }
 
 const nextFacing: CameraFacing = facingMode === "user" ? "environment" : "user";
-
-await startCamera({
-preferredFacing: nextFacing,
-preferredDeviceId: nextCamera?.deviceId,
-});
+await startCamera({ preferredFacing: nextFacing, preferredDeviceId: nextCamera?.deviceId });
 } finally {
 setSwitchingCamera(false);
 }
-}, [
-activeCameraId,
-cameraOptions,
-facingMode,
-loadCameraOptions,
-startCamera,
-startingCamera,
-switchingCamera,
-]);
+}, [activeCameraId, cameraOptions, facingMode, loadCameraOptions, startCamera, startingCamera, switchingCamera]);
 
-const drawOverlay = useCallback(
-(pose: posedetection.Pose | null, nextMetrics: PoseMetrics) => {
+const drawOverlay = useCallback((pose: posedetection.Pose | null, nextMetrics: PoseMetrics) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
 if (!canvas || !video) return;
@@ -674,10 +740,7 @@ const targetX = centerX - targetWidth / 2;
 const targetY = centerY - targetHeight / 2;
 
 ctx.save();
-ctx.strokeStyle =
-nextMetrics.state === "LOCKING"
-? `rgba(123,215,255,${0.58 + lockPulse * 0.25})`
-: "rgba(255,255,255,0.14)";
+ctx.strokeStyle = nextMetrics.state === "LOCKING" ? `rgba(123,215,255,${0.58 + lockPulse * 0.25})` : "rgba(255,255,255,0.14)";
 ctx.lineWidth = nextMetrics.state === "LOCKING" ? 3 : 2;
 ctx.setLineDash([10, 10]);
 ctx.strokeRect(targetX, targetY, targetWidth, targetHeight);
@@ -688,41 +751,15 @@ const alpha = nextMetrics.state === "LOCKING" ? 0.24 + lockPulse * 0.2 : 0.12;
 ctx.fillStyle = `rgba(255,255,255,${alpha})`;
 ctx.fillRect(centerX - 1, targetY + 10, 2, targetHeight - 20);
 ctx.fillRect(targetX + 10, centerY - 1, targetWidth - 20, 2);
-
-ctx.fillStyle = "rgba(0,0,0,0.52)";
-ctx.fillRect(24, 24, 260, 76);
-ctx.fillStyle = accent;
-ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
-ctx.fillText("SUBJECT READ", 40, 52);
-ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
-ctx.fillText(STATE_LABEL[nextMetrics.state], 40, 84);
-
-ctx.fillStyle = "rgba(255,255,255,0.88)";
-ctx.font = "600 18px Inter, ui-sans-serif, system-ui";
-ctx.textAlign = "center";
-ctx.fillText(
-nextMetrics.state === "LOCKING" ? "HOLD POSITION" : "ENTER FRAME",
-centerX,
-targetY + targetHeight / 2 - 8,
-);
-
-ctx.font = "500 14px Inter, ui-sans-serif, system-ui";
-ctx.fillStyle = "rgba(255,255,255,0.62)";
-ctx.fillText(
-"show shoulders + hips for a live read",
-centerX,
-targetY + targetHeight / 2 + 20,
-);
-ctx.textAlign = "left";
 }
 
-ctx.fillStyle = "rgba(0,0,0,0.5)";
-ctx.fillRect(canvas.width - 170, 24, 146, 76);
+ctx.fillStyle = "rgba(0,0,0,0.52)";
+ctx.fillRect(24, 24, 280, 84);
 ctx.fillStyle = accent;
 ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
-ctx.fillText("STATE", canvas.width - 152, 52);
-ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
-ctx.fillText(STATE_LABEL[nextMetrics.state], canvas.width - 152, 84);
+ctx.fillText("SHOT PHASE", 40, 52);
+ctx.font = "700 30px Inter, ui-sans-serif, system-ui";
+ctx.fillText(nextMetrics.phase === "IDLE" ? STATE_LABEL[nextMetrics.state] : nextMetrics.phase, 40, 86);
 
 if (!pose) return;
 
@@ -755,16 +792,13 @@ drawCircle(ctx, shoulderMid, 7, accent);
 drawCircle(ctx, hipMid, 7, accent);
 drawCircle(ctx, la, 6, accent);
 drawCircle(ctx, ra, 6, accent);
-},
-[lockPulse],
-);
+}, [lockPulse]);
 
 const startRecording = useCallback(() => {
 const recordCanvas = recordCanvasRef.current;
 const overlay = overlayRef.current;
 const video = videoRef.current;
 if (!recordCanvas || !overlay || !video) return;
-
 const ctx = recordCanvas.getContext("2d");
 if (!ctx) return;
 
@@ -772,7 +806,6 @@ recordCanvas.width = video.videoWidth || VIDEO_W;
 recordCanvas.height = video.videoHeight || VIDEO_H;
 
 drawRecordingRef.current = true;
-
 const draw = () => {
 if (!drawRecordingRef.current) return;
 ctx.clearRect(0, 0, recordCanvas.width, recordCanvas.height);
@@ -784,18 +817,13 @@ requestAnimationFrame(draw);
 
 const stream = recordCanvas.captureStream(30);
 recordStreamRef.current = stream;
-
-const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
-? "video/webm;codecs=vp9"
-: "video/webm";
+const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9") ? "video/webm;codecs=vp9" : "video/webm";
 
 const recorder = new MediaRecorder(stream, { mimeType });
 mediaChunksRef.current = [];
-
 recorder.ondataavailable = (event) => {
 if (event.data.size > 0) mediaChunksRef.current.push(event.data);
 };
-
 recorder.onstop = async () => {
 const blob = new Blob(mediaChunksRef.current, { type: mimeType });
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
@@ -809,66 +837,95 @@ recorder.start();
 setIsRecording(true);
 }, [lastClipUrl]);
 
-const closeRep = useCallback(() => {
+const closeRep = useCallback((reason: "auto" | "manual" = "auto") => {
 if (!repActiveRef.current) return;
 
 repActiveRef.current = false;
 const endedAt = Date.now();
 const startedAt = repStartRef.current ?? endedAt;
-const recent = repSignalRef.current.slice(-30);
-const avgStability = Math.round(mean(recent));
-const avgDetection = metrics.detectionStrength;
+const relevantFrames = frameHistoryRef.current.filter(
+(frame) => frame.ts >= startedAt - PRE_ROLL_MS && frame.ts <= endedAt + (reason === "manual" ? MANUAL_EXTRA_CLIP_MS : POST_ROLL_MS),
+);
 
-let peakState: AxisState = "NO_SUBJECT";
-if (avgStability >= 78) peakState = "ALIGNED";
+const avgStability = Math.round(mean(relevantFrames.map((f) => f.stability)));
+const avgDetection = Math.round(mean(relevantFrames.map((f) => f.detectionStrength)));
+const releaseFrames = relevantFrames.filter((f) => f.phase === "RELEASE");
+const releaseStability = releaseFrames.length
+? Math.round(mean(releaseFrames.map((f) => f.stability)))
+: 0;
+
+let peakState: AxisState = "LOST";
+let phase: ShotPhase = "IDLE";
+const priority = ["RELEASE", "RISE", "SET", "LAND"] as ShotPhase[];
+for (const p of priority) {
+if (relevantFrames.some((frame) => frame.phase === p)) {
+phase = p;
+break;
+}
+}
+if (phase === "RELEASE") peakState = releaseStability >= 78 ? "RELEASE" : releaseStability >= 58 ? "SHIFT" : releaseStability >= 38 ? "DROP" : "LOST";
+else if (avgStability >= 78) peakState = "ALIGNED";
 else if (avgStability >= 58) peakState = "SHIFT";
 else if (avgStability >= 38) peakState = "DROP";
-else peakState = "LOST";
 
 const nextRep: RepRecord = {
 id: nowId(),
-startedAt,
-endedAt,
+startedAt: Math.max(startedAt - PRE_ROLL_MS, 0),
+endedAt: endedAt + (reason === "manual" ? MANUAL_EXTRA_CLIP_MS : POST_ROLL_MS),
 peakState,
+phase,
 avgStability,
 avgDetection,
+releaseStability,
 notes: "",
 made: lastClipMade,
 };
-
 nextRep.notes = getRepNote(nextRep);
 
 setReps((prev) => [nextRep, ...prev].slice(0, 8));
 repStartRef.current = null;
+lastAutoCloseAtRef.current = endedAt;
 stopRecording();
-}, [lastClipMade, metrics.detectionStrength, stopRecording]);
+}, [lastClipMade, stopRecording]);
 
-const trackRep = useCallback(
-(nextMetrics: PoseMetrics) => {
-repSignalRef.current.push(nextMetrics.stability);
-if (repSignalRef.current.length > 90) repSignalRef.current.shift();
+const trackRep = useCallback((nextMetrics: PoseMetrics, ts: number) => {
+frameHistoryRef.current.push({
+ts,
+state: nextMetrics.state,
+phase: nextMetrics.phase,
+stability: nextMetrics.stability,
+detectionStrength: nextMetrics.detectionStrength,
+poseLike: nextMetrics.shotCandidate,
+});
+frameHistoryRef.current = frameHistoryRef.current.filter((f) => ts - f.ts <= 12000);
 
-const liveAvg = mean(repSignalRef.current.slice(-6));
-const active = nextMetrics.ready && nextMetrics.lockStrength >= 58 && liveAvg >= 48;
+const active = nextMetrics.phase === "SET" || nextMetrics.phase === "RISE" || nextMetrics.phase === "RELEASE";
 
 if (active && !repActiveRef.current) {
 repActiveRef.current = true;
-repStartRef.current = Date.now();
-startRecording();
+repStartRef.current = ts;
+if (!isRecording) startRecording();
 }
 
-if (!active && repActiveRef.current) {
-closeRep();
+if (repActiveRef.current && nextMetrics.phase === "LAND" && ts - lastAutoCloseAtRef.current > 500) {
+closeRep("auto");
 }
-},
-[closeRep, startRecording],
-);
+}, [closeRep, isRecording, startRecording]);
+
+const manualClip = useCallback(() => {
+if (!repActiveRef.current) {
+repActiveRef.current = true;
+repStartRef.current = Date.now() - PRE_ROLL_MS;
+if (!isRecording) startRecording();
+window.setTimeout(() => closeRep("manual"), MANUAL_EXTRA_CLIP_MS);
+return;
+}
+closeRep("manual");
+}, [closeRep, isRecording, startRecording]);
 
 useEffect(() => {
 if (engineBootedRef.current) return;
-
 initDetector();
-
 return () => {
 stopCamera();
 destroyDetector();
@@ -882,7 +939,6 @@ const interval = window.setInterval(() => {
 frame += 1;
 setLockPulse((Math.sin(frame * 0.24) + 1) / 2);
 }, 60);
-
 return () => window.clearInterval(interval);
 }, []);
 
@@ -894,13 +950,11 @@ return;
 
 const analyze = async (ts: number) => {
 loopRef.current = requestAnimationFrame(analyze);
-
 const video = videoRef.current;
 const detector = detectorRef.current;
 if (!video || !detector) return;
 if (video.readyState < 2) return;
 if (ts - lastAnalysisRef.current < ANALYSIS_INTERVAL_MS) return;
-
 lastAnalysisRef.current = ts;
 
 try {
@@ -908,32 +962,38 @@ const poses = await detector.estimatePoses(video, {
 maxPoses: 1,
 flipHorizontal: facingMode === "user",
 });
-
 const pose = poses[0] ?? null;
 
 let nextMetrics = INITIAL_METRICS;
 if (pose) {
+const shoulderMid = midpoint(getPoint(pose, "left_shoulder"), getPoint(pose, "right_shoulder"));
 nextMetrics = analyzePose(
 pose,
 video.videoWidth,
 video.videoHeight,
 signalRef.current,
+prevPhaseRef.current,
+prevChestYRef.current,
 );
+prevChestYRef.current = shoulderMid?.y ?? prevChestYRef.current;
 } else {
-const fallbackSignal = Math.max(8, Math.round(metrics.detectionStrength * 0.5));
+const fallbackSignal = Math.max(8, Math.round(lastMetricsRef.current.detectionStrength * 0.5));
 nextMetrics = {
 ...INITIAL_METRICS,
-state: metrics.detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
-detectionStrength: metrics.detectionStrength,
-lockStrength: metrics.detectionStrength,
+state: lastMetricsRef.current.detectionStrength >= 28 ? "LOCKING" : "NO_SUBJECT",
+phase: "IDLE",
+detectionStrength: lastMetricsRef.current.detectionStrength,
+lockStrength: lastMetricsRef.current.detectionStrength,
 signal: [...signalRef.current, fallbackSignal].slice(-SIGNAL_BUFFER),
 };
 }
 
 signalRef.current = nextMetrics.signal;
+prevPhaseRef.current = nextMetrics.phase;
+lastMetricsRef.current = nextMetrics;
 setMetrics(nextMetrics);
 drawOverlay(pose, nextMetrics);
-trackRep(nextMetrics);
+trackRep(nextMetrics, ts);
 } catch (error) {
 console.error(error);
 setEngineStatus("error");
@@ -946,25 +1006,15 @@ detail: "Pose engine did not initialize. Retry engine or restart camera.",
 
 loopRef.current = requestAnimationFrame(analyze);
 return () => stopLoop();
-}, [
-drawOverlay,
-enabled,
-engineStatus,
-facingMode,
-metrics.detectionStrength,
-stopLoop,
-trackRep,
-]);
+}, [drawOverlay, enabled, engineStatus, facingMode, stopLoop, trackRep]);
 
 const signalBars = useMemo(() => {
 return metrics.signal.map((value, index) => {
 let color = STATE_COLOR.NO_SUBJECT;
-if (value >= 78) color = STATE_COLOR.ALIGNED;
-else if (value >= 58) color = STATE_COLOR.SHIFT;
-else if (value >= 38) color = STATE_COLOR.DROP;
+if (value >= 78) color = STATE_COLOR.RELEASE;
+else if (value >= 58) color = STATE_COLOR.RISE;
+else if (value >= 38) color = STATE_COLOR.LAND;
 else if (value >= 24) color = STATE_COLOR.LOCKING;
-else color = STATE_COLOR.NO_SUBJECT;
-
 return {
 id: `${index}-${value}`,
 value,
@@ -976,21 +1026,23 @@ active: index === metrics.signal.length - 1,
 
 const liveReadLabel = useMemo(() => {
 if (engineStatus === "error") return "INSTRUMENT OFFLINE";
+if (metrics.phase !== "IDLE") return `PHASE ${metrics.phase}`;
 if (metrics.state === "NO_SUBJECT") return "NO LIVE READ";
 if (metrics.state === "LOCKING") return "SIGNAL ACQUIRING";
 if (metrics.state === "ALIGNED") return "STRUCTURE STABLE";
 if (metrics.state === "SHIFT") return "STRUCTURE DRIFT";
 if (metrics.state === "DROP") return "STRUCTURE DROP";
 return "STRUCTURE LOST";
-}, [engineStatus, metrics.state]);
+}, [engineStatus, metrics.phase, metrics.state]);
 
 const subjectBarLabel = useMemo(() => {
+if (metrics.phase !== "IDLE") return metrics.phase;
 if (metrics.detectionStrength < 12) return "no subject";
 if (metrics.detectionStrength < 30) return "weak read";
 if (metrics.detectionStrength < 58) return "locking";
 if (metrics.detectionStrength < 80) return "good read";
 return "strong read";
-}, [metrics.detectionStrength]);
+}, [metrics.detectionStrength, metrics.phase]);
 
 const markShot = useCallback((made: boolean) => {
 setLastClipMade(made);
@@ -1006,16 +1058,10 @@ return (
 <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 lg:px-8">
 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.32em] text-white/40">
-Axis Instrument
-</div>
-<h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-5xl">
-Structure Through Space + Time
-</h1>
+<div className="text-xs uppercase tracking-[0.32em] text-white/40">Axis Instrument</div>
+<h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-5xl">Structure Through Space + Time</h1>
 <p className="mt-2 max-w-3xl text-sm text-white/60 md:text-base">
-Camera-placement tolerant by normalizing to body proportions instead of
-screen position. Live subject read, locking state, structure signal,
-replay after rep.
+Shot phase engine + automatic pre-roll and post-roll replay. Manual clip is also available.
 </p>
 </div>
 
@@ -1025,54 +1071,38 @@ onClick={() => (enabled ? stopCamera() : startCamera())}
 disabled={startingCamera || engineStatus === "loading"}
 className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
 >
-{enabled
-? "Stop Camera"
-: startingCamera || engineStatus === "loading"
-? "Starting"
-: "Start Camera"}
+{enabled ? "Stop Camera" : startingCamera || engineStatus === "loading" ? "Starting" : "Start Camera"}
 </button>
-
 <button
 onClick={switchCamera}
 disabled={!enabled || switchingCamera || startingCamera}
-className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
 >
 {switchingCamera ? "Switching" : "Switch Camera"}
+</button>
+<button
+onClick={manualClip}
+disabled={!enabled || startingCamera}
+className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+>
+Clip Rep
 </button>
 </div>
 </div>
 
 {engineError ? (
-<div className="rounded-[24px] border border-red-500/30 bg-red-500/10 px-5 py-4">
+<div className="rounded-[24px] border border-red-500/30 bg-red-500/8 px-5 py-4">
 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-red-200/70">
-Instrument Status
+<div className="text-xs uppercase tracking-[0.28em] text-red-200/70">Instrument Status</div>
+<div className="mt-1 text-xl font-semibold text-red-100">{engineError.title}</div>
+<div className="mt-1 text-sm text-red-100/80">{engineError.detail}</div>
 </div>
-<div className="mt-1 text-xl font-semibold text-red-100">
-{engineError.title}
-</div>
-<div className="mt-1 text-sm text-red-100/80">
-{engineError.detail}
-</div>
-</div>
-
 <div className="flex gap-3">
+<button onClick={restartEngine} className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black">Retry Engine</button>
 <button
-onClick={restartEngine}
-className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black"
->
-Retry Engine
-</button>
-
-<button
-onClick={() =>
-startCamera({
-preferredFacing: facingMode,
-preferredDeviceId: activeCameraId || undefined,
-})
-}
-className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white"
+onClick={() => startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined })}
+className="rounded-2xl border border-white/10 bg-white/8 px-4 py-3 text-sm font-semibold text-white"
 >
 Restart Camera
 </button>
@@ -1086,84 +1116,42 @@ Restart Camera
 <div className="relative aspect-video bg-black">
 <video
 ref={videoRef}
-className={`absolute inset-0 h-full w-full object-cover ${
-facingMode === "user" ? "scale-x-[-1]" : ""
-}`}
+className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`}
 autoPlay
 muted
 playsInline
 />
-
 <canvas
 ref={overlayRef}
-className={`absolute inset-0 h-full w-full object-cover ${
-facingMode === "user" ? "scale-x-[-1]" : ""
-}`}
+className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`}
 />
-
 <canvas ref={recordCanvasRef} className="hidden" />
 
 <div className="absolute left-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 backdrop-blur-md">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
-State
-</div>
-<div
-className="mt-1 text-2xl font-semibold"
-style={{ color: STATE_COLOR[metrics.state] }}
->
-{STATE_LABEL[metrics.state]}
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Phase</div>
+<div className="mt-1 text-2xl font-semibold" style={{ color: STATE_COLOR[metrics.state] }}>
+{metrics.phase === "IDLE" ? STATE_LABEL[metrics.state] : metrics.phase}
 </div>
 </div>
 
 <div className="absolute right-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-right backdrop-blur-md">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
-Stability
-</div>
-<div className="mt-1 text-3xl font-semibold">{metrics.stability}</div>
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Release</div>
+<div className="mt-1 text-3xl font-semibold">{metrics.releaseStability}</div>
 </div>
 
 <div className="absolute inset-x-4 bottom-4 rounded-[26px] border border-white/10 bg-black/62 p-4 backdrop-blur-md">
 <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
 <div>
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
-Structure Signal
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Structure Signal</div>
+<div className="mt-1 text-sm font-medium text-white/80">{liveReadLabel}</div>
 </div>
-<div className="mt-1 text-sm font-medium text-white/80">
-{liveReadLabel}
-</div>
-</div>
-
-<div className="flex flex-wrap items-center gap-2 text-xs text-white/60">
-<span
-className="inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.NO_SUBJECT }}
-/>{" "}
-no subject
-<span
-className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.LOCKING }}
-/>{" "}
-locking
-<span
-className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.ALIGNED }}
-/>{" "}
-aligned
-<span
-className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.SHIFT }}
-/>{" "}
-shift
-<span
-className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.DROP }}
-/>{" "}
-drop
-<span
-className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
-style={{ backgroundColor: STATE_COLOR.LOST }}
-/>{" "}
-lost
+<div className="flex items-center gap-2 text-xs text-white/60 flex-wrap">
+<span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.NO_SUBJECT }} /> no subject
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOCKING }} /> locking
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.RISE }} /> rise
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.RELEASE }} /> release
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LAND }} /> land
+<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOST }} /> lost
 </div>
 </div>
 
@@ -1184,9 +1172,7 @@ transform: bar.active ? "scaleY(1.05)" : "scaleY(1)",
 />
 ))
 ) : (
-<div className="flex w-full items-center justify-center text-xs uppercase tracking-[0.3em] text-white/28">
-no live read
-</div>
+<div className="flex w-full items-center justify-center text-xs uppercase tracking-[0.3em] text-white/28">no live read</div>
 )}
 </div>
 </div>
@@ -1196,26 +1182,15 @@ no live read
 
 <div className="flex flex-col gap-6">
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Signal Integrity
-</div>
-
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Signal Integrity</div>
 <div className="mt-4 rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between gap-4">
 <div>
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
-Subject Read
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">Subject Read</div>
+<div className="mt-2 text-3xl font-semibold text-white">{metrics.detectionStrength}%</div>
 </div>
-<div className="mt-2 text-3xl font-semibold text-white">
-{metrics.detectionStrength}%
+<div className="text-sm capitalize text-white/55">{subjectBarLabel}</div>
 </div>
-</div>
-
-<div className="text-sm capitalize text-white/55">
-{subjectBarLabel}
-</div>
-</div>
-
 <div className="mt-4 h-4 overflow-hidden rounded-full bg-white/8">
 <div
 className="h-full rounded-full transition-all duration-200"
@@ -1237,51 +1212,39 @@ metrics.detectionStrength < 24
 <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
 <MetricCard label="Confidence" value={`${metrics.confidenceSignal}%`} />
 <MetricCard label="Lock" value={`${metrics.lockStrength}%`} />
-<MetricCard
-label="Vertical Stack"
-value={`${Math.round(metrics.verticalStack * 100)}%`}
-/>
-<MetricCard
-label="Hip Over Base"
-value={`${Math.round(metrics.hipOverBase * 100)}%`}
-/>
+<MetricCard label="Shot Candidate" value={`${metrics.shotCandidate}%`} />
+<MetricCard label="Release Stability" value={`${metrics.releaseStability}%`} />
 </div>
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
 <div className="flex items-center justify-between gap-3">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Replay
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Replay</div>
+<div className="mt-2 text-lg font-semibold">Auto clip + manual clip.</div>
 </div>
-<div className="mt-2 text-lg font-semibold">
-Record live. Validate after.
-</div>
-</div>
-
-<div
-className={`rounded-full px-3 py-1 text-xs font-semibold ${
-isRecording ? "bg-red-500/12 text-red-200" : "bg-white/6 text-white/55"
-}`}
->
+<div className={`rounded-full px-3 py-1 text-xs font-semibold ${isRecording ? "bg-red-500/12 text-red-200" : "bg-white/6 text-white/55"}`}>
 {isRecording ? "Recording" : "Idle"}
 </div>
 </div>
 
-<div className="mt-4 flex gap-3">
-<button
-onClick={() => markShot(true)}
-className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black"
->
-Mark Made
-</button>
+<div className="mt-4 grid grid-cols-2 gap-3">
+<button onClick={() => markShot(true)} className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black">Mark Made</button>
+<button onClick={() => markShot(false)} className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white">Mark Missed</button>
+</div>
 
-<button
-onClick={() => markShot(false)}
-className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white"
->
-Mark Missed
-</button>
+<div className="mt-4">
+<label className="text-[10px] uppercase tracking-[0.24em] text-white/40">Clip Window</label>
+<input
+type="range"
+min={1800}
+max={5000}
+step={200}
+value={clipWindowMs}
+onChange={(e) => setClipWindowMs(Number(e.target.value))}
+className="mt-2 w-full"
+/>
+<div className="mt-1 text-sm text-white/55">{(clipWindowMs / 1000).toFixed(1)}s total target</div>
 </div>
 
 {lastClipUrl ? (
@@ -1290,57 +1253,36 @@ Mark Missed
 </div>
 ) : (
 <div className="mt-4 rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
-Complete a rep and the most recent clip will appear here.
+Complete a shot cycle or tap Clip Rep.
 </div>
 )}
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">
-Recent Reps
-</div>
-
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">Recent Reps</div>
 <div className="mt-4 space-y-3">
 {reps.length ? (
 reps.map((rep) => (
-<div
-key={rep.id}
-className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4"
->
+<div key={rep.id} className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between gap-4">
-<div
-className="text-sm font-semibold"
-style={{ color: STATE_COLOR[rep.peakState] }}
->
-{STATE_LABEL[rep.peakState]}
+<div className="text-sm font-semibold" style={{ color: STATE_COLOR[rep.peakState] }}>
+{rep.phase !== "IDLE" ? rep.phase : STATE_LABEL[rep.peakState]}
 </div>
-
-<div className="text-xs text-white/45">
-{Math.max(0.2, (rep.endedAt - rep.startedAt) / 1000).toFixed(1)}s
+<div className="text-xs text-white/45">{Math.max(0.2, (rep.endedAt - rep.startedAt) / 1000).toFixed(1)}s</div>
 </div>
-</div>
-
 <div className="mt-2 flex flex-wrap gap-2 text-xs text-white/60">
-<span className="rounded-full border border-white/10 px-2 py-1">
-stability {rep.avgStability}
-</span>
-<span className="rounded-full border border-white/10 px-2 py-1">
-read {rep.avgDetection}
-</span>
+<span className="rounded-full border border-white/10 px-2 py-1">stability {rep.avgStability}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">read {rep.avgDetection}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">release {rep.releaseStability}</span>
 {typeof rep.made === "boolean" ? (
-<span className="rounded-full border border-white/10 px-2 py-1">
-{rep.made ? "made" : "missed"}
-</span>
+<span className="rounded-full border border-white/10 px-2 py-1">{rep.made ? "made" : "missed"}</span>
 ) : null}
 </div>
-
 <div className="mt-2 text-sm text-white/70">{rep.notes}</div>
 </div>
 ))
 ) : (
-<div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">
-No reps captured yet.
-</div>
+<div className="rounded-[22px] border border-dashed border-white/10 bg-white/[0.03] p-6 text-sm text-white/45">No reps captured yet.</div>
 )}
 </div>
 </div>
@@ -1354,9 +1296,7 @@ No reps captured yet.
 function MetricCard({ label, value }: { label: string; value: string }) {
 return (
 <div className="rounded-[18px] border border-white/10 bg-white/[0.03] p-3">
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
-{label}
-</div>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">{label}</div>
 <div className="mt-2 text-lg font-semibold text-white">{value}</div>
 </div>
 );
