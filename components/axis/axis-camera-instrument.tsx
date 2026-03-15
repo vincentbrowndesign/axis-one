@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import * as posedetection from "@tensorflow-models/pose-detection";
+import * as tf from "@tensorflow/tfjs-core";
 import "@tensorflow/tfjs-backend-webgl";
+import * as posedetection from "@tensorflow-models/pose-detection";
 
 type AxisState =
 | "NO_SUBJECT"
@@ -61,13 +62,14 @@ detail: string;
 };
 
 const KEYPOINT_MIN_SCORE = 0.2;
-const SIGNAL_BUFFER = 96;
+const SIGNAL_BUFFER = 120;
 const ANALYSIS_INTERVAL_MS = 66;
 const VIDEO_W = 1280;
 const VIDEO_H = 720;
+const ENGINE_RETRY_LIMIT = 2;
 
 const STATE_COLOR: Record<AxisState, string> = {
-NO_SUBJECT: "#7E7E7E",
+NO_SUBJECT: "#8C8C8C",
 LOCKING: "#7BD7FF",
 ALIGNED: "#46E17D",
 SHIFT: "#FFD54A",
@@ -212,6 +214,7 @@ const subjectCentered = getSubjectCentered(pose, videoWidth);
 const pointScores = pose.keypoints
 .map((kp) => kp.score ?? 0)
 .filter((score) => score > 0);
+
 const confidence = clamp(mean(pointScores), 0, 1);
 const confidenceSignal = Math.round(confidence * 100);
 const detectionStrength = getDetectionSignal(confidence, frameCoverage, subjectCentered);
@@ -239,10 +242,10 @@ signal: nextSignal,
 }
 
 const baseScale = getBaseScale(pose);
-const headX = nose?.x ?? shoulderMid!.x;
-const chestX = shoulderMid!.x;
-const hipX = hipMid!.x;
-const baseX = ankleMid?.x ?? hipMid!.x;
+const headX = nose?.x ?? shoulderMid.x;
+const chestX = shoulderMid.x;
+const hipX = hipMid.x;
+const baseX = ankleMid?.x ?? hipMid.x;
 
 const verticalStackRaw =
 (Math.abs(headX - chestX) + Math.abs(chestX - hipX)) / Math.max(baseScale, 1);
@@ -260,9 +263,10 @@ const shoulderLevel = clamp(1 - shoulderLevelRaw / 0.32, 0, 1);
 
 const coverageScore = clamp(smoothstep(frameCoverage, 0.08, 0.34), 0, 1);
 const centeredScore = clamp(smoothstep(subjectCentered, 0.35, 0.9), 0, 1);
+
 const lockStrength = Math.round(
 clamp(
-(confidence * 0.42 + coverageScore * 0.32 + centeredScore * 0.26) * 100,
+confidence * 42 + coverageScore * 32 + centeredScore * 26,
 0,
 100,
 ),
@@ -354,7 +358,9 @@ return back ?? cameras[cameras.length - 1] ?? null;
 
 function getPreferredFrontCamera(cameras: CameraOption[]): CameraOption | null {
 if (!cameras.length) return null;
-const front = cameras.find((camera) => /front|user|facetime|webcam|integrated/i.test(camera.label));
+const front = cameras.find((camera) =>
+/front|user|facetime|webcam|integrated/i.test(camera.label),
+);
 return front ?? cameras[0] ?? null;
 }
 
@@ -378,6 +384,7 @@ const drawRecordingRef = useRef(false);
 const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 const mediaChunksRef = useRef<Blob[]>([]);
 const recordStreamRef = useRef<MediaStream | null>(null);
+const engineBootedRef = useRef(false);
 
 const [engineStatus, setEngineStatus] = useState<EngineStatus>("idle");
 const [engineError, setEngineError] = useState<EngineError | null>(null);
@@ -392,6 +399,7 @@ const [isRecording, setIsRecording] = useState(false);
 const [reps, setReps] = useState<RepRecord[]>([]);
 const [lastClipUrl, setLastClipUrl] = useState("");
 const [lastClipMade, setLastClipMade] = useState<boolean | undefined>(undefined);
+const [lockPulse, setLockPulse] = useState(0);
 
 const destroyDetector = useCallback(async () => {
 if (detectorRef.current) {
@@ -405,13 +413,42 @@ setEngineStatus("loading");
 setEngineError(null);
 
 try {
+await tf.ready();
+
+const currentBackend = tf.getBackend();
+if (currentBackend !== "webgl") {
+await tf.setBackend("webgl");
+await tf.ready();
+}
+
 await destroyDetector();
-const detector = await posedetection.createDetector(posedetection.SupportedModels.MoveNet, {
+
+let detector: posedetection.PoseDetector | null = null;
+let lastError: unknown = null;
+
+for (let attempt = 0; attempt <= ENGINE_RETRY_LIMIT; attempt += 1) {
+try {
+detector = await posedetection.createDetector(
+posedetection.SupportedModels.MoveNet,
+{
 modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
 enableSmoothing: true,
-});
+},
+);
+break;
+} catch (error) {
+lastError = error;
+await new Promise((resolve) => setTimeout(resolve, 250));
+}
+}
+
+if (!detector) {
+throw lastError ?? new Error("Detector failed to initialize");
+}
+
 detectorRef.current = detector;
 setEngineStatus("ready");
+engineBootedRef.current = true;
 return detector;
 } catch (error) {
 console.error(error);
@@ -450,9 +487,11 @@ loopRef.current = null;
 
 const stopRecording = useCallback(async () => {
 drawRecordingRef.current = false;
+
 if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
 mediaRecorderRef.current.stop();
 }
+
 setIsRecording(false);
 await safeStopStream(recordStreamRef.current);
 recordStreamRef.current = null;
@@ -463,11 +502,13 @@ stopLoop();
 await stopRecording();
 await safeStopStream(streamRef.current);
 streamRef.current = null;
+
 const video = videoRef.current;
 if (video) {
 video.pause();
 video.srcObject = null;
 }
+
 setEnabled(false);
 }, [stopLoop, stopRecording]);
 
@@ -501,6 +542,8 @@ preferredFacing === "environment"
 chosenDeviceId = preferredCamera?.deviceId ?? "";
 }
 
+let stream: MediaStream;
+try {
 const constraints: MediaStreamConstraints = {
 audio: false,
 video: chosenDeviceId
@@ -517,8 +560,14 @@ height: { ideal: VIDEO_H },
 frameRate: { ideal: 30, max: 30 },
 },
 };
+stream = await navigator.mediaDevices.getUserMedia(constraints);
+} catch {
+stream = await navigator.mediaDevices.getUserMedia({
+audio: false,
+video: { facingMode: preferredFacing },
+});
+}
 
-const stream = await navigator.mediaDevices.getUserMedia(constraints);
 streamRef.current = stream;
 
 const settings = stream.getVideoTracks()[0]?.getSettings();
@@ -533,6 +582,7 @@ setFacingMode(resolvedFacing);
 
 const video = videoRef.current;
 if (!video) throw new Error("Missing video element");
+
 video.srcObject = stream;
 video.playsInline = true;
 video.muted = true;
@@ -540,15 +590,15 @@ await video.play();
 
 await loadCameraOptions();
 setEnabled(true);
-setStartingCamera(false);
 } catch (error) {
 console.error(error);
 setEngineError({
 title: "Camera unavailable",
 detail: "Camera did not start. Check permissions and try again.",
 });
-setStartingCamera(false);
 setEnabled(false);
+} finally {
+setStartingCamera(false);
 }
 },
 [cameraOptions, facingMode, initDetector, loadCameraOptions, stopCamera],
@@ -557,7 +607,10 @@ setEnabled(false);
 const restartEngine = useCallback(async () => {
 const detector = await initDetector();
 if (detector && enabled) {
-await startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined });
+await startCamera({
+preferredFacing: facingMode,
+preferredDeviceId: activeCameraId || undefined,
+});
 }
 }, [activeCameraId, enabled, facingMode, initDetector, startCamera]);
 
@@ -591,9 +644,18 @@ preferredDeviceId: nextCamera?.deviceId,
 } finally {
 setSwitchingCamera(false);
 }
-}, [activeCameraId, cameraOptions, facingMode, loadCameraOptions, startCamera, startingCamera, switchingCamera]);
+}, [
+activeCameraId,
+cameraOptions,
+facingMode,
+loadCameraOptions,
+startCamera,
+startingCamera,
+switchingCamera,
+]);
 
-const drawOverlay = useCallback((pose: posedetection.Pose | null, nextMetrics: PoseMetrics) => {
+const drawOverlay = useCallback(
+(pose: posedetection.Pose | null, nextMetrics: PoseMetrics) => {
 const canvas = overlayRef.current;
 const video = videoRef.current;
 if (!canvas || !video) return;
@@ -609,53 +671,64 @@ const accent = STATE_COLOR[nextMetrics.state];
 const centerX = canvas.width / 2;
 const centerY = canvas.height / 2;
 
-const targetWidth = canvas.width * 0.46;
-const targetHeight = canvas.height * 0.68;
+const lockT = nextMetrics.state === "LOCKING" ? 0.18 + lockPulse * 0.18 : 0;
+const targetWidth = canvas.width * (0.48 - lockT * 0.08);
+const targetHeight = canvas.height * (0.7 - lockT * 0.06);
 const targetX = centerX - targetWidth / 2;
 const targetY = centerY - targetHeight / 2;
 
 ctx.save();
-ctx.strokeStyle = nextMetrics.state === "LOCKING" ? "rgba(123,215,255,0.9)" : "rgba(255,255,255,0.16)";
-ctx.lineWidth = 2;
+ctx.strokeStyle =
+nextMetrics.state === "LOCKING"
+? `rgba(123,215,255,${0.58 + lockPulse * 0.25})`
+: "rgba(255,255,255,0.14)";
+ctx.lineWidth = nextMetrics.state === "LOCKING" ? 3 : 2;
 ctx.setLineDash([10, 10]);
 ctx.strokeRect(targetX, targetY, targetWidth, targetHeight);
 ctx.restore();
 
 if (nextMetrics.state === "NO_SUBJECT" || nextMetrics.state === "LOCKING") {
-const alpha = nextMetrics.state === "LOCKING" ? 0.4 : 0.18;
+const alpha = nextMetrics.state === "LOCKING" ? 0.24 + lockPulse * 0.2 : 0.12;
 ctx.fillStyle = `rgba(255,255,255,${alpha})`;
 ctx.fillRect(centerX - 1, targetY + 10, 2, targetHeight - 20);
 ctx.fillRect(targetX + 10, centerY - 1, targetWidth - 20, 2);
 
-ctx.fillStyle = "rgba(0,0,0,0.5)";
-ctx.fillRect(24, 24, 240, 72);
+ctx.fillStyle = "rgba(0,0,0,0.52)";
+ctx.fillRect(24, 24, 260, 76);
+
 ctx.fillStyle = accent;
 ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
-ctx.fillText("SUBJECT READ", 40, 50);
+ctx.fillText("SUBJECT READ", 40, 52);
 ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
-ctx.fillText(STATE_LABEL[nextMetrics.state], 40, 82);
+ctx.fillText(STATE_LABEL[nextMetrics.state], 40, 84);
 
-ctx.fillStyle = "rgba(255,255,255,0.86)";
-ctx.font = "600 17px Inter, ui-sans-serif, system-ui";
+ctx.fillStyle = "rgba(255,255,255,0.88)";
+ctx.font = "600 18px Inter, ui-sans-serif, system-ui";
 ctx.textAlign = "center";
 ctx.fillText(
 nextMetrics.state === "LOCKING" ? "HOLD POSITION" : "ENTER FRAME",
 centerX,
-targetY + targetHeight / 2,
+targetY + targetHeight / 2 - 8,
 );
+
 ctx.font = "500 14px Inter, ui-sans-serif, system-ui";
-ctx.fillStyle = "rgba(255,255,255,0.58)";
-ctx.fillText("show torso + hips for a live read", centerX, targetY + targetHeight / 2 + 24);
+ctx.fillStyle = "rgba(255,255,255,0.62)";
+ctx.fillText(
+"show shoulders + hips for a live read",
+centerX,
+targetY + targetHeight / 2 + 20,
+);
 ctx.textAlign = "left";
 }
 
-ctx.fillStyle = "rgba(0,0,0,0.48)";
-ctx.fillRect(canvas.width - 166, 24, 142, 72);
+ctx.fillStyle = "rgba(0,0,0,0.5)";
+ctx.fillRect(canvas.width - 170, 24, 146, 76);
+
 ctx.fillStyle = accent;
 ctx.font = "600 14px Inter, ui-sans-serif, system-ui";
-ctx.fillText("STATE", canvas.width - 150, 50);
+ctx.fillText("STATE", canvas.width - 152, 52);
 ctx.font = "700 28px Inter, ui-sans-serif, system-ui";
-ctx.fillText(STATE_LABEL[nextMetrics.state], canvas.width - 150, 82);
+ctx.fillText(STATE_LABEL[nextMetrics.state], canvas.width - 152, 84);
 
 if (!pose) return;
 
@@ -688,7 +761,9 @@ drawCircle(ctx, shoulderMid, 7, accent);
 drawCircle(ctx, hipMid, 7, accent);
 drawCircle(ctx, la, 6, accent);
 drawCircle(ctx, ra, 6, accent);
-}, []);
+},
+[lockPulse],
+);
 
 const startRecording = useCallback(() => {
 const recordCanvas = recordCanvasRef.current;
@@ -703,6 +778,7 @@ recordCanvas.width = video.videoWidth || VIDEO_W;
 recordCanvas.height = video.videoHeight || VIDEO_H;
 
 drawRecordingRef.current = true;
+
 const draw = () => {
 if (!drawRecordingRef.current) return;
 ctx.clearRect(0, 0, recordCanvas.width, recordCanvas.height);
@@ -714,15 +790,20 @@ requestAnimationFrame(draw);
 
 const stream = recordCanvas.captureStream(30);
 recordStreamRef.current = stream;
+
 const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
 ? "video/webm;codecs=vp9"
 : "video/webm";
 
 const recorder = new MediaRecorder(stream, { mimeType });
 mediaChunksRef.current = [];
+
 recorder.ondataavailable = (event) => {
-if (event.data.size > 0) mediaChunksRef.current.push(event.data);
+if (event.data.size > 0) {
+mediaChunksRef.current.push(event.data);
+}
 };
+
 recorder.onstop = async () => {
 const blob = new Blob(mediaChunksRef.current, { type: mimeType });
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
@@ -762,6 +843,7 @@ avgDetection,
 notes: "",
 made: lastClipMade,
 };
+
 nextRep.notes = getRepNote(nextRep);
 
 setReps((prev) => [nextRep, ...prev].slice(0, 8));
@@ -791,13 +873,26 @@ closeRep();
 );
 
 useEffect(() => {
+if (engineBootedRef.current) return;
+
 initDetector();
+
 return () => {
 stopCamera();
 destroyDetector();
 if (lastClipUrl) URL.revokeObjectURL(lastClipUrl);
 };
 }, [destroyDetector, initDetector, lastClipUrl, stopCamera]);
+
+useEffect(() => {
+let frame = 0;
+const interval = window.setInterval(() => {
+frame += 1;
+setLockPulse((Math.sin(frame * 0.24) + 1) / 2);
+}, 60);
+
+return () => window.clearInterval(interval);
+}, []);
 
 useEffect(() => {
 if (!enabled || engineStatus !== "ready") {
@@ -807,20 +902,31 @@ return;
 
 const analyze = async (ts: number) => {
 loopRef.current = requestAnimationFrame(analyze);
+
 const video = videoRef.current;
 const detector = detectorRef.current;
 if (!video || !detector) return;
 if (video.readyState < 2) return;
 if (ts - lastAnalysisRef.current < ANALYSIS_INTERVAL_MS) return;
+
 lastAnalysisRef.current = ts;
 
 try {
-const poses = await detector.estimatePoses(video, { maxPoses: 1, flipHorizontal: facingMode === "user" });
+const poses = await detector.estimatePoses(video, {
+maxPoses: 1,
+flipHorizontal: facingMode === "user",
+});
+
 const pose = poses[0] ?? null;
 
 let nextMetrics = INITIAL_METRICS;
 if (pose) {
-nextMetrics = analyzePose(pose, video.videoWidth, video.videoHeight, signalRef.current);
+nextMetrics = analyzePose(
+pose,
+video.videoWidth,
+video.videoHeight,
+signalRef.current,
+);
 } else {
 const fallbackSignal = Math.max(8, Math.round(metrics.detectionStrength * 0.5));
 nextMetrics = {
@@ -848,7 +954,15 @@ detail: "Pose engine did not initialize. Retry engine or restart camera.",
 
 loopRef.current = requestAnimationFrame(analyze);
 return () => stopLoop();
-}, [drawOverlay, enabled, engineStatus, facingMode, metrics.detectionStrength, stopLoop, trackRep]);
+}, [
+drawOverlay,
+enabled,
+engineStatus,
+facingMode,
+metrics.detectionStrength,
+stopLoop,
+trackRep,
+]);
 
 const signalBars = useMemo(() => {
 return metrics.signal.map((value, index) => {
@@ -858,6 +972,7 @@ else if (value >= 58) color = STATE_COLOR.SHIFT;
 else if (value >= 38) color = STATE_COLOR.DROP;
 else if (value >= 24) color = STATE_COLOR.LOCKING;
 else color = STATE_COLOR.NO_SUBJECT;
+
 return {
 id: `${index}-${value}`,
 value,
@@ -899,11 +1014,16 @@ return (
 <div className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 md:px-6 lg:px-8">
 <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.32em] text-white/40">Axis Instrument</div>
-<h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-5xl">Structure Through Space + Time</h1>
+<div className="text-xs uppercase tracking-[0.32em] text-white/40">
+Axis Instrument
+</div>
+<h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-5xl">
+Structure Through Space + Time
+</h1>
 <p className="mt-2 max-w-3xl text-sm text-white/60 md:text-base">
-Camera-placement tolerant by normalizing to body proportions instead of screen position.
-Live subject read, locking state, structure signal, replay after rep.
+Camera-placement tolerant by normalizing to body proportions instead of
+screen position. Live subject read, locking state, structure signal,
+replay after rep.
 </p>
 </div>
 
@@ -913,12 +1033,17 @@ onClick={() => (enabled ? stopCamera() : startCamera())}
 disabled={startingCamera || engineStatus === "loading"}
 className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-semibold text-black transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
 >
-{enabled ? "Stop Camera" : startingCamera || engineStatus === "loading" ? "Starting" : "Start Camera"}
+{enabled
+? "Stop Camera"
+: startingCamera || engineStatus === "loading"
+? "Starting"
+: "Start Camera"}
 </button>
+
 <button
 onClick={switchCamera}
 disabled={!enabled || switchingCamera || startingCamera}
-className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
 >
 {switchingCamera ? "Switching" : "Switch Camera"}
 </button>
@@ -926,13 +1051,20 @@ className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-
 </div>
 
 {engineError ? (
-<div className="rounded-[24px] border border-red-500/30 bg-red-500/8 px-5 py-4">
+<div className="rounded-[24px] border border-red-500/30 bg-red-500/10 px-5 py-4">
 <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-red-200/70">Instrument Status</div>
-<div className="mt-1 text-xl font-semibold text-red-100">{engineError.title}</div>
-<div className="mt-1 text-sm text-red-100/80">{engineError.detail}</div>
+<div className="text-xs uppercase tracking-[0.28em] text-red-200/70">
+Instrument Status
 </div>
+<div className="mt-1 text-xl font-semibold text-red-100">
+{engineError.title}
+</div>
+<div className="mt-1 text-sm text-red-100/80">
+{engineError.detail}
+</div>
+</div>
+
 <div className="flex gap-3">
 <button
 onClick={restartEngine}
@@ -940,9 +1072,15 @@ className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-se
 >
 Retry Engine
 </button>
+
 <button
-onClick={() => startCamera({ preferredFacing: facingMode, preferredDeviceId: activeCameraId || undefined })}
-className="rounded-2xl border border-white/10 bg-white/8 px-4 py-3 text-sm font-semibold text-white"
+onClick={() =>
+startCamera({
+preferredFacing: facingMode,
+preferredDeviceId: activeCameraId || undefined,
+})
+}
+className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white"
 >
 Restart Camera
 </button>
@@ -951,59 +1089,105 @@ Restart Camera
 </div>
 ) : null}
 
-<div className="grid gap-6 lg:grid-cols-[1.4fr_0.6fr]">
+<div className="grid gap-6 lg:grid-cols-[1.42fr_0.58fr]">
 <div className="overflow-hidden rounded-[30px] border border-white/10 bg-neutral-950 shadow-[0_30px_80px_rgba(0,0,0,0.45)]">
 <div className="relative aspect-video bg-black">
 <video
 ref={videoRef}
-className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`}
+className={`absolute inset-0 h-full w-full object-cover ${
+facingMode === "user" ? "scale-x-[-1]" : ""
+}`}
 autoPlay
 muted
 playsInline
 />
-<canvas ref={overlayRef} className={`absolute inset-0 h-full w-full object-cover ${facingMode === "user" ? "scale-x-[-1]" : ""}`} />
+
+<canvas
+ref={overlayRef}
+className={`absolute inset-0 h-full w-full object-cover ${
+facingMode === "user" ? "scale-x-[-1]" : ""
+}`}
+/>
+
 <canvas ref={recordCanvasRef} className="hidden" />
 
 <div className="absolute left-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 backdrop-blur-md">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">State</div>
-<div className="mt-1 text-2xl font-semibold" style={{ color: STATE_COLOR[metrics.state] }}>
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
+State
+</div>
+<div
+className="mt-1 text-2xl font-semibold"
+style={{ color: STATE_COLOR[metrics.state] }}
+>
 {STATE_LABEL[metrics.state]}
 </div>
 </div>
 
 <div className="absolute right-4 top-4 rounded-2xl border border-white/10 bg-black/55 px-4 py-3 text-right backdrop-blur-md">
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Stability</div>
-<div className="mt-1 text-2xl font-semibold">{metrics.stability}</div>
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
+Stability
+</div>
+<div className="mt-1 text-3xl font-semibold">{metrics.stability}</div>
 </div>
 
 <div className="absolute inset-x-4 bottom-4 rounded-[26px] border border-white/10 bg-black/62 p-4 backdrop-blur-md">
 <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
 <div>
-<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">Structure Signal</div>
-<div className="mt-1 text-sm font-medium text-white/80">{liveReadLabel}</div>
+<div className="text-[10px] uppercase tracking-[0.28em] text-white/45">
+Structure Signal
 </div>
-<div className="flex items-center gap-2 text-xs text-white/60">
-<span className="inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.NO_SUBJECT }} /> no subject
-<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOCKING }} /> locking
-<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.ALIGNED }} /> aligned
-<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.SHIFT }} /> shift
-<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.DROP }} /> drop
-<span className="ml-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: STATE_COLOR.LOST }} /> lost
+<div className="mt-1 text-sm font-medium text-white/80">
+{liveReadLabel}
+</div>
+</div>
+
+<div className="flex flex-wrap items-center gap-2 text-xs text-white/60">
+<span
+className="inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.NO_SUBJECT }}
+/>{" "}
+no subject
+<span
+className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.LOCKING }}
+/>{" "}
+locking
+<span
+className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.ALIGNED }}
+/>{" "}
+aligned
+<span
+className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.SHIFT }}
+/>{" "}
+shift
+<span
+className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.DROP }}
+/>{" "}
+drop
+<span
+className="ml-2 inline-block h-2.5 w-2.5 rounded-full"
+style={{ backgroundColor: STATE_COLOR.LOST }}
+/>{" "}
+lost
 </div>
 </div>
 
 <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-3">
-<div className="flex h-20 items-end gap-[4px] overflow-hidden rounded-[18px] bg-gradient-to-b from-white/[0.03] to-white/[0.01] px-2 py-2">
+<div className="flex h-24 items-end gap-[4px] overflow-hidden rounded-[18px] bg-gradient-to-b from-white/[0.03] to-white/[0.01] px-2 py-2">
 {signalBars.length ? (
 signalBars.map((bar) => (
 <div
 key={bar.id}
-className="min-w-[7px] flex-1 rounded-full transition-all duration-150"
+className="min-w-[8px] flex-1 rounded-full transition-all duration-150"
 style={{
 height: `${clamp(bar.value, 8, 100)}%`,
 backgroundColor: bar.color,
 boxShadow: bar.active ? `0 0 18px ${bar.color}` : "none",
 opacity: bar.active ? 1 : 0.84,
+transform: bar.active ? "scaleY(1.05)" : "scaleY(1)",
 }}
 />
 ))
@@ -1020,15 +1204,26 @@ no live read
 
 <div className="flex flex-col gap-6">
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Signal Integrity</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Signal Integrity
+</div>
+
 <div className="mt-4 rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
 <div className="flex items-center justify-between gap-4">
 <div>
-<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">Subject Read</div>
-<div className="mt-2 text-2xl font-semibold text-white">{metrics.detectionStrength}%</div>
+<div className="text-[10px] uppercase tracking-[0.24em] text-white/40">
+Subject Read
 </div>
-<div className="text-sm capitalize text-white/55">{subjectBarLabel}</div>
+<div className="mt-2 text-3xl font-semibold text-white">
+{metrics.detectionStrength}%
 </div>
+</div>
+
+<div className="text-sm capitalize text-white/55">
+{subjectBarLabel}
+</div>
+</div>
+
 <div className="mt-4 h-4 overflow-hidden rounded-full bg-white/8">
 <div
 className="h-full rounded-full transition-all duration-200"
@@ -1050,18 +1245,33 @@ metrics.detectionStrength < 24
 <div className="mt-4 grid grid-cols-2 gap-3 text-sm">
 <MetricCard label="Confidence" value={`${metrics.confidenceSignal}%`} />
 <MetricCard label="Lock" value={`${metrics.lockStrength}%`} />
-<MetricCard label="Vertical Stack" value={`${Math.round(metrics.verticalStack * 100)}%`} />
-<MetricCard label="Hip Over Base" value={`${Math.round(metrics.hipOverBase * 100)}%`} />
+<MetricCard
+label="Vertical Stack"
+value={`${Math.round(metrics.verticalStack * 100)}%`}
+/>
+<MetricCard
+label="Hip Over Base"
+value={`${Math.round(metrics.hipOverBase * 100)}%`}
+/>
 </div>
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
 <div className="flex items-center justify-between gap-3">
 <div>
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Replay</div>
-<div className="mt-2 text-lg font-semibold">Record live. Validate after.</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Replay
 </div>
-<div className={`rounded-full px-3 py-1 text-xs font-semibold ${isRecording ? "bg-red-500/12 text-red-200" : "bg-white/6 text-white/55"}`}>
+<div className="mt-2 text-lg font-semibold">
+Record live. Validate after.
+</div>
+</div>
+
+<div
+className={`rounded-full px-3 py-1 text-xs font-semibold ${
+isRecording ? "bg-red-500/12 text-red-200" : "bg-white/6 text-white/55"
+}`}
+>
 {isRecording ? "Recording" : "Idle"}
 </div>
 </div>
@@ -1073,9 +1283,10 @@ className="rounded-2xl border border-white/10 bg-white px-4 py-3 text-sm font-se
 >
 Mark Made
 </button>
+
 <button
 onClick={() => markShot(false)}
-className="rounded-2xl border border-white/10 bg-white/6 px-4 py-3 text-sm font-semibold text-white"
+className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white"
 >
 Mark Missed
 </button>
@@ -1093,26 +1304,44 @@ Complete a rep and the most recent clip will appear here.
 </div>
 
 <div className="rounded-[28px] border border-white/10 bg-neutral-950 p-5">
-<div className="text-xs uppercase tracking-[0.28em] text-white/45">Recent Reps</div>
+<div className="text-xs uppercase tracking-[0.28em] text-white/45">
+Recent Reps
+</div>
+
 <div className="mt-4 space-y-3">
 {reps.length ? (
 reps.map((rep) => (
-<div key={rep.id} className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4">
+<div
+key={rep.id}
+className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4"
+>
 <div className="flex items-center justify-between gap-4">
-<div className="text-sm font-semibold" style={{ color: STATE_COLOR[rep.peakState] }}>
+<div
+className="text-sm font-semibold"
+style={{ color: STATE_COLOR[rep.peakState] }}
+>
 {STATE_LABEL[rep.peakState]}
 </div>
+
 <div className="text-xs text-white/45">
 {Math.max(0.2, (rep.endedAt - rep.startedAt) / 1000).toFixed(1)}s
 </div>
 </div>
+
 <div className="mt-2 flex flex-wrap gap-2 text-xs text-white/60">
-<span className="rounded-full border border-white/10 px-2 py-1">stability {rep.avgStability}</span>
-<span className="rounded-full border border-white/10 px-2 py-1">read {rep.avgDetection}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">
+stability {rep.avgStability}
+</span>
+<span className="rounded-full border border-white/10 px-2 py-1">
+read {rep.avgDetection}
+</span>
 {typeof rep.made === "boolean" ? (
-<span className="rounded-full border border-white/10 px-2 py-1">{rep.made ? "made" : "missed"}</span>
+<span className="rounded-full border border-white/10 px-2 py-1">
+{rep.made ? "made" : "missed"}
+</span>
 ) : null}
 </div>
+
 <div className="mt-2 text-sm text-white/70">{rep.notes}</div>
 </div>
 ))
